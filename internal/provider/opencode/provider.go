@@ -36,10 +36,17 @@ import (
 	"strings"
 
 	"free-ai-router/internal/provider"
+	"free-ai-router/internal/provider/modelcat"
 )
 
 // ID — идентификатор провайдера. Он виден в конфигурации, в CLI и как имя
 // маршрута в клиенте, поэтому менять его нельзя без переименования маршрута.
+// liveModelsPath — путь списка моделей сервиса.
+//
+// Тот же эндпоинт, что и у запросов к модели: сервис объявляет состав там же,
+// где обслуживает. Отдельного каталога только для чтения у него нет.
+const liveModelsPath = "/models"
+
 const ID provider.ID = "opencode"
 
 // DefaultBaseURL — адрес inference-эндпоинта провайдера.
@@ -66,8 +73,13 @@ type Config struct {
 	OSName    string
 	// ClientName — значение заголовка x-opencode-client. По умолчанию "cli".
 	ClientName string
-	// Models — переопределение каталога. Пусто означает встроенный список.
-	Models []provider.Model
+	// HTTP — клиент для запросов каталога.
+	//
+	// Отдельно от клиента шлюза, потому что живёт по другим правилам: каталог
+	// запрашивается редко и малым телом, а запрос к модели — потоком и долго.
+	// Общий клиент заставлял бы выбирать предел ожидания, годный для обоих, а
+	// такого предела нет. Пусто означает клиент по умолчанию.
+	HTTP *http.Client
 }
 
 // Provider — реализация provider.Provider для OpenCode Zen.
@@ -80,7 +92,8 @@ type Provider struct {
 	shellName    string
 	osName       string
 	clientName   string
-	models       []provider.Model
+	// catalog — каталог моделей, берущийся у сервиса.
+	catalog *modelcat.Catalog
 }
 
 // New создаёт провайдера из конфигурации.
@@ -111,10 +124,21 @@ func New(cfg Config) (*Provider, error) {
 	if p.clientName == "" {
 		p.clientName = "cli"
 	}
-	p.models = cfg.Models
-	if len(p.models) == 0 {
-		p.models = builtinModels()
+
+	// Каталог запрашивается теми же заголовками, что и запрос к модели:
+	// сервис узнаёт клиента по ним, и без них каталог может быть урезан.
+	//
+	// Состав моделей определяет список сервиса, а свойства дополняет каталог
+	// свойств. Порядок источников здесь и есть приоритет: что сервис называет
+	// живым, то и попадает в каталог.
+	httpClient := cfg.HTTP
+	if httpClient == nil {
+		httpClient = http.DefaultClient
 	}
+	p.catalog = modelcat.New(
+		p.baseURL, liveModelsPath, httpClient, p.applyHeaders,
+		&metaSource{http: httpClient},
+	)
 	return p, nil
 }
 
@@ -122,10 +146,12 @@ func New(cfg Config) (*Provider, error) {
 func (p *Provider) ID() provider.ID { return ID }
 
 // Models реализует provider.Provider.
-func (p *Provider) Models(_ context.Context) ([]provider.Model, error) {
-	out := make([]provider.Model, len(p.models))
-	copy(out, p.models)
-	return out, nil
+//
+// Каталог берётся у сервиса на каждый вызов — с кэшем внутри клиента. Список
+// в коде здесь не хранится намеренно: он разошёлся бы с сервисом, и клиент
+// выбирал бы модели, которых уже нет.
+func (p *Provider) Models(ctx context.Context) ([]provider.Model, error) {
+	return p.catalog.Models(ctx)
 }
 
 // Credential возвращает значение для Authorization.
@@ -469,8 +495,10 @@ func (p *Provider) buildHeaders(ids provider.SessionIDs) http.Header {
 	h := make(http.Header)
 
 	h.Set("content-type", "application/json")
-	h.Set("user-agent", p.userAgent)
-	h.Set("x-opencode-client", p.clientName)
+	// Постоянные заголовки накладываются общей функцией: каталог пользуется
+	// теми же именами, и расхождение сделало бы клиента неузнаваемым для
+	// сервиса на одном из двух путей.
+	p.applyHeaders(h)
 
 	if ids.Session != "" {
 		h.Set("x-opencode-session-id", ids.Session)
@@ -494,6 +522,17 @@ func (p *Provider) buildHeaders(ids provider.SessionIDs) http.Header {
 	}
 
 	return h
+}
+
+// applyHeaders накладывает постоянные заголовки провайдера.
+//
+// Принимает http.Header, а не запрос: заголовки нужны в двух местах — у
+// запроса к модели, вместе с заголовками сессии, и у запроса каталога, где
+// сессии нет вовсе. Копия правил в каталоге разошлась бы с этой, и сервис
+// получал бы два несовпадающих представления об одном клиенте.
+func (p *Provider) applyHeaders(h http.Header) {
+	h.Set("user-agent", p.userAgent)
+	h.Set("x-opencode-client", p.clientName)
 }
 
 // nonEmpty возвращает первый непустой аргумент.

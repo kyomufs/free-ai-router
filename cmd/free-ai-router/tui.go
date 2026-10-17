@@ -76,8 +76,11 @@ func (s *tuiSource) Status() ([]tui.Section, error) {
 			keys = "есть"
 		}
 		providerRows = append(providerRows, tui.Row{
-			Name:  id,
-			Value: fmt.Sprintf("тип %s, моделей %d, ключ %s", pc.Type, len(pc.Models), keys),
+			Name: id,
+			// Число моделей в обзорной строке не показывается: каталог живёт
+			// у сервиса и узнаётся запросом. Запрос на отрисовку списка был бы
+			// сетевым обращением, а обзор настроек обязан отвечать мгновенно.
+			Value: fmt.Sprintf("тип %s, ключ %s", pc.Type, keys),
 		})
 	}
 	if len(providerRows) == 0 {

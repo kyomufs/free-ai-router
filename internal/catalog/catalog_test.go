@@ -1,6 +1,8 @@
 package catalog
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -110,12 +112,15 @@ func TestMissingTypeIsAnError(t *testing.T) {
 // TestOpenAICompatibleProviderBuilds — точка расширения: новый сервис
 // подключается секцией, без кода.
 func TestOpenAICompatibleProviderBuilds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"free-model"}]}`))
+	}))
+	defer srv.Close()
+
 	c := cfgWith(t, "zenmux", config.ProviderConfig{
 		Type:    "openai",
-		BaseURL: "https://zenmux.ai/api/v1",
-		Models: []config.ModelConfig{
-			{ID: "free-model", Context: 128000, MaxOutput: 32000, Reasoning: true},
-		},
+		BaseURL: srv.URL,
 	})
 
 	reg, err := Build(c)
@@ -138,7 +143,7 @@ func TestOpenAICompatibleProviderBuilds(t *testing.T) {
 		t.Fatalf("Models = %+v", models)
 	}
 	if !models[0].Free {
-		t.Fatal("a model declared in the configuration must be marked free")
+		t.Fatal("a model taken from the service must be marked free")
 	}
 }
 
@@ -246,30 +251,72 @@ func TestBuildDoesNotMutateConfiguration(t *testing.T) {
 	}
 }
 
-// TestModelsWithoutIDDropped — модель без идентификатора бессмысленна и
-// отбрасывается, а не превращается в запись с пустым именем.
-func TestModelsWithoutIDDropped(t *testing.T) {
-	c := cfgWith(t, "мой", config.ProviderConfig{
+// TestModelsComeFromTheService — каталог берётся у сервиса, а не из
+// конфигурации. Это главное свойство: список в коде разошёлся бы с сервисом,
+// и клиент выбирал бы то, чего больше нет.
+func TestModelsComeFromTheService(t *testing.T) {
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.Path)
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"живая-модель"},{"id":"вторая"}]}`))
+	}))
+	defer srv.Close()
+
+	c := cfgWith(t, "свой", config.ProviderConfig{
 		Type:    "openai",
-		BaseURL: "https://example.test/v1",
-		Models: []config.ModelConfig{
-			{ID: "хорошая"},
-			{ID: "   "},
-			{},
-		},
+		BaseURL: srv.URL,
 	})
 
 	reg, err := Build(c)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	p, _ := reg.Get("мой")
+	p, _ := reg.Get("свой")
 	models, err := p.Models(t.Context())
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Models: %v", err)
 	}
-	if len(models) != 1 || models[0].ID != "хорошая" {
-		t.Fatalf("Models = %+v, want only the complete entry", models)
+
+	if len(models) != 2 || models[0].ID != "живая-модель" {
+		t.Fatalf("Models = %+v, want the two the service declared", models)
+	}
+	if len(asked) != 1 || asked[0] != "/models" {
+		t.Fatalf("service was asked %v, want GET /models", asked)
+	}
+	// Модель без свойств описывается умолчаниями, а не отвергается: сервис
+	// объявил её раньше, чем каталог свойств о ней узнал.
+	if models[0].Context <= 0 {
+		t.Fatalf("Context = %d, want a usable default", models[0].Context)
+	}
+}
+
+// TestCatalogFailureIsReported — недоступный каталог отдаётся ошибкой, а не
+// пустым списком. Пустой список оператор прочитал бы как «у сервиса нет
+// моделей» и искал бы причину не там.
+func TestCatalogFailureIsReported(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"nope"}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	c := cfgWith(t, "свой", config.ProviderConfig{
+		Type:    "openai",
+		BaseURL: srv.URL,
+	})
+
+	reg, err := Build(c)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	p, _ := reg.Get("свой")
+	models, err := p.Models(t.Context())
+	if err == nil {
+		t.Fatalf("Models = %+v, want an error for an unavailable catalog", models)
+	}
+	// Отказ сервиса должен быть виден в причине: без него разбираться не с чем.
+	if !strings.Contains(err.Error(), "403") {
+		t.Fatalf("error %q does not name the status", err)
 	}
 }
 

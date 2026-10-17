@@ -145,45 +145,6 @@ func cmdStats(args []string) error {
 	return nil
 }
 
-// cmdModels показывает каталог из конфигурации.
-//
-// Читается конфигурация, а не живой демон: состав моделей задаётся секциями
-// провайдеров, и знать его полезно до запуска.
-func cmdModels(args []string) error {
-	cfg, f, err := loadConfig(args)
-	if err != nil || cfg == nil {
-		return err
-	}
-
-	type row struct {
-		Provider string `json:"provider"`
-		ID       string `json:"id"`
-		Context  int    `json:"context"`
-		Output   int    `json:"output"`
-	}
-	var rows []row
-
-	ids := providerNames(cfg)
-	for _, id := range ids {
-		for _, m := range cfg.Providers[id].Models {
-			rows = append(rows, row{Provider: id, ID: m.ID, Context: m.Context, Output: m.MaxOutput})
-		}
-	}
-
-	if f.json {
-		return printJSON(map[string]any{"models": rows})
-	}
-	if len(rows) == 0 {
-		fmt.Println("в конфигурации не объявлено ни одной модели")
-		return nil
-	}
-	fmt.Printf("%-16s %-40s %10s %10s\n", "ПРОВАЙДЕР", "МОДЕЛЬ", "ОКНО", "ОТВЕТ")
-	for _, r := range rows {
-		fmt.Printf("%-16s %-40s %10d %10d\n", r.Provider, r.ID, r.Context, r.Output)
-	}
-	return nil
-}
-
 // cmdKeys показывает ключи провайдеров.
 //
 // Показываются ОТПЕЧАТКИ, а не ключи: нужно понять, сколько их и какие в

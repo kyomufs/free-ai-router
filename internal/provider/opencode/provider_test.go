@@ -2,6 +2,8 @@ package opencode
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -346,52 +348,6 @@ func TestSystemPromptIsPureFunctionOfToolNames(t *testing.T) {
 	}
 }
 
-// TestBuiltinModelsAreUsable — каталог непуст и у каждой модели есть
-// обязательные поля.
-func TestBuiltinModelsAreUsable(t *testing.T) {
-	p := newTestProvider(t)
-	models, err := p.Models(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(models) == 0 {
-		t.Fatal("the builtin catalog is empty")
-	}
-	for _, m := range models {
-		if m.ID == "" {
-			t.Fatalf("a model has no id: %+v", m)
-		}
-		if m.Context <= 0 {
-			t.Fatalf("model %q has a non-positive context window", m.ID)
-		}
-		if !m.Free {
-			t.Fatalf("model %q from the builtin catalog is not marked free", m.ID)
-		}
-	}
-}
-
-// TestModelsAreCopied — вызывающий не должен получать доступ к внутреннему
-// срезу: иначе правка каталога извне сломала бы провайдера.
-func TestModelsAreCopied(t *testing.T) {
-	p := newTestProvider(t)
-	first, err := p.Models(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(first) == 0 {
-		t.Fatal("empty catalog")
-	}
-	first[0].ID = "подменённый"
-
-	second, err := p.Models(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second[0].ID == "подменённый" {
-		t.Fatal("the catalog slice is shared with the caller")
-	}
-}
-
 // --- вспомогательные ---
 
 func toolNamesFromBody(t *testing.T, body []byte) []string {
@@ -443,4 +399,82 @@ func contains(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// --- каталог ---
+
+// newCatalogProvider поднимает провайдера, указывающего на подставной сервис.
+//
+// Сеть в проверках каталога недопустима: она сделала бы результат зависимым
+// от состояния чужого сервиса, а такой тест перестаёт что-либо утверждать —
+// он либо падает без причины, либо проходит независимо от кода.
+func newCatalogProvider(t *testing.T, listBody string, listStatus int) *Provider {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if listStatus != http.StatusOK {
+			http.Error(w, listBody, listStatus)
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(listBody))
+	}))
+	t.Cleanup(srv.Close)
+
+	p, err := New(Config{
+		BaseURL:   srv.URL,
+		OSName:    "Linux",
+		ShellName: "bash",
+		HTTP:      srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return p
+}
+
+// TestCatalogComesFromService — состав каталога определяет сервис. Это
+// главное свойство: список в коде разошёлся бы с сервисом, и клиент выбирал
+// бы модели, которых больше нет.
+func TestCatalogComesFromService(t *testing.T) {
+	p := newCatalogProvider(t, `{"data":[{"id":"живая"},{"id":"вторая"}]}`, http.StatusOK)
+
+	models, err := p.Models(t.Context())
+	if err != nil {
+		t.Fatalf("Models: %v", err)
+	}
+	if len(models) != 2 || models[0].ID != "живая" || models[1].ID != "вторая" {
+		t.Fatalf("Models = %+v, want exactly what the service declared", models)
+	}
+	for _, m := range models {
+		if !m.Free {
+			t.Fatalf("model %q is not marked free", m.ID)
+		}
+		// Свойств у этих моделей нет, и они описываются умолчаниями, а не
+		// отвергаются.
+		if m.Context <= 0 || m.MaxOutput <= 0 {
+			t.Fatalf("model %q came back without usable limits: %+v", m.ID, m)
+		}
+	}
+}
+
+// TestCatalogRefusalIsAnError — недоступный каталог отдаётся ошибкой, а не
+// пустым списком. Пустой список оператор прочитал бы как «у сервиса нет
+// моделей» и искал бы причину не там.
+func TestCatalogRefusalIsAnError(t *testing.T) {
+	p := newCatalogProvider(t, `{"type":"error"}`, http.StatusForbidden)
+
+	if models, err := p.Models(t.Context()); err == nil {
+		t.Fatalf("Models = %+v, want an error", models)
+	}
+}
+
+// TestCatalogEmptyListIsAnError — ответ без моделей означает, что разбор
+// разошёлся с формой ответа, и молчать об этом нельзя.
+func TestCatalogEmptyListIsAnError(t *testing.T) {
+	p := newCatalogProvider(t, `{"data":[]}`, http.StatusOK)
+
+	if models, err := p.Models(t.Context()); err == nil {
+		t.Fatalf("Models = %+v, want an error for an empty answer", models)
+	}
 }

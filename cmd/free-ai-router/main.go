@@ -18,6 +18,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 )
@@ -47,7 +48,7 @@ func run(args []string) error {
 	case "tui":
 		return cmdTUI(rest)
 	case "models":
-		return cmdModels(rest)
+		return cmdModels(context.Background(), rest)
 	case "stats":
 		return cmdStats(rest)
 	case "keys":

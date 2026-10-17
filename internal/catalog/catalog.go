@@ -13,6 +13,7 @@ package catalog
 
 import (
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 
@@ -36,6 +37,12 @@ type Builder func(id string, cfg config.ProviderConfig, defaults Defaults) (prov
 type Defaults struct {
 	// Upstream — адрес по умолчанию для провайдеров, не указавших свой.
 	Upstream string
+	// HTTP — клиент для запросов каталога.
+	//
+	// Один на всех провайдеров: каталоги запрашиваются редко, и заводить
+	// каждому свой пул соединений значило бы держать несколько наборов
+	// простаивающих сокетов ради одного и того же хоста.
+	HTTP *http.Client
 }
 
 // builders — соответствие «тип провайдера → конструктор».
@@ -130,7 +137,7 @@ func buildOpenCode(id string, pc config.ProviderConfig, defaults Defaults) (prov
 		ShellName:    stringSetting(settings, "shell_name"),
 		OSName:       stringSetting(settings, "os_name"),
 		ClientName:   stringSetting(settings, "client_name"),
-		Models:       modelsFromConfig(pc.Models),
+		HTTP:         defaults.HTTP,
 	})
 }
 
@@ -163,7 +170,7 @@ func buildOpenAI(id string, pc config.ProviderConfig, defaults Defaults) (provid
 		ReasoningField: stringSetting(settings, "reasoning_field"),
 		ChatPath:       stringSetting(settings, "chat_path"),
 		ExtraHeaders:   stringMapSetting(settings, "headers"),
-		Models:         modelsFromConfig(pc.Models),
+		HTTP:           defaults.HTTP,
 	})
 }
 
@@ -209,49 +216,6 @@ func stringMapSetting(settings map[string]any, key string) map[string]string {
 		if s, ok := v.(string); ok {
 			out[k] = s
 		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-// modelsFromConfig переводит модели из конфигурации в форму provider.Model.
-func modelsFromConfig(in []config.ModelConfig) []provider.Model {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]provider.Model, 0, len(in))
-	for _, m := range in {
-		if strings.TrimSpace(m.ID) == "" {
-			continue
-		}
-		model := provider.Model{
-			ID:          m.ID,
-			Name:        m.Name,
-			Description: m.Description,
-			Context:     m.Context,
-			MaxOutput:   m.MaxOutput,
-			Vision:      m.Vision,
-			Reasoning:   m.Reasoning,
-			// Имя поля, в которое ответ несёт размышления. У разных моделей
-			// оно разное, и шлюз обязан писать туда, куда ждёт клиент.
-			ReasoningField: m.ReasoningField,
-			// Секция каталога и есть объявление моделей, поэтому всё, что
-			// перечислено здесь, считается бесплатным: платные модели никто
-			// не станет выписывать руками в шлюз для бесплатных.
-			Free: true,
-		}
-		if model.Name == "" {
-			model.Name = m.ID
-		}
-		if m.ReasoningKind != "" {
-			model.ReasoningOptions = []provider.ReasoningOption{{
-				Kind:   provider.ReasoningOptionKind(m.ReasoningKind),
-				Values: m.ReasoningValues,
-			}}
-		}
-		out = append(out, model)
 	}
 	if len(out) == 0 {
 		return nil

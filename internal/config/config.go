@@ -183,8 +183,6 @@ type ProviderConfig struct {
 	// APIKeyEnv — имя переменной с ключом. Предпочтительнее ключа в файле:
 	// конфигурация часто попадает в резервные копии.
 	APIKeyEnv string `json:"api_key_env,omitempty"`
-	// Models — каталог моделей, если провайдер его не знает сам.
-	Models []ModelConfig `json:"models,omitempty"`
 
 	// Settings — всё остальное, что понимает конкретный тип провайдера.
 	Settings map[string]any `json:"settings,omitempty"`
@@ -199,20 +197,6 @@ func (p ProviderConfig) IsEnabled() bool {
 		return true
 	}
 	return *p.Enabled
-}
-
-// ModelConfig — описание модели в конфигурации.
-type ModelConfig struct {
-	ID              string   `json:"id"`
-	Name            string   `json:"name,omitempty"`
-	Description     string   `json:"description,omitempty"`
-	Context         int      `json:"context,omitempty"`
-	MaxOutput       int      `json:"max_output,omitempty"`
-	Vision          bool     `json:"vision,omitempty"`
-	Reasoning       bool     `json:"reasoning,omitempty"`
-	ReasoningField  string   `json:"reasoning_field,omitempty"`
-	ReasoningKind   string   `json:"reasoning_kind,omitempty"`
-	ReasoningValues []string `json:"reasoning_values,omitempty"`
 }
 
 // Режимы работы.

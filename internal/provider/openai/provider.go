@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"free-ai-router/internal/provider"
+	"free-ai-router/internal/provider/modelcat"
 )
 
 // ID по умолчанию. Переопределяется конфигурацией, потому что один и тот же
@@ -71,14 +72,18 @@ type Config struct {
 	// ReasoningField — имя поля, в которое ответ несёт размышления.
 	// По умолчанию "reasoning_content".
 	ReasoningField string
-	// Models — каталог. Пусто означает, что каталог берётся из
-	// конфигурации или запрашивается у сервиса.
-	Models []provider.Model
 	// ExtraHeaders — дополнительные заголовки, которые требует сервис.
 	ExtraHeaders map[string]string
 	// ChatPath — путь дописываемый к BaseURL. По умолчанию
 	// "/chat/completions".
 	ChatPath string
+	// ModelsPath — путь каталога моделей. По умолчанию "/models".
+	//
+	// Настройка, а не константа: у сервисов на этом протоколе каталог живёт
+	// по разным путям, и угадывать его нечем.
+	ModelsPath string
+	// HTTP — клиент для запроса каталога. Пусто означает клиент по умолчанию.
+	HTTP *http.Client
 }
 
 // Provider — реализация provider.Provider на OpenAI-совместимом протоколе.
@@ -92,8 +97,10 @@ type Provider struct {
 	authPrefix     string
 	reasoningField string
 	chatPath       string
+	modelsPath     string
 	extraHeaders   map[string]string
-	models         []provider.Model
+	// catalog — каталог моделей, берущийся у сервиса.
+	catalog *modelcat.Catalog
 }
 
 // New создаёт провайдера из конфигурации.
@@ -112,7 +119,6 @@ func New(cfg Config) (*Provider, error) {
 		reasoningField: cfg.ReasoningField,
 		chatPath:       cfg.ChatPath,
 		extraHeaders:   cfg.ExtraHeaders,
-		models:         cfg.Models,
 	}
 
 	if p.id == "" {
@@ -137,6 +143,20 @@ func New(cfg Config) (*Provider, error) {
 		p.chatPath = "/" + p.chatPath
 	}
 
+	p.modelsPath = cfg.ModelsPath
+	if p.modelsPath == "" {
+		p.modelsPath = "/models"
+	}
+	if !strings.HasPrefix(p.modelsPath, "/") {
+		p.modelsPath = "/" + p.modelsPath
+	}
+
+	httpClient := cfg.HTTP
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	p.catalog = modelcat.New(p.baseURL, p.modelsPath, httpClient, p.applyHeaders)
+
 	return p, nil
 }
 
@@ -144,10 +164,11 @@ func New(cfg Config) (*Provider, error) {
 func (p *Provider) ID() provider.ID { return p.id }
 
 // Models реализует provider.Provider.
-func (p *Provider) Models(_ context.Context) ([]provider.Model, error) {
-	out := make([]provider.Model, len(p.models))
-	copy(out, p.models)
-	return out, nil
+//
+// Каталог запрашивается у сервиса, а не берётся из конфигурации: список в
+// конфигурации разошёлся бы с сервисом, и клиент выбирал бы то, чего нет.
+func (p *Provider) Models(ctx context.Context) ([]provider.Model, error) {
+	return p.catalog.Models(ctx)
 }
 
 // Credential возвращает значение для заголовка учётных данных.
@@ -171,12 +192,7 @@ func (p *Provider) Build(req provider.Request) (provider.Prepared, error) {
 
 	headers := make(http.Header)
 	headers.Set("content-type", "application/json")
-	if p.cfg.UserAgent != "" {
-		headers.Set("user-agent", p.cfg.UserAgent)
-	}
-	for k, v := range p.extraHeaders {
-		headers.Set(k, v)
-	}
+	p.applyHeaders(headers)
 
 	return provider.Prepared{
 		URL:               p.baseURL + p.chatPath,
@@ -348,4 +364,18 @@ func idleTimeoutFor(m provider.Model) time.Duration {
 		return reasoningIdleTimeout
 	}
 	return chatIdleTimeout
+}
+
+// applyHeaders накладывает постоянные заголовки провайдера.
+//
+// Принимает http.Header, а не запрос: заголовки нужны и у запроса к модели, и
+// у запроса каталога. Копия правил в каталоге разошлась бы с этой, и сервис
+// получал бы два несовпадающих представления об одном клиенте.
+func (p *Provider) applyHeaders(h http.Header) {
+	if p.cfg.UserAgent != "" {
+		h.Set("user-agent", p.cfg.UserAgent)
+	}
+	for k, v := range p.extraHeaders {
+		h.Set(k, v)
+	}
 }

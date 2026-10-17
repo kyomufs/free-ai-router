@@ -223,9 +223,6 @@ func TestProvidersParsedFromFile(t *testing.T) {
 				"type": "openai",
 				"base_url": "https://zenmux.ai/api/v1",
 				"api_key_env": "ZENMUX_API_KEY",
-				"models": [
-					{"id": "free-model", "context": 128000, "max_output": 32000}
-				],
 				"settings": {"chat_path": "/chat/completions"}
 			},
 			"выключенный": {
@@ -256,12 +253,8 @@ func TestProvidersParsedFromFile(t *testing.T) {
 	if !zm.IsEnabled() {
 		t.Fatal("zenmux must be enabled by default")
 	}
-	if len(zm.Models) != 1 || zm.Models[0].ID != "free-model" {
-		t.Fatalf("Models = %+v", zm.Models)
-	}
-	if zm.Models[0].Context != 128000 {
-		t.Fatalf("model context = %d", zm.Models[0].Context)
-	}
+	// Каталог моделей в конфигурации не объявляется: он берётся у сервиса.
+	// Проверяется поэтому настройка, а не список моделей.
 	if zm.Settings["chat_path"] != "/chat/completions" {
 		t.Fatalf("Settings = %+v", zm.Settings)
 	}
