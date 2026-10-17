@@ -23,14 +23,20 @@
 // may need other people's programs, and may disagree with the binary about the
 // catalogs. An interface inside the binary has none of those properties.
 //
-// WHY NOT FULL SCREEN. Alt-screen is not entered. The output of the monitor
-// stays in the terminal's scrollback, where it can be selected and copied — a
-// diagnostic that erases itself on exit cannot be quoted in a bug report.
+// WHY FULL SCREEN BY DEFAULT, AND WHY THAT IS NOT A REGRESSION. The monitor
+// takes the alternate screen, so it behaves like an application rather than like
+// a command that prints: the blocks keep their shape, the layout is stable, and
+// the terminal is restored exactly as it was on exit. The earlier behaviour —
+// printing into the scrollback so that the output could be quoted — is still
+// available under --scrollback, because it is the right choice when the monitor
+// is run to capture what it shows rather than to be watched. The two are one
+// flag apart, and the flag is named for the property it controls.
 package tui
 
 import (
 	"time"
 
+	"charm.land/bubbles/v2/help"
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -230,6 +236,20 @@ type Model struct {
 	width, height int
 	// quitting marks that an exit has been requested.
 	quitting bool
+
+	// Scrollback keeps the output in the terminal's scrollback instead of taking
+	// the alternate screen.
+	//
+	// It is set once, from the command line, and it is a property of the RUN
+	// rather than of the reading: an operator watching the monitor wants it
+	// framed in place, while one capturing its output wants the text to survive
+	// the exit. Neither is more correct, so the choice is explicit.
+	Scrollback bool
+
+	// help renders the key hints at the bottom of the frame.
+	help help.Model
+	// keys declares what the monitor binds.
+	keys keyMap
 }
 
 // logLine is a filtered log line with its position in the source list.
@@ -242,13 +262,20 @@ type logLine struct {
 
 // New creates the monitor.
 func New(source DataSource) Model {
+	h := help.New()
+	// More keys than there is room for on one line: pressing ? is what shows the
+	// rest, and the bar says so rather than hiding them silently.
+	h.ShowAll = false
+
 	return Model{
 		Source: source,
 		Follow: true,
 		Wrap:   true,
 		// The dark palette until the terminal says otherwise: that is what a
 		// terminal normally is, and the answer arrives in the first exchange.
-		pal: newPalette(true),
+		pal:  newPalette(true),
+		help: h,
+		keys: newKeyMap(),
 	}
 }
 

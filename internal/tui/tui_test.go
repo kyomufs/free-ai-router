@@ -389,15 +389,31 @@ func TestWrapChangesHowManyLinesTheJournalTakes(t *testing.T) {
 	}
 }
 
-// TestTheMonitorDoesNotTakeTheScreen: the alternate screen is erased on exit, and
-// a diagnostic that erases itself cannot be quoted in a bug report.
-func TestTheMonitorDoesNotTakeTheScreen(t *testing.T) {
-	v := monitor(observation()).View()
-	if v.AltScreen {
-		t.Fatal("the monitor entered the alternate screen")
+// TestTheMonitorTakesTheScreen,AndGivesItBackOnDemand.
+//
+// The monitor runs as an application: it enters the alternate screen and names
+// itself in the window title, because a full-screen frame that does not say
+// which window it is leaves the operator guessing among their terminals. The
+// title is restored on exit along with the screen, so nothing is left behind.
+//
+// The other half of the choice is asserted beside it. Printing into the
+// scrollback is still available and still the right behaviour when the monitor
+// is run to CAPTURE what it shows rather than to watch it, and the two differ by
+// exactly one field. A test that only checked one of them would let the other
+// rot into a mode nobody can select.
+func TestTheMonitorTakesTheScreenAndGivesItBackOnDemand(t *testing.T) {
+	full := monitor(observation()).View()
+	if !full.AltScreen {
+		t.Fatal("the monitor does not enter the alternate screen by default")
 	}
-	if v.WindowTitle != "" {
-		t.Fatalf("the monitor set the window title to %q", v.WindowTitle)
+	if full.WindowTitle == "" {
+		t.Fatal("a full-screen monitor must name itself in the window title")
+	}
+
+	scrolling := monitor(observation())
+	scrolling.Scrollback = true
+	if v := scrolling.View(); v.AltScreen {
+		t.Fatal("--scrollback still entered the alternate screen")
 	}
 }
 

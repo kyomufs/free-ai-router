@@ -17,15 +17,31 @@ import (
 // in the binary's axes, and set through flags or through the host's
 // configuration — so there is no path from this command to a setting, and the
 // help text says as much.
+//
+// ON THE SCREEN. The monitor runs full-screen by default: it takes the alternate
+// screen, so the blocks keep their shape as readings arrive and the terminal is
+// restored on exit. --scrollback is the other behaviour, kept because there is
+// one thing full screen cannot do — leave the frame in the terminal afterwards,
+// where it can be selected, copied and quoted. Neither mode is a fallback for
+// the other; they answer different questions about the same run.
 func cmdTUI(args []string) error {
-	cfg, err := loadConfigSimple(args)
+	scrollback := false
+	rest := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "--scrollback" {
+			scrollback = true
+			continue
+		}
+		rest = append(rest, arg)
+	}
+
+	cfg, err := loadConfigSimple(rest)
 	if err != nil || cfg == nil {
 		return err
 	}
 
 	model := tui.New(newTUISource(cfg))
-	// Full-screen mode is NOT enabled: the monitor coexists with the terminal,
-	// and what it printed stays in the scrollback where it can be copied.
+	model.Scrollback = scrollback
 	program := tea.NewProgram(model)
 	_, err = program.Run()
 	return err

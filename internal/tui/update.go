@@ -147,6 +147,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		return m, m.read()
 
+	case "?":
+		// The full key list is one key away rather than always on screen: a
+		// permanent two-line bar costs a log line on every terminal, and the
+		// line that never fits is exactly the one being looked for.
+		m.help.ShowAll = !m.help.ShowAll
+		return m, nil
+
 	case "w":
 		m.Wrap = !m.Wrap
 		return m, nil

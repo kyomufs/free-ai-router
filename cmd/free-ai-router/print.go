@@ -143,7 +143,7 @@ Usage:
   free-ai-router up       [flags]     start the daemon
   free-ai-router status   [--json]    daemon state
   free-ai-router stop                 stop the daemon
-  free-ai-router tui                  terminal interface
+  free-ai-router tui      [--scrollback] full-screen monitor
   free-ai-router models   [--json]    catalog of models
   free-ai-router stats    [--json]    counters by day
   free-ai-router keys     [--json]    provider keys

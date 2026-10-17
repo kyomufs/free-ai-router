@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -29,9 +30,20 @@ const (
 	logsMin = 5
 	// gutter is the indent one level of the matrix takes.
 	gutter = 2
-	// chrome is the number of lines outside the blocks: the header and the
-	// footer.
-	chrome = 4
+	// chromeBase is the number of lines the frame spends outside the three
+	// blocks before the footer grows.
+	//
+	// The frame is assembled as: header (TWO lines — the title and the axes in
+	// force), the key block, the matrix, the log block, then the footer. The
+	// newlines between them merely end a line a block already claimed, so the
+	// only lines nobody's block accounts for are the two of the header and the
+	// one the collapsed help bar takes.
+	//
+	// THE FOOTER IS NOT CONSTANT, and that is why this is a base rather than the
+	// whole story: `?` expands the bar, and a frame whose chrome was computed for
+	// the collapsed bar then overruns the screen by exactly the lines it gained.
+	// The remainder is taken from the log block instead — see layout.
+	chromeBase = 3
 )
 
 // palette holds the styles in use.
@@ -76,10 +88,18 @@ func (p palette) borderColor() lipgloss.Style {
 // View implements tea.Model.
 //
 // It returns a tea.View rather than a string: in v2 the terminal's own state —
-// the alternate screen, the title, the mouse mode — is part of the view. This
-// monitor deliberately leaves all of them alone, so the view carries content and
-// nothing else, and the output stays in the terminal's scrollback where it can
-// be selected and copied.
+// the alternate screen, the title, the mouse mode — is part of the view, and the
+// monitor now sets two of them.
+//
+// THE ALTERNATE SCREEN IS ENTERED UNLESS Scrollback IS SET. Full screen is what
+// makes the monitor an application rather than a printout: the blocks keep their
+// shape as readings arrive, nothing scrolls the frame out from under the cursor,
+// and the terminal is restored on exit. --scrollback is the other half of the
+// choice, for a run whose output is meant to be read afterwards.
+//
+// The title is set because a full-screen application that does not name itself
+// leaves the operator guessing which window this is. It costs nothing and it is
+// restored on exit along with the screen.
 func (m Model) View() tea.View {
 	if m.quitting {
 		return tea.NewView("")
@@ -107,9 +127,11 @@ func (m Model) View() tea.View {
 	}
 
 	b.WriteString(m.footer(width))
-	b.WriteString("\n")
 
-	return tea.NewView(b.String())
+	view := tea.NewView(b.String())
+	view.AltScreen = !m.Scrollback
+	view.WindowTitle = "free-ai-router · monitor"
+	return view
 }
 
 // header draws the title and the axes in effect.
@@ -150,16 +172,100 @@ func (m Model) axesLine(width int) string {
 }
 
 // footer draws the key hints and the notes.
+//
+// THE HINTS ARE A HELP BAR, NOT A SENTENCE. The previous version printed one long
+// line of "key · key · key", which reads as a wall and loses its pairings the
+// moment the terminal narrows. bubbles/help renders the bindings as `key desc`
+// cells with a separator and drops what does not fit instead of truncating
+// mid-word, which is why it is used here rather than a longer literal.
 func (m Model) footer(width int) string {
-	hint := "tab block · ↑↓ scroll · pgup/pgdn page · home/end · / filter · w wrap · f follow · r refresh · q quit"
 	var b strings.Builder
-	b.WriteString(m.pal.dim.Render(clip(hint, width)))
+	// The help bar is clipped like every other line of the frame.
+	//
+	// bubbles/help drops cells that do not fit, but it curries the last one it
+	// printed and a narrow terminal still ends up with a line over the edge —
+	// which on the alternate screen wraps and pushes a block out of the frame.
+	// Clipping here is what keeps the promise the rest of the frame already
+	// makes: no line is wider than the terminal.
+	b.WriteString(clip(m.help.View(m.keys), width))
 
 	for _, note := range m.obs.Notes {
 		b.WriteString("\n")
 		b.WriteString(m.pal.warn.Render(clip("note: "+note, width)))
 	}
 	return b.String()
+}
+
+// keyMap declares the monitor's bindings for the help bar.
+//
+// The keys are NAMED here and ACTED ON in update.go, and the help bar is what
+// keeps the two honest: a binding added to one and forgotten in the other is
+// visible the moment the bar is read, instead of being discoverable only by
+// pressing keys that do nothing.
+type keyMap struct {
+	Block   key.Binding
+	Scroll  key.Binding
+	Page    key.Binding
+	Ends    key.Binding
+	Filter  key.Binding
+	Wrap    key.Binding
+	Follow  key.Binding
+	Refresh key.Binding
+	Full    key.Binding
+	Quit    key.Binding
+}
+
+// ShortHelp implements help.KeyMap: the line that always fits.
+func (k keyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Block, k.Scroll, k.Filter, k.Wrap, k.Follow, k.Refresh, k.Quit}
+}
+
+// FullHelp implements help.KeyMap: what `?` reveals.
+//
+// Grouped by what the keys touch rather than listed flat — movement, the log
+// block's own switches, then the ways out — because that is the order a reader
+// needs them in when the bar has grown past one line.
+func (k keyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{k.Block, k.Scroll, k.Page, k.Ends},
+		{k.Filter, k.Wrap, k.Follow, k.Refresh},
+		{k.Full, k.Quit},
+	}
+}
+
+// newKeyMap builds the bindings.
+func newKeyMap() keyMap {
+	return keyMap{
+		Block:   key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "block")),
+		Scroll:  key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("↑↓", "scroll")),
+		Page:    key.NewBinding(key.WithKeys("pgup", "pgdown"), key.WithHelp("pgup/pgdn", "page")),
+		Ends:    key.NewBinding(key.WithKeys("home", "end"), key.WithHelp("home/end", "ends")),
+		Filter:  key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
+		Wrap:    key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "wrap")),
+		Follow:  key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "follow")),
+		Refresh: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+		Full:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "more keys")),
+		Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+	}
+}
+
+// chrome returns the number of frame lines the three blocks do not account for.
+//
+// It is measured rather than assumed, because the footer is the one part of the
+// frame whose height changes while the monitor runs: `?` expands the help bar
+// from one line to four, and every other part of the frame has to give those
+// lines back. The measurement uses the real width, since the width decides how
+// many help cells fit and therefore how many lines the bar takes.
+//
+// Measuring is cheap here — the footer is a handful of styled strings — and it
+// is the only way to be right for both states without a second constant to keep
+// in step.
+func (m Model) chrome() int {
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	return (chromeBase - 1) + lipgloss.Height(m.footer(width))
 }
 
 // blockHeight returns the height of a block, borders included.
@@ -181,7 +287,7 @@ func (m Model) blockHeight(b Block) int {
 // cannot be known in advance: the other two are as tall as their content, and a
 // fixed share of the screen would be wrong for almost every deployment.
 func (m Model) layout() (keysH, matrixH, logsH int) {
-	available := m.height - chrome
+	available := m.height - m.chrome()
 	if available < keysMin+matrixMin+logsMin {
 		// Too short for three blocks. The minimums are kept and the terminal
 		// scrolls: a monitor that dropped blocks to fit would hide data without
@@ -212,6 +318,21 @@ func (m Model) layout() (keysH, matrixH, logsH int) {
 		keysH -= take
 		logsH += take
 	}
+
+	// THE LOG BLOCK TAKES THE REST, and this line is what makes the frame exactly
+	// as tall as the terminal.
+	//
+	// The block-height arithmetic is mostly subtraction, but the two capped
+	// blocks round their own sizes down to a maximum, and those reductions are
+	// invisible here: without this, the leftover lines simply vanish and a
+	// full-screen monitor ends with a band of empty terminal under the footer.
+	//
+	// In the scrollback mode this monitor used to run in, that band was harmless
+	// — the next prompt was one line further down. On the alternate screen it is
+	// the whole difference between an application and a printout, so the
+	// remainder is claimed by the block that can always use it.
+	logsH += available - (keysH + matrixH + logsH)
+
 	return keysH, matrixH, logsH
 }
 
