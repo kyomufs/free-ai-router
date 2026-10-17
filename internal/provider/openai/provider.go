@@ -1,16 +1,16 @@
-// Package openai — ШАБЛОН провайдера для любого сервиса, говорящего на
-// OpenAI-совместимом протоколе.
+// Package openai is a provider TEMPLATE for any service speaking the
+// OpenAI-compatible protocol.
 //
-// ЗАЧЕМ ОН НУЖЕН. Большинство сервисов бесплатных моделей (ZenMux, Freebuff и
-// подобные) принимают тот же протокол, что и OpenAI: поле `model`, список
-// `messages`, поток `stream`. Отличаются они адресом, учётными данными и
-// мелочами вроде имени поля для размышлений. Поэтому вместо нового пакета на
-// каждого достаточно настроить этот.
+// WHY IT EXISTS. Most free-model services (ZenMux, Freebuff and the like) accept
+// the same protocol as OpenAI: a `model` field, a `messages` list, a `stream`
+// stream. They differ by address, credentials and small things like the name of
+// the reasoning field. So instead of a new package per service it is enough to
+// configure this one.
 //
-// ЧТО ДЕЛАТЬ, ЧТОБЫ ДОБАВИТЬ СВОЙ СЕРВИС. Порядок такой:
+// WHAT TO DO TO ADD YOUR OWN SERVICE. The procedure is as follows:
 //
-//  1. Если сервис говорит на OpenAI-совместимом протоколе — ничего писать не
-//     нужно. Достаточно записи в конфигурации:
+//  1. If the service speaks the OpenAI-compatible protocol — there is nothing
+//     to write. A configuration entry is enough:
 //
 //     providers:
 //     zenmux:
@@ -18,17 +18,18 @@
 //     base_url: https://zenmux.ai/api/v1
 //     api_key_env: ZENMUX_API_KEY
 //
-//  2. Если сервис требует отправки обязательных инструментов, особого вида
-//     системного промпта или своих заголовков сессии — сначала проверьте,
-//     покрывают ли это поля ниже (gate_tools, system_prompt, headers). Часто
-//     этого достаточно.
+//  2. If the service requires sending mandatory tools, a particular kind of
+//     system prompt or its own session headers — first check whether the fields
+//     below cover it (gate_tools, system_prompt, headers). Often that is
+//     enough.
 //
-//  3. Если всё-таки нужен свой код — скопируйте пакет opencode целиком: в нём
-//     есть всё, что бывает нужно, и он читается как образец. Свой пакет
-//     реализует три метода интерфейса provider.Provider и больше ничего.
+//  3. If you still need your own code — copy the opencode package wholesale: it
+//     has everything that could ever be needed, and it reads as a model example.
+//     Your own package implements the three methods of the provider.Provider
+//     interface and nothing more.
 //
-// ЧЕГО ЗДЕСЬ НЕТ И НЕ ДОЛЖНО БЫТЬ: политики повторов, ротации ключей,
-// транспорта. Это общая механика: internal/capability и internal/transport.
+// WHAT IS NOT HERE AND MUST NOT BE: retry policy, key rotation, transport. That
+// is common machinery: internal/capability and internal/transport.
 package openai
 
 import (
@@ -44,49 +45,51 @@ import (
 	"free-ai-router/internal/provider/modelcat"
 )
 
-// ID по умолчанию. Переопределяется конфигурацией, потому что один и тот же
-// код обслуживает несколько сервисов и должен представляться под их именами.
+// Default ID. Overridden by configuration, because the same code serves several
+// services and must present itself under their names.
 const DefaultID provider.ID = "openai"
 
-// Config — настройки провайдера.
+// Config is the provider settings.
 //
-// Все поля необязательны кроме BaseURL: остальное имеет разумные значения по
-// умолчанию, чтобы минимальная конфигурация состояла из одной строки.
+// All fields are optional except BaseURL: the rest have sensible defaults, so
+// that a minimal configuration consists of a single line.
 type Config struct {
-	// ID — идентификатор провайдера, под которым он виден в шлюзе.
+	// ID is the provider identifier it is visible under in the gateway.
 	ID provider.ID
-	// BaseURL — адрес сервиса без хвоста пути.
+	// BaseURL is the service address without the path tail.
 	BaseURL string
-	// APIKey — учётные данные. Пустая строка означает анонимный доступ.
+	// APIKey is the credentials. An empty string means anonymous access.
 	APIKey string
-	// AnonymousKey — маркер анонимности, если сервис его понимает. По
-	// умолчанию "public".
+	// AnonymousKey is the anonymity marker, if the service understands it. By
+	// default "public".
 	AnonymousKey string
-	// AuthHeader — заголовок для ключа. По умолчанию "Authorization", а
-	// значение — "Bearer <ключ>".
+	// AuthHeader is the header for the key. By default "Authorization", and the
+	// value is "Bearer <key>".
 	AuthHeader string
-	// AuthPrefix — префикс перед ключом. По умолчанию "Bearer ".
+	// AuthPrefix is the prefix before the key. By default "Bearer ".
 	AuthPrefix string
-	// UserAgent — строка User-Agent. Пусто означает не отправлять её.
+	// UserAgent is the User-Agent string. Empty means do not send it.
 	UserAgent string
-	// ReasoningField — имя поля, в которое ответ несёт размышления.
-	// По умолчанию "reasoning_content".
+	// ReasoningField is the name of the field the response carries its thinking
+	// in. By default "reasoning_content".
 	ReasoningField string
-	// ExtraHeaders — дополнительные заголовки, которые требует сервис.
+	// ExtraHeaders are additional headers the service requires.
 	ExtraHeaders map[string]string
-	// ChatPath — путь дописываемый к BaseURL. По умолчанию
+	// ChatPath is the path appended to BaseURL. By default
 	// "/chat/completions".
 	ChatPath string
-	// ModelsPath — путь каталога моделей. По умолчанию "/models".
+	// ModelsPath is the model catalog path. By default "/models".
 	//
-	// Настройка, а не константа: у сервисов на этом протоколе каталог живёт
-	// по разным путям, и угадывать его нечем.
+	// A setting rather than a constant: on services speaking this protocol the
+	// catalog lives at different paths, and there is nothing to guess it from.
 	ModelsPath string
-	// HTTP — клиент для запроса каталога. Пусто означает клиент по умолчанию.
+	// HTTP is the client for the catalog request. Empty means the default
+	// client.
 	HTTP *http.Client
 }
 
-// Provider — реализация provider.Provider на OpenAI-совместимом протоколе.
+// Provider is an implementation of provider.Provider on the OpenAI-compatible
+// protocol.
 type Provider struct {
 	cfg Config
 
@@ -99,11 +102,11 @@ type Provider struct {
 	chatPath       string
 	modelsPath     string
 	extraHeaders   map[string]string
-	// catalog — каталог моделей, берущийся у сервиса.
+	// catalog is the model catalog obtained from the service.
 	catalog *modelcat.Catalog
 }
 
-// New создаёт провайдера из конфигурации.
+// New creates a provider from configuration.
 func New(cfg Config) (*Provider, error) {
 	if strings.TrimSpace(cfg.BaseURL) == "" {
 		return nil, fmt.Errorf("openai: base_url is required")
@@ -160,18 +163,19 @@ func New(cfg Config) (*Provider, error) {
 	return p, nil
 }
 
-// ID реализует provider.Provider.
+// ID implements provider.Provider.
 func (p *Provider) ID() provider.ID { return p.id }
 
-// Models реализует provider.Provider.
+// Models implements provider.Provider.
 //
-// Каталог запрашивается у сервиса, а не берётся из конфигурации: список в
-// конфигурации разошёлся бы с сервисом, и клиент выбирал бы то, чего нет.
+// The catalog is requested from the service rather than taken from
+// configuration: a list in configuration would drift from the service, and the
+// client would select things that do not exist.
 func (p *Provider) Models(ctx context.Context) ([]provider.Model, error) {
 	return p.catalog.Models(ctx)
 }
 
-// Credential возвращает значение для заголовка учётных данных.
+// Credential returns the value for the credentials header.
 func (p *Provider) Credential(key string) string {
 	if key == "" {
 		return p.anonymousKey
@@ -179,7 +183,7 @@ func (p *Provider) Credential(key string) string {
 	return key
 }
 
-// Build реализует provider.Provider.
+// Build implements provider.Provider.
 func (p *Provider) Build(req provider.Request) (provider.Prepared, error) {
 	body, err := p.buildBody(req)
 	if err != nil {
@@ -203,12 +207,11 @@ func (p *Provider) Build(req provider.Request) (provider.Prepared, error) {
 	}, nil
 }
 
-// buildBody собирает тело запроса.
+// buildBody assembles the request body.
 //
-// Никакие обязательные инструменты и системные промпты здесь не
-// подставляются: у обычных сервисов такой проверки нет. Если конкретному
-// сервису они нужны, это признак того, что для него стоит завести свой пакет —
-// как сделано для opencode.
+// No mandatory tools or system prompts are substituted here: ordinary services
+// have no such check. If a particular service needs them, that is a sign it
+// deserves its own package — the way opencode has one.
 func (p *Provider) buildBody(req provider.Request) (map[string]any, error) {
 	messages, err := p.buildMessages(req)
 	if err != nil {
@@ -245,7 +248,7 @@ func (p *Provider) buildBody(req provider.Request) (map[string]any, error) {
 	return body, nil
 }
 
-// buildMessages переводит нейтральные сообщения в форму протокола.
+// buildMessages translates the neutral messages into the protocol form.
 func (p *Provider) buildMessages(req provider.Request) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(req.Messages)+1)
 	if req.System != "" {
@@ -256,7 +259,7 @@ func (p *Provider) buildMessages(req provider.Request) ([]map[string]any, error)
 		switch m.Role {
 		case "assistant":
 			if m.Text == "" && m.Reasoning == "" && len(m.ToolCalls) == 0 {
-				continue // пустой ход ассистента на проводе недопустим
+				continue // an empty assistant turn is not allowed on the wire
 			}
 			msg := map[string]any{"role": "assistant", "content": m.Text}
 			if m.Reasoning != "" {
@@ -303,7 +306,7 @@ func (p *Provider) buildMessages(req provider.Request) ([]map[string]any, error)
 	return out, nil
 }
 
-// buildUserContent собирает содержимое пользовательского сообщения.
+// buildUserContent assembles the content of a user message.
 func (p *Provider) buildUserContent(m provider.Message) (any, error) {
 	if len(m.Images) == 0 {
 		if m.Text == "" {
@@ -330,7 +333,7 @@ func (p *Provider) buildUserContent(m provider.Message) (any, error) {
 	return parts, nil
 }
 
-// toolEntry переводит объявление инструмента в форму протокола.
+// toolEntry translates a tool declaration into the protocol form.
 func toolEntry(t provider.Tool) map[string]any {
 	var schema any
 	if len(t.Schema) > 0 {
@@ -350,15 +353,15 @@ func toolEntry(t provider.Tool) map[string]any {
 	}
 }
 
-// Бюджеты потоков. Совпадают с остальными провайдерами: несовпадение
-// привело бы к тому, что шлюз рвал бы соединение раньше клиента.
+// Stream budgets. They match the other providers: a mismatch would make the
+// gateway break the connection before the client.
 const (
 	firstEventTimeout    = 30 * time.Second
 	chatIdleTimeout      = 120 * time.Second
 	reasoningIdleTimeout = 300 * time.Second
 )
 
-// idleTimeoutFor выбирает бюджет молчания по возможностям модели.
+// idleTimeoutFor chooses the silence budget by the model's capabilities.
 func idleTimeoutFor(m provider.Model) time.Duration {
 	if m.Reasoning {
 		return reasoningIdleTimeout
@@ -366,11 +369,12 @@ func idleTimeoutFor(m provider.Model) time.Duration {
 	return chatIdleTimeout
 }
 
-// applyHeaders накладывает постоянные заголовки провайдера.
+// applyHeaders applies the provider's permanent headers.
 //
-// Принимает http.Header, а не запрос: заголовки нужны и у запроса к модели, и
-// у запроса каталога. Копия правил в каталоге разошлась бы с этой, и сервис
-// получал бы два несовпадающих представления об одном клиенте.
+// It takes an http.Header rather than a request: the headers are needed both on
+// the model request and on the catalog request. A copy of the rules in the
+// catalog would drift from this one, and the service would get two mismatching
+// representations of one client.
 func (p *Provider) applyHeaders(h http.Header) {
 	if p.cfg.UserAgent != "" {
 		h.Set("user-agent", p.cfg.UserAgent)

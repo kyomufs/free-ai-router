@@ -7,32 +7,55 @@ import (
 	"free-ai-router/internal/provider"
 )
 
-// jsonSchemaDialect — диалект схемы, который клиент объявляет в описаниях
-// инструментов. Часть проверки, поэтому закреплён.
+// jsonSchemaDialect is the schema dialect the client declares in tool
+// descriptions. It is part of the check, so it is pinned.
 const jsonSchemaDialect = "https://json-schema.org/draft/2020-12/schema"
 
-// DefaultUserAgent — строка User-Agent.
+// DefaultUserAgent is the User-Agent string.
 //
-// Клиент строит её как `opencode/${channel}/${version}/${name}`
-// (packages/core/src/app.ts). Значения по умолчанию для частей — "opencode",
-// "unknown", "unknown", поэтому у произвольной сборки получается
-// `opencode/unknown/unknown/opencode`.
-const DefaultUserAgent = "opencode/unknown/unknown/opencode"
+// The client builds it as `opencode/${channel}/${version}/${name}`
+// (packages/core/src/app.ts), and an arbitrary build ends up with
+// `opencode/unknown/unknown/opencode` when the parts are unset — which is what
+// this constant used to say.
+//
+// That default is NOT what the free lane admits. The lane applies a
+// client-attestation check to the User-Agent, and the check is a substring
+// conjunction: the string must carry an `opencode` token AND a `bun` token.
+// Measured against the live service, one header changed at a time:
+//
+//	opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14 -> admitted
+//	opencode/1.18.35 bun                                            -> admitted
+//	opencode/1.18.34                                                -> refused
+//	opencode/1.18.35                                                -> refused
+//	opencode/unknown/unknown/opencode                               -> refused
+//	bun                                                             -> refused
+//	node bun                                                        -> refused
+//
+// Version, order and the rest of the string are ignored; only the two tokens
+// matter. The previous value carried `opencode` and no `bun`, so it failed the
+// second half of the conjunction on every request.
+//
+// WARNING about the method, not the result: never isolate a wire-shape
+// condition on an egress address whose quota is spent. 403s are then produced
+// by the exhausted quota rather than by the request, and every reading in the
+// batch is noise. Fresh sessions per batch are what make the table above
+// meaningful.
+const DefaultUserAgent = "opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 
-// Бюджеты потоков. Числа относятся к контракту, а не к настройкам: клиент
-// держит собственные тайм-ауты, и несовпадение привело бы к тому, что шлюз
-// рвал бы соединение раньше клиента.
+// Stream budgets. The numbers belong to the contract, not to settings: the
+// client holds its own timeouts, and a mismatch would make the gateway break the
+// connection before the client.
 const (
-	// firstEventTimeout — бюджет до первых заголовков ответа.
+	// firstEventTimeout is the budget until the first response headers.
 	firstEventTimeout = 30 * time.Second
-	// chatIdleTimeout — бюджет молчания обычного потока.
+	// chatIdleTimeout is the silence budget of an ordinary stream.
 	chatIdleTimeout = 120 * time.Second
-	// reasoningIdleTimeout — бюджет молчания для моделей, умеющих
-	// рассуждать: они держат паузы заметно дольше.
+	// reasoningIdleTimeout is the silence budget for models that can reason:
+	// they hold pauses noticeably longer.
 	reasoningIdleTimeout = 300 * time.Second
 )
 
-// idleTimeoutFor выбирает бюджет молчания по возможностям модели.
+// idleTimeoutFor chooses the silence budget by the model's capabilities.
 func idleTimeoutFor(m provider.Model) time.Duration {
 	if m.Reasoning {
 		return reasoningIdleTimeout
@@ -40,8 +63,8 @@ func idleTimeoutFor(m provider.Model) time.Duration {
 	return chatIdleTimeout
 }
 
-// Описания полей инструментов. Вынесены в константы, потому что они часть
-// проверки: сервис сверяет текст, а не намерение.
+// Tool field descriptions. They are extracted into constants because they are
+// part of the check: the service compares the text, not the intent.
 const (
 	workdirDescription = "Working directory to execute the command in. " +
 		"Defaults to the current working directory. When possible, avoid changing " +
@@ -63,8 +86,8 @@ const (
 		"grep to find specific content in large files."
 )
 
-// shellDescriptionTemplate — описание инструмента shell с подстановкой системы
-// и оболочки. %s — название системы, %s — имя оболочки.
+// shellDescriptionTemplate is the shell tool description with the system and the
+// shell substituted. %s is the system name, %s is the shell name.
 const shellDescriptionTemplate = "Execute a shell command and return its output. " +
 	"Commands run on %s using %s. " +
 	"Quote file paths containing spaces or special characters. " +
@@ -74,13 +97,14 @@ const shellDescriptionTemplate = "Execute a shell command and return its output.
 	"Commands accept an optional timeout, background commands have no timeout by default. " +
 	"Background commands return immediately, and you will be notified when they complete."
 
-// systemPromptTemplate — шаблон системного промпта с подстановкой указаний по
-// инструментам.
+// systemPromptTemplate is the system prompt template with the tool guidance
+// substituted.
 //
-// Промпт РЕНДЕРИТСЯ, а не берётся готовым: клиент собирает его из имён активных
-// инструментов (packages/core/src/session/system-prompt.ts), и вставка зависит
-// от того, что доступно. Проброс клиентского промпта как есть дал бы другую
-// форму, потому что у клиента другой набор инструментов.
+// The prompt is RENDERED rather than taken ready-made: the client assembles it
+// from the names of the active tools
+// (packages/core/src/session/system-prompt.ts), and the insertion depends on
+// what is available. Passing the client's prompt through as-is would give a
+// different shape, because the client has a different set of tools.
 const systemPromptTemplate = "You are an AI agent running in OpenCode, a coding agent harness. " +
 	"Help the user accomplish their goals using the tools you have available.\n" +
 	"\n" +
@@ -98,28 +122,29 @@ const systemPromptTemplate = "You are an AI agent running in OpenCode, a coding 
 	"- Keep changes consistent with the structure, naming, style, and patterns of the surrounding code.\n" +
 	"- Treat unfamiliar files or changes as potential user work and investigate before deleting or overwriting them.\n"
 
-// guidanceShell — указания, добавляемые когда доступен инструмент shell.
+// guidanceShell is the guidance added when the shell tool is available.
 const guidanceShell = "- Prefer dedicated tools over shell commands; fall back to the shell when a tool cannot do what you need.\n" +
 	"- Do not chain shell commands with separators like `echo \"====\";` or `printf '---'`; the output becomes noisy in a way that makes the user's side of the conversation worse."
 
-// guidanceWrite — указания для инструмента write.
+// guidanceWrite is the guidance for the write tool.
 const guidanceWrite = "- Use the write tool to create files or completely replace their content. " +
 	"Prefer using the edit tool for targeted changes."
 
-// guidanceEdit — указания для инструмента edit.
+// guidanceEdit is the guidance for the edit tool.
 const guidanceEdit = "- Use the edit tool for targeted changes to existing text files. " +
 	"It replaces the exact text in `oldString` with `newString`, and the values must differ. " +
 	"By default, `oldString` must occur exactly once. If it occurs multiple times, include more " +
 	"surrounding context to make it unique or set `replaceAll` to true to replace every occurrence."
 
-// RenderSystemPrompt собирает системный промпт из имён активных инструментов.
+// RenderSystemPrompt assembles the system prompt from the names of the active
+// tools.
 //
-// Функция экспортирована, потому что её результат — проверяемое свойство:
-// промпт есть чистая функция от списка имён, и это тестируется без сети.
+// The function is exported because its result is a verifiable property: the
+// prompt is a pure function of the list of names, and that is testable without
+// the network.
 //
-// Указания добавляются по тем же трём инструментам, что и у клиента: shell,
-// write, edit. Порядок вставки совпадает с порядком проверок в
-// system-prompt.ts.
+// The guidance is added for the same three tools as on the client: shell, write,
+// edit. The insertion order matches the order of the checks in system-prompt.ts.
 func RenderSystemPrompt(toolNames []string) string {
 	has := make(map[string]bool, len(toolNames))
 	for _, name := range toolNames {

@@ -2,10 +2,10 @@ package capability
 
 import "testing"
 
-// TestKeyRotationSingleKeyHasNoAlternatives — при одном ключе повтор
-// бессмыслен, и механизм обязан это сообщить.
+// TestKeyRotationSingleKeyHasNoAlternatives — with a single key a retry is
+// pointless, and the mechanism must say so.
 func TestKeyRotationSingleKeyHasNoAlternatives(t *testing.T) {
-	v, err := NewKeyRotation(map[string]any{"keys": []any{"только-один"}})
+	v, err := NewKeyRotation(map[string]any{"keys": []any{"only-one"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -14,13 +14,14 @@ func TestKeyRotationSingleKeyHasNoAlternatives(t *testing.T) {
 	if kr.HasAlternatives() {
 		t.Fatal("a single key must report no alternatives")
 	}
-	if _, ok := kr.Take("только-один"); ok {
+	if _, ok := kr.Take("only-one"); ok {
 		t.Fatal("Take must fail when there is no different key")
 	}
 }
 
-// TestKeyRotationEmptyYieldsNothing — без ключей механизм не выдумывает
-// значение, а честно сообщает, что ключа нет: провайдер тогда пойдёт анонимно.
+// TestKeyRotationEmptyYieldsNothing — with no keys the mechanism does not
+// invent a value but honestly reports that there is no key: the provider then
+// proceeds anonymously.
 func TestKeyRotationEmptyYieldsNothing(t *testing.T) {
 	v, err := NewKeyRotation(nil)
 	if err != nil {
@@ -39,18 +40,18 @@ func TestKeyRotationEmptyYieldsNothing(t *testing.T) {
 	}
 }
 
-// TestKeyRotationEmptyStringsDropped — пустая строка в списке это след лишней
-// запятой, а не ключ: выдавать её значило бы гарантировать отказ.
+// TestKeyRotationEmptyStringsDropped — an empty string in the list is the trace
+// of a stray comma, not a key: handing it out would guarantee a refusal.
 func TestKeyRotationEmptyStringsDropped(t *testing.T) {
-	v, err := NewKeyRotation(map[string]any{"keys": []any{"первый", "", "   ", "второй"}})
+	v, err := NewKeyRotation(map[string]any{"keys": []any{"first", "", "   ", "second"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	kr := v.(*KeyRotation)
 
-	// Пустая строка отбрасывается, а вот строка из пробелов остаётся: это
-	// осмысленное (хоть и бесполезное) значение, и решать за оператора
-	// шлюз не вправе.
+	// The empty string is dropped, but the whitespace-only string stays: it is
+	// a meaningful (if useless) value, and the gateway has no right to decide
+	// that on the operator's behalf.
 	if kr.Len() != 3 {
 		t.Fatalf("Len = %d, want 3 (only the empty string is dropped)", kr.Len())
 	}
@@ -61,8 +62,8 @@ func TestKeyRotationEmptyStringsDropped(t *testing.T) {
 	}
 }
 
-// TestKeyRotationTakeReturnsDifferentKey — смысл механизма: повтор идёт с
-// ДРУГИМ ключом.
+// TestKeyRotationTakeReturnsDifferentKey — the point of the mechanism: the
+// retry proceeds with a DIFFERENT key.
 func TestKeyRotationTakeReturnsDifferentKey(t *testing.T) {
 	v, err := NewKeyRotation(map[string]any{"keys": []any{"a", "b", "c"}})
 	if err != nil {
@@ -81,7 +82,7 @@ func TestKeyRotationTakeReturnsDifferentKey(t *testing.T) {
 	}
 }
 
-// TestKeyRotationNextCycles — Next выдаёт разные ключи подряд.
+// TestKeyRotationNextCycles — Next hands out different keys in succession.
 func TestKeyRotationNextCycles(t *testing.T) {
 	v, err := NewKeyRotation(map[string]any{"keys": []any{"a", "b"}})
 	if err != nil {
@@ -99,7 +100,8 @@ func TestKeyRotationNextCycles(t *testing.T) {
 	}
 }
 
-// TestKeyRotationAddAndRemove — правка списка работает и не сбивает порядок.
+// TestKeyRotationAddAndRemove — editing the list works and does not disturb the
+// order.
 func TestKeyRotationAddAndRemove(t *testing.T) {
 	v, err := NewKeyRotation(map[string]any{"keys": []any{"a"}})
 	if err != nil {
@@ -131,14 +133,14 @@ func TestKeyRotationAddAndRemove(t *testing.T) {
 	}
 }
 
-// TestKeyRotationRejectsWrongConfigShape — неверная форма настроек это ошибка,
-// а не молчаливое игнорирование: иначе опечатка в конфигурации осталась бы
-// незамеченной.
+// TestKeyRotationRejectsWrongConfigShape — a wrong shape of the settings is an
+// error, not a silent ignore: otherwise a typo in the configuration would go
+// unnoticed.
 func TestKeyRotationRejectsWrongConfigShape(t *testing.T) {
 	cases := []map[string]any{
-		{"keys": "строка вместо списка"},
+		{"keys": "a string instead of a list"},
 		{"keys": []any{42}},
-		{"startAt": "не число"},
+		{"startAt": "not a number"},
 	}
 	for _, cfg := range cases {
 		if _, err := NewKeyRotation(cfg); err == nil {
@@ -147,8 +149,8 @@ func TestKeyRotationRejectsWrongConfigShape(t *testing.T) {
 	}
 }
 
-// TestRegistryReturnsRegistered — реестр отдаёт то, что зарегистрировано, и
-// сообщает об отсутствии ясно.
+// TestRegistryReturnsRegistered — the registry hands back what was registered
+// and reports absence clearly.
 func TestRegistryReturnsRegistered(t *testing.T) {
 	r := NewRegistry()
 	r.Register(Info{Kind: KindKeyRotation, Name: "pool", Summary: "s"}, NewKeyRotation)
@@ -161,7 +163,7 @@ func TestRegistryReturnsRegistered(t *testing.T) {
 		t.Fatalf("Build returned %T, want *KeyRotation", built)
 	}
 
-	if _, err := r.Build(KindKeyRotation, "нет-такого", nil); err == nil {
+	if _, err := r.Build(KindKeyRotation, "no-such-name", nil); err == nil {
 		t.Fatal("an unknown name must fail")
 	}
 	if _, err := r.Build(KindRetry, "pool", nil); err == nil {
@@ -169,8 +171,8 @@ func TestRegistryReturnsRegistered(t *testing.T) {
 	}
 }
 
-// TestRegistryNamesAreSorted — порядок стабилен, иначе списки в интерфейсах
-// прыгали бы между перерисовками.
+// TestRegistryNamesAreSorted — the order is stable, otherwise lists in the
+// interfaces would jump between redraws.
 func TestRegistryNamesAreSorted(t *testing.T) {
 	r := NewRegistry()
 	r.Register(Info{Kind: KindKeyRotation, Name: "c"}, NewKeyRotation)

@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// writeConfig кладёт файл во временный каталог и возвращает пути.
+// writeConfig drops the file into a temporary directory and returns the paths.
 func writeConfig(t *testing.T, body string) Paths {
 	t.Helper()
 	dir := t.TempDir()
@@ -25,11 +25,11 @@ func writeConfig(t *testing.T, body string) Paths {
 	}
 }
 
-// TestDefaultsWhenFileAbsent — отсутствующий файл не ошибка: умолчания
-// работают сами.
+// TestDefaultsWhenFileAbsent — a missing file is not an error: the defaults
+// work on their own.
 func TestDefaultsWhenFileAbsent(t *testing.T) {
 	dir := t.TempDir()
-	paths := Paths{ConfigFile: filepath.Join(dir, "нет-файла.json"), StateFile: filepath.Join(dir, "s.json")}
+	paths := Paths{ConfigFile: filepath.Join(dir, "no-file.json"), StateFile: filepath.Join(dir, "s.json")}
 
 	c, err := LoadFrom(paths)
 	if err != nil {
@@ -46,13 +46,13 @@ func TestDefaultsWhenFileAbsent(t *testing.T) {
 	}
 }
 
-// TestFileOverridesDefaults — файл накладывается на умолчания, а источник
-// значения это отражает.
+// TestFileOverridesDefaults — the file is layered over the defaults, and the
+// value's source reflects that.
 func TestFileOverridesDefaults(t *testing.T) {
 	paths := writeConfig(t, `{
 		"mode": "server",
 		"listen": "0.0.0.0:9000",
-		"token": "секрет",
+		"token": "secret",
 		"transport": "direct",
 		"first_event_timeout": "45s"
 	}`)
@@ -70,13 +70,13 @@ func TestFileOverridesDefaults(t *testing.T) {
 	if c.FirstEventTimeout.Val != 45*time.Second {
 		t.Fatalf("FirstEventTimeout = %v, want 45s", c.FirstEventTimeout.Val)
 	}
-	// Поля, которых нет в файле, остаются умолчаниями.
+	// Fields absent from the file stay at their defaults.
 	if c.IdleTimeout.Val != DefaultIdleTimeout || c.IdleTimeout.From != SourceDefault {
 		t.Fatalf("IdleTimeout = %v from %q, want the default", c.IdleTimeout.Val, c.IdleTimeout.From)
 	}
 }
 
-// TestEnvOverridesFile — окружение перекрывает файл.
+// TestEnvOverridesFile — the environment overrides the file.
 func TestEnvOverridesFile(t *testing.T) {
 	paths := writeConfig(t, `{"mode": "local", "listen": "127.0.0.1:8000"}`)
 
@@ -92,13 +92,13 @@ func TestEnvOverridesFile(t *testing.T) {
 	if c.Listen.From != SourceEnv {
 		t.Fatalf("Listen source = %q, want %q", c.Listen.From, SourceEnv)
 	}
-	// Значение из файла, не тронутое окружением, сохраняет свой источник.
+	// A value from the file, untouched by the environment, keeps its source.
 	if c.Mode.From != SourceFile {
 		t.Fatalf("Mode source = %q, want %q", c.Mode.From, SourceFile)
 	}
 }
 
-// TestFlagsOverrideEverything — флаги старше всего остального.
+// TestFlagsOverrideEverything — flags are older than everything else.
 func TestFlagsOverrideEverything(t *testing.T) {
 	paths := writeConfig(t, `{"listen": "127.0.0.1:8000"}`)
 	t.Setenv(EnvListen, "127.0.0.1:9999")
@@ -117,8 +117,8 @@ func TestFlagsOverrideEverything(t *testing.T) {
 	}
 }
 
-// TestEmptyFlagsDoNotOverride — пустой флаг означает «не задан», а не
-// «установить пусто». Иначе запуск без флагов обнулял бы конфигурацию.
+// TestEmptyFlagsDoNotOverride — an empty flag means "not given", not "set it
+// empty". Otherwise a run without flags would zero out the configuration.
 func TestEmptyFlagsDoNotOverride(t *testing.T) {
 	paths := writeConfig(t, `{"listen": "127.0.0.1:8000"}`)
 	c, err := LoadFrom(paths)
@@ -132,8 +132,8 @@ func TestEmptyFlagsDoNotOverride(t *testing.T) {
 	}
 }
 
-// TestServerModeRequiresToken — инвариант между осями. Без него шлюз стал бы
-// открытым релеем.
+// TestServerModeRequiresToken — an invariant between axes. Without it the
+// gateway would become an open relay.
 func TestServerModeRequiresToken(t *testing.T) {
 	paths := writeConfig(t, `{"mode": "server", "listen": "0.0.0.0:8787"}`)
 	if _, err := LoadFrom(paths); err == nil {
@@ -146,7 +146,7 @@ func TestServerModeRequiresToken(t *testing.T) {
 	}
 }
 
-// TestLocalModeNeedsNoToken — в local проверка не действует вовсе.
+// TestLocalModeNeedsNoToken — in local the check is not in force at all.
 func TestLocalModeNeedsNoToken(t *testing.T) {
 	paths := writeConfig(t, `{"mode": "local"}`)
 	c, err := LoadFrom(paths)
@@ -158,19 +158,19 @@ func TestLocalModeNeedsNoToken(t *testing.T) {
 	}
 }
 
-// TestInvalidValuesAreRejected — опечатка обязана всплыть, а не привести к
-// молчаливому откату к умолчаниям.
+// TestInvalidValuesAreRejected — a typo must surface rather than lead to a
+// silent fallback to the defaults.
 func TestInvalidValuesAreRejected(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
 	}{
-		{"битый JSON", `{"mode":`},
-		{"неизвестный режим", `{"mode": "облако"}`},
-		{"пустой listen", `{"listen": "   "}`},
-		{"пустой transport", `{"transport": ""}`},
-		{"неверная длительность", `{"first_event_timeout": "быстро"}`},
-		{"нулевая длительность", `{"idle_timeout": "0s"}`},
+		{"broken JSON", `{"mode":`},
+		{"unknown mode", `{"mode": "cloud"}`},
+		{"empty listen", `{"listen": "   "}`},
+		{"empty transport", `{"transport": ""}`},
+		{"invalid duration", `{"first_event_timeout": "fast"}`},
+		{"zero duration", `{"idle_timeout": "0s"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -182,26 +182,26 @@ func TestInvalidValuesAreRejected(t *testing.T) {
 	}
 }
 
-// TestProviderKeyEnvPreferredOverNothing — при отсутствии ключа в файле
-// берётся переменная, названная рядом.
+// TestProviderKeyEnvPreferredOverNothing — when there is no key in the file,
+// the variable named alongside is taken.
 func TestProviderKeyEnvPreferredOverNothing(t *testing.T) {
-	t.Setenv("TEST_PROVIDER_KEY", "из-переменной")
+	t.Setenv("TEST_PROVIDER_KEY", "from-env")
 
 	p := ProviderConfig{APIKeyEnv: "TEST_PROVIDER_KEY"}
-	if got := p.ProviderKey(); got != "из-переменной" {
+	if got := p.ProviderKey(); got != "from-env" {
 		t.Fatalf("ProviderKey() = %q, want the environment value", got)
 	}
 
-	// Ключ в файле сильнее переменной: оператор, написавший его явно, ждёт
-	// именно его.
-	p.APIKey = "из-файла"
-	if got := p.ProviderKey(); got != "из-файла" {
+	// A key in the file outweighs the variable: an operator who wrote it
+	// explicitly expects exactly that one.
+	p.APIKey = "from-file"
+	if got := p.ProviderKey(); got != "from-file" {
 		t.Fatalf("ProviderKey() = %q, want the file value", got)
 	}
 }
 
-// TestProviderEnabledByDefault — добавленная секция работает, пока её явно не
-// выключили.
+// TestProviderEnabledByDefault — an added section works until it is explicitly
+// switched off.
 func TestProviderEnabledByDefault(t *testing.T) {
 	var p ProviderConfig
 	if !p.IsEnabled() {
@@ -214,8 +214,8 @@ func TestProviderEnabledByDefault(t *testing.T) {
 	}
 }
 
-// TestProvidersParsedFromFile — секция провайдеров читается вместе с моделями
-// и настройками.
+// TestProvidersParsedFromFile — the providers section is read together with the
+// models and settings.
 func TestProvidersParsedFromFile(t *testing.T) {
 	paths := writeConfig(t, `{
 		"providers": {
@@ -225,7 +225,7 @@ func TestProvidersParsedFromFile(t *testing.T) {
 				"api_key_env": "ZENMUX_API_KEY",
 				"settings": {"chat_path": "/chat/completions"}
 			},
-			"выключенный": {
+			"disabled-one": {
 				"type": "openai",
 				"enabled": false
 			}
@@ -253,22 +253,21 @@ func TestProvidersParsedFromFile(t *testing.T) {
 	if !zm.IsEnabled() {
 		t.Fatal("zenmux must be enabled by default")
 	}
-	// Каталог моделей в конфигурации не объявляется: он берётся у сервиса.
-	// Проверяется поэтому настройка, а не список моделей.
+	// The model catalog is not declared in the configuration: it is taken from
+	// the service. So what is checked is the setting, not the list of models.
 	if zm.Settings["chat_path"] != "/chat/completions" {
 		t.Fatalf("Settings = %+v", zm.Settings)
 	}
 
-	if c.Providers["выключенный"].IsEnabled() {
+	if c.Providers["disabled-one"].IsEnabled() {
 		t.Fatal("the disabled provider must report disabled")
 	}
 }
 
-// TestStateOverrideFromEnv — одноразовый прогон не должен трогать рабочее
-// состояние.
+// TestStateOverrideFromEnv — a one-off run must not touch the working state.
 func TestStateOverrideFromEnv(t *testing.T) {
 	paths := writeConfig(t, `{}`)
-	override := filepath.Join(t.TempDir(), "одноразовый.json")
+	override := filepath.Join(t.TempDir(), "one-off.json")
 	t.Setenv(EnvState, override)
 
 	c, err := LoadFrom(paths)
@@ -280,8 +279,9 @@ func TestStateOverrideFromEnv(t *testing.T) {
 	}
 }
 
-// TestDefaultPathsAreXDG — пути следуют XDG, а не платформенным каталогам.
-// Иначе состояние оказалось бы не там, где его ищет остальная система.
+// TestDefaultPathsAreXDG — the paths follow XDG, not platform directories.
+// Otherwise the state would end up where the rest of the system does not look
+// for it.
 func TestDefaultPathsAreXDG(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "cfg"))
@@ -299,7 +299,7 @@ func TestDefaultPathsAreXDG(t *testing.T) {
 	}
 }
 
-// TestEmptyFileIsValid — пустой файл эквивалентен отсутствующему.
+// TestEmptyFileIsValid — an empty file is equivalent to a missing one.
 func TestEmptyFileIsValid(t *testing.T) {
 	paths := writeConfig(t, "   \n")
 	c, err := LoadFrom(paths)

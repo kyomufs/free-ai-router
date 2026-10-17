@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// openTemp создаёт состояние во временном каталоге.
+// openTemp creates the state in a temporary directory.
 func openTemp(t *testing.T) (*Store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "state.json")
@@ -19,14 +19,14 @@ func openTemp(t *testing.T) (*Store, string) {
 	return s, path
 }
 
-// TestCountersAccumulate — счётчики складываются по дням, моделям и ключам.
+// TestCountersAccumulate — the counters add up by day, model and key.
 func TestCountersAccumulate(t *testing.T) {
 	s, _ := openTemp(t)
 
-	s.RecordSuccess("модель-а", "aaaa1111")
-	s.RecordSuccess("модель-а", "aaaa1111")
-	s.RecordSuccess("модель-б", "bbbb2222")
-	s.RecordRefusal("модель-а", "aaaa1111")
+	s.RecordSuccess("model-a", "aaaa1111")
+	s.RecordSuccess("model-a", "aaaa1111")
+	s.RecordSuccess("model-b", "bbbb2222")
+	s.RecordRefusal("model-a", "aaaa1111")
 
 	snap := s.Snapshot()
 	if len(snap.Days) != 1 {
@@ -44,19 +44,19 @@ func TestCountersAccumulate(t *testing.T) {
 	for _, m := range day.ByModel {
 		byModel[m.Model] = m
 	}
-	if got := byModel["модель-а"]; got.OK != 2 || got.Refused != 1 {
-		t.Fatalf("model а = %+v, want ok=2 refused=1", got)
+	if got := byModel["model-a"]; got.OK != 2 || got.Refused != 1 {
+		t.Fatalf("model a = %+v, want ok=2 refused=1", got)
 	}
-	if got := byModel["модель-б"]; got.OK != 1 || got.Refused != 0 {
-		t.Fatalf("model б = %+v, want ok=1 refused=0", got)
+	if got := byModel["model-b"]; got.OK != 1 || got.Refused != 0 {
+		t.Fatalf("model b = %+v, want ok=1 refused=0", got)
 	}
 	if len(day.Keys) != 2 {
 		t.Fatalf("Keys = %d, want 2", len(day.Keys))
 	}
 }
 
-// TestEmptyModelAndKeyDoNotCreateEntries — пустая модель или ключ не должны
-// заводить пустые записи: они бы искажали списки.
+// TestEmptyModelAndKeyDoNotCreateEntries — an empty model or key must not
+// create empty entries: they would distort the lists.
 func TestEmptyModelAndKeyDoNotCreateEntries(t *testing.T) {
 	s, _ := openTemp(t)
 	s.RecordSuccess("", "")
@@ -74,12 +74,11 @@ func TestEmptyModelAndKeyDoNotCreateEntries(t *testing.T) {
 	}
 }
 
-// TestSaveAndReload — состояние переживает перезапуск. Это его единственная
-// задача.
+// TestSaveAndReload — the state survives a restart. That is its only job.
 func TestSaveAndReload(t *testing.T) {
 	s, path := openTemp(t)
-	s.RecordSuccess("модель", "key1")
-	s.RecordRefusal("модель", "key1")
+	s.RecordSuccess("model", "key1")
+	s.RecordRefusal("model", "key1")
 	if err := s.Save(); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -97,12 +96,12 @@ func TestSaveAndReload(t *testing.T) {
 	}
 }
 
-// TestCorruptFileDoesNotBlockStart — повреждённый файл не мешает работе, но и
-// не исчезает молча: причина возвращается.
+// TestCorruptFileDoesNotBlockStart — a corrupt file does not get in the way of
+// work, but it does not vanish silently either: the reason is returned.
 func TestCorruptFileDoesNotBlockStart(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
-	if err := os.WriteFile(path, []byte("{это не json"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("{this is not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -113,19 +112,19 @@ func TestCorruptFileDoesNotBlockStart(t *testing.T) {
 	if s == nil {
 		t.Fatal("a corrupt file must still yield a usable store")
 	}
-	// Магазин обязан быть рабочим.
-	s.RecordSuccess("модель", "k")
+	// The store must be usable.
+	s.RecordSuccess("model", "k")
 	if got := s.Snapshot().Days[0].OK; got != 1 {
 		t.Fatalf("OK = %d, want 1", got)
 	}
 
-	// Запись ЗАМЕНЯЕТ повреждённый файл корректным.
+	// The write REPLACES the corrupt file with a correct one.
 	//
-	// Так и должно быть: счётчики сохраняются на диск при каждой записи, иначе
-	// они не переживут перезапуск — а это их единственная задача. Содержимое
-	// повреждённого файла уже потеряно, восстанавливать нечего, поэтому его
-	// место занимает новое состояние. Прежнее содержимое не исчезает молча:
-	// причина возвращена из Open выше.
+	// This is how it should be: the counters are saved to disk on every write,
+	// otherwise they would not survive a restart — and that is their only job.
+	// The content of the corrupt file is already lost, there is nothing to
+	// restore, so a new state takes its place. The former content does not
+	// vanish silently: the reason was returned from Open above.
 	raw, readErr := os.ReadFile(path)
 	if readErr != nil {
 		t.Fatal(readErr)
@@ -139,9 +138,9 @@ func TestCorruptFileDoesNotBlockStart(t *testing.T) {
 	}
 }
 
-// TestMissingFileIsNotAnError — отсутствующий файл это нормальный старт.
+// TestMissingFileIsNotAnError — a missing file is a normal start.
 func TestMissingFileIsNotAnError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "нет.json")
+	path := filepath.Join(t.TempDir(), "missing.json")
 	s, err := Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -151,7 +150,7 @@ func TestMissingFileIsNotAnError(t *testing.T) {
 	}
 }
 
-// TestEmptyFileIsNotAnError — пустой файл равнозначен отсутствующему.
+// TestEmptyFileIsNotAnError — an empty file is equivalent to a missing one.
 func TestEmptyFileIsNotAnError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
@@ -163,13 +162,13 @@ func TestEmptyFileIsNotAnError(t *testing.T) {
 	}
 }
 
-// TestSaveIsAtomic — запись идёт через временный файл и переименование.
+// TestSaveIsAtomic — the write goes through a temporary file and a rename.
 //
-// Проверяется наблюдаемое следствие: после записи рядом не остаётся мусора, а
-// файл читается как валидный JSON.
+// What is checked is the observable consequence: after the write no litter is
+// left alongside, and the file reads as valid JSON.
 func TestSaveIsAtomic(t *testing.T) {
 	s, path := openTemp(t)
-	s.RecordSuccess("модель", "k")
+	s.RecordSuccess("model", "k")
 	if err := s.Save(); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -197,11 +196,12 @@ func TestSaveIsAtomic(t *testing.T) {
 	}
 }
 
-// TestPruneDropsOldDays — окно хранения ограничено, иначе файл рос бы вечно.
+// TestPruneDropsOldDays — the retention window is bounded, otherwise the file
+// would grow forever.
 func TestPruneDropsOldDays(t *testing.T) {
 	s, _ := openTemp(t)
 
-	// Кладём заведомо старый день и свежий.
+	// Put in a deliberately old day and a fresh one.
 	s.mu.Lock()
 	s.days["2000-01-01"] = &DayCounters{OK: 999}
 	s.days[dayKeyForTest()] = &DayCounters{OK: 1}
@@ -222,11 +222,11 @@ func TestPruneDropsOldDays(t *testing.T) {
 	}
 }
 
-// TestClearEmptiesEverything — очистка обнуляет счётчики и сохраняет пустое
-// состояние.
+// TestClearEmptiesEverything — clearing zeroes the counters and saves an empty
+// state.
 func TestClearEmptiesEverything(t *testing.T) {
 	s, path := openTemp(t)
-	s.RecordSuccess("модель", "k")
+	s.RecordSuccess("model", "k")
 	if err := s.Clear(); err != nil {
 		t.Fatalf("Clear: %v", err)
 	}
@@ -243,11 +243,11 @@ func TestClearEmptiesEverything(t *testing.T) {
 	}
 }
 
-// TestSnapshotIsDeterministicallyOrdered — без явного порядка сравнить два
-// снимка было бы невозможно.
+// TestSnapshotIsDeterministicallyOrdered — without an explicit order comparing
+// two snapshots would be impossible.
 func TestSnapshotIsDeterministicallyOrdered(t *testing.T) {
 	s, _ := openTemp(t)
-	for _, m := range []string{"я", "б", "а"} {
+	for _, m := range []string{"z", "b", "a"} {
 		s.RecordSuccess(m, "k")
 	}
 
@@ -266,7 +266,7 @@ func TestSnapshotIsDeterministicallyOrdered(t *testing.T) {
 				t.Fatalf("model order varies: %q then %q", a[j].Model, b[j].Model)
 			}
 		}
-		// И порядок обязан быть алфавитным.
+		// And the order must be alphabetical.
 		for j := 1; j < len(a); j++ {
 			if a[j-1].Model > a[j].Model {
 				t.Fatalf("models are not sorted: %q before %q", a[j-1].Model, a[j].Model)
@@ -275,8 +275,8 @@ func TestSnapshotIsDeterministicallyOrdered(t *testing.T) {
 	}
 }
 
-// TestDayKeyIsUTC — граница суток берётся по UTC, потому что провайдеры
-// обнуляют суточные лимиты по UTC.
+// TestDayKeyIsUTC — the day boundary is taken by UTC, because providers reset
+// their daily limits by UTC.
 func TestDayKeyIsUTC(t *testing.T) {
 	if got := dayKey(parseTime(t, "2026-10-17T23:30:00Z")); got != "2026-10-17" {
 		t.Fatalf("dayKey(23:30Z) = %q", got)
@@ -286,12 +286,12 @@ func TestDayKeyIsUTC(t *testing.T) {
 	}
 }
 
-// --- вспомогательные ---
+// --- helpers ---
 
-// dayKeyForTest возвращает сегодняшний ключ дня.
+// dayKeyForTest returns today's day key.
 func dayKeyForTest() string { return dayKey(time.Now()) }
 
-// parseTime разбирает момент времени в формате RFC3339.
+// parseTime parses a moment in time in RFC3339 format.
 func parseTime(t *testing.T, s string) time.Time {
 	t.Helper()
 	at, err := time.Parse(time.RFC3339, s)

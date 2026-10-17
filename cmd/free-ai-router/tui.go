@@ -12,11 +12,11 @@ import (
 	"free-ai-router/internal/tui"
 )
 
-// cmdTUI запускает терминальный интерфейс.
+// cmdTUI starts the terminal interface.
 //
-// Интерфейс читает данные тем же кодом, что и команды чтения: у каждого
-// экрана один источник, и расхождение между тем, что показывает интерфейс, и
-// тем, что печатает команда, невозможно по построению.
+// The interface reads data with the same code as the read commands: each screen
+// has one source, and a divergence between what the interface shows and what the
+// command prints is impossible by construction.
 func cmdTUI(args []string) error {
 	cfg, err := loadConfigSimple(args)
 	if err != nil || cfg == nil {
@@ -29,70 +29,71 @@ func cmdTUI(args []string) error {
 	}
 
 	model := tui.New(source)
-	// Полноэкранный режим НЕ включается: интерфейс сосуществует с терминалом,
-	// и вывод остаётся пригодным для копирования.
+	// Full-screen mode is NOT enabled: the interface coexists with the terminal,
+	// and the output stays fit for copying.
 	program := tea.NewProgram(model)
 	_, err = program.Run()
 	return err
 }
 
-// tuiSource отдаёт данные экранам интерфейса.
+// tuiSource serves data to the interface screens.
 type tuiSource struct {
 	cfg       *config.Config
 	providers *provider.Registry
 }
 
-// newTUISource собирает источник данных.
+// newTUISource assembles the data source.
 func newTUISource(cfg *config.Config) (*tuiSource, error) {
 	providers, err := catalog.Build(cfg)
 	if err != nil {
-		// Провайдеры могут быть не настроены — интерфейс всё равно должен
-		// открыться: оператору нужно увидеть конфигурацию и счётчики, чтобы
-		// понять, что именно не настроено.
+		// The providers may not be configured — the interface must still
+		// open: the operator needs to see the configuration and the counters
+		// to understand what exactly is not configured.
 		return &tuiSource{cfg: cfg}, nil
 	}
 	return &tuiSource{cfg: cfg, providers: providers}, nil
 }
 
-// Status реализует tui.DataSource.
+// Status implements tui.DataSource.
 func (s *tuiSource) Status() ([]tui.Section, error) {
 	sections := []tui.Section{
 		{
-			Title: "демон",
+			Title: "daemon",
 			Rows: []tui.Row{
-				{Name: "режим", Value: s.cfg.Mode.Val, Note: "источник: " + string(s.cfg.Mode.From)},
-				{Name: "адрес", Value: s.cfg.Listen.Val},
-				{Name: "транспорт", Value: s.cfg.Transport.Val},
+				{Name: "mode", Value: s.cfg.Mode.Val, Note: "source: " + string(s.cfg.Mode.From)},
+				{Name: "address", Value: s.cfg.Listen.Val},
+				{Name: "transport", Value: s.cfg.Transport.Val},
 			},
 		},
 	}
 
-	// Провайдеры.
+	// Providers.
 	var providerRows []tui.Row
 	for _, id := range providerNames(s.cfg) {
 		pc := s.cfg.Providers[id]
-		keys := "нет"
+		keys := "none"
 		if pc.ProviderKey() != "" {
-			keys = "есть"
+			keys = "present"
 		}
 		providerRows = append(providerRows, tui.Row{
 			Name: id,
-			// Число моделей в обзорной строке не показывается: каталог живёт
-			// у сервиса и узнаётся запросом. Запрос на отрисовку списка был бы
-			// сетевым обращением, а обзор настроек обязан отвечать мгновенно.
-			Value: fmt.Sprintf("тип %s, ключ %s", pc.Type, keys),
+			// The number of models is not shown in the overview row: the
+			// catalog lives with the service and is learned through a request.
+			// A request to render the list would be a network call, and the
+			// settings overview is obliged to answer instantly.
+			Value: fmt.Sprintf("type %s, key %s", pc.Type, keys),
 		})
 	}
 	if len(providerRows) == 0 {
 		providerRows = append(providerRows, tui.Row{
-			Name:  "нет",
-			Value: "провайдеры не настроены",
-			Note:  "добавьте секцию providers в конфигурацию",
+			Name:  "none",
+			Value: "no providers configured",
+			Note:  "add a providers section to the configuration",
 		})
 	}
-	sections = append(sections, tui.Section{Title: "провайдеры", Rows: providerRows})
+	sections = append(sections, tui.Section{Title: "providers", Rows: providerRows})
 
-	// Счётчики.
+	// Counters.
 	st, err := state.Open(s.cfg.Paths.StateFile)
 	if err != nil && st == nil {
 		return sections, err
@@ -101,24 +102,24 @@ func (s *tuiSource) Status() ([]tui.Section, error) {
 		snap := st.Snapshot()
 		var rows []tui.Row
 		if len(snap.Days) == 0 {
-			rows = append(rows, tui.Row{Name: "нет данных", Value: "запросов пока не было"})
+			rows = append(rows, tui.Row{Name: "no data", Value: "there have been no requests yet"})
 		}
 		for i, d := range snap.Days {
 			if i >= 7 {
-				break // показываем неделю: больше не помещается и не нужно
+				break // we show a week: more does not fit and is not needed
 			}
 			rows = append(rows, tui.Row{
 				Name:  d.Day,
-				Value: fmt.Sprintf("успех %d, отказ %d", d.OK, d.Refused),
+				Value: fmt.Sprintf("ok %d, refused %d", d.OK, d.Refused),
 			})
 		}
-		sections = append(sections, tui.Section{Title: "счётчики", Rows: rows})
+		sections = append(sections, tui.Section{Title: "counters", Rows: rows})
 	}
 
 	return sections, nil
 }
 
-// Keys реализует tui.DataSource.
+// Keys implements tui.DataSource.
 func (s *tuiSource) Keys() ([]tui.Section, error) {
 	var rows []tui.Row
 	for _, id := range providerNames(s.cfg) {
@@ -127,8 +128,8 @@ func (s *tuiSource) Keys() ([]tui.Section, error) {
 		if len(keys) == 0 {
 			rows = append(rows, tui.Row{
 				Name:  id,
-				Value: "ключей нет",
-				Note:  "работает анонимно",
+				Value: "no keys",
+				Note:  "works anonymously",
 			})
 			continue
 		}
@@ -141,57 +142,57 @@ func (s *tuiSource) Keys() ([]tui.Section, error) {
 		}
 	}
 	if len(rows) == 0 {
-		rows = append(rows, tui.Row{Name: "нет", Value: "провайдеры не настроены"})
+		rows = append(rows, tui.Row{Name: "none", Value: "no providers configured"})
 	}
 	return []tui.Section{
 		{
-			Title: "ключи провайдеров",
+			Title: "provider keys",
 			Rows:  rows,
 		},
 		{
-			Title: "пояснение",
+			Title: "explanation",
 			Rows: []tui.Row{
-				{Name: "", Value: "показаны отпечатки, а не ключи"},
-				{Name: "", Value: "отпечаток достаточен, чтобы различить ключи"},
+				{Name: "", Value: "fingerprints are shown, not keys"},
+				{Name: "", Value: "a fingerprint is enough to tell keys apart"},
 			},
 		},
 	}, nil
 }
 
-// Options реализует tui.DataSource.
+// Options implements tui.DataSource.
 //
-// Строка про ротацию ключей показывается всегда, но при отсутствии ключей
-// несёт пояснение, а не значение: настройка, которая ничего не переключает,
-// читается как сломанная.
+// The row about key rotation is always shown, but when there are no keys it
+// carries an explanation rather than a value: a setting that toggles nothing
+// reads as broken.
 func (s *tuiSource) Options() ([]tui.Section, error) {
 	var rows []tui.Row
 	for _, id := range providerNames(s.cfg) {
 		pc := s.cfg.Providers[id]
 		if len(keysFromConfig(pc)) == 0 {
 			rows = append(rows, tui.Row{
-				Name:  "ротация ключей: " + id,
-				Value: "недоступна",
-				Note:  "у провайдера нет ключей",
+				Name:  "key rotation: " + id,
+				Value: "unavailable",
+				Note:  "the provider has no keys",
 			})
 			continue
 		}
 		rows = append(rows, tui.Row{
-			Name:  "ротация ключей: " + id,
-			Value: "включена",
-			Note:  "смена ключа при отказе",
+			Name:  "key rotation: " + id,
+			Value: "enabled",
+			Note:  "key change on refusal",
 		})
 	}
 	if len(rows) == 0 {
-		rows = append(rows, tui.Row{Name: "нет", Value: "провайдеры не настроены"})
+		rows = append(rows, tui.Row{Name: "none", Value: "no providers configured"})
 	}
 
 	return []tui.Section{
-		{Title: "настройки", Rows: rows},
+		{Title: "settings", Rows: rows},
 		{
-			Title: "что меняется",
+			Title: "what changes",
 			Rows: []tui.Row{
-				{Name: "", Value: "состав ключей и их включённость"},
-				{Name: "", Value: "остальное — из конфигурации, при запуске"},
+				{Name: "", Value: "the set of keys and their enabled state"},
+				{Name: "", Value: "the rest — from the configuration, at startup"},
 			},
 		},
 	}, nil

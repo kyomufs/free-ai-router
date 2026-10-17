@@ -5,106 +5,136 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"free-ai-router/internal/provider"
 	"free-ai-router/internal/provider/modelcat"
 )
 
-// Источник свойств моделей.
+// A source of model properties.
 //
-// ЗАЧЕМ ОТДЕЛЬНО ОТ СПИСКА. Список моделей у сервиса отвечает на вопрос «что
-// доступно сейчас», но сообщает про модель только идентификатор. Свойства —
-// размер окна, приём изображений, умение думать, поле для размышлений в
-// ответе — лежат в другом месте, и оттуда их берут клиенты сервиса.
+// WHY SEPARATE FROM THE LIST. The service's model list answers the question "what
+// is available right now", but it reports only an identifier about a model. The
+// properties — window size, image acceptance, the ability to think, the field
+// for thinking in the response — live elsewhere, and that is where the service's
+// clients take them from.
 //
-// ПОЧЕМУ ЭТИ ДВА ИСТОЧНИКА НЕ СЛИТЬ. Список точнее: он не может пережить
-// вывод модели из оборота. Каталог свойств полнее, но отстаёт: в нынешнем его
-// состоянии бесплатных моделей объявлено заметно больше, чем сервис реально
-// обслуживает. Слить их в один значило бы либо вернуть в селектор мёртвые
-// модели, либо потерять точные пределы у живых. Поэтому состав определяет
-// список, а свойства лишь дополняют названное им.
+// WHY THESE TWO SOURCES ARE NOT MERGED. The list is more precise: it cannot
+// outlive a model's retirement. The property catalog is fuller but lags behind:
+// in its current state it declares noticeably more free models than the service
+// actually serves. Merging them into one would either put dead models back into
+// the selector or lose the exact limits of live ones. So the composition is
+// determined by the list, and the properties merely augment what it names.
 
 const (
-	// metaURL — каталог свойств.
+	// metaURL is the property catalog.
 	//
-	// Адрес выведен из исходников клиента: это тот же снапшот каталога
-	// models.dev, на который клиент опирается при отображении моделей и их
-	// возможностей.
+	// The address is derived from the client's sources: it is the same snapshot
+	// of the models.dev catalog that the client relies on when displaying models
+	// and their capabilities.
 	metaURL = "https://models.opencode.ai/api.json"
 
-	// metaTimeout — предел ожидания каталога свойств.
+	// metaTimeout is the property catalog wait limit.
 	//
-	// Заметно больше, чем у списка: этот каталог описывает все сервисы сразу и
-	// потому велик. Список ждёт на пути живого запроса, а свойства — нет: без
-	// них модель просто опишется умолчаниями, и задерживать из-за них запрос
-	// незачем.
+	// Noticeably larger than the list's: this catalog describes all services at
+	// once and is therefore large. The list is awaited on the path of a live
+	// request, the properties are not: without them the model is simply
+	// described with defaults, and there is no reason to delay a request because
+	// of them.
 	metaTimeout = 30 * time.Second
 
-	// maxMetaBytes — предел чтения тела.
+	// maxMetaBytes is the read limit for the body.
 	//
-	// Каталог свойств сейчас около шести мегабайт и растёт вместе с числом
-	// сервисов. Предел взят с запасом, но конечный: неожиданно большой ответ
-	// не должен съесть память.
+	// The property catalog is currently about six megabytes and grows with the
+	// number of services. The limit is taken with a margin, but a finite one:
+	// an unexpectedly large response must not eat memory.
 	maxMetaBytes = 64 << 20
 )
 
-// metaSource читает свойства моделей из каталога сервиса.
+// metaSource reads model properties from the service's catalog.
 type metaSource struct {
-	// http — клиент. Общий с остальным шлюзом.
+	// http is the client. Shared with the rest of the gateway.
 	http *http.Client
+	// url overrides the catalog address. Empty means the published one.
+	//
+	// A field rather than a constant read at the call site so that a check can
+	// point the source at a local answer. Without it the source could only be
+	// exercised against the real service, which makes the test depend on the
+	// network and on a catalog the test cannot control.
+	url string
 }
 
-// Name реализует modelcat.MetaSource.
-func (s *metaSource) Name() string { return "каталог свойств opencode" }
+// catalogURL reports the address to read the properties from.
+func (s *metaSource) catalogURL() string {
+	if s.url != "" {
+		return s.url
+	}
+	return metaURL
+}
 
-// metaModel — свойства одной модели.
+// Name implements modelcat.MetaSource.
+func (s *metaSource) Name() string { return "opencode property catalog" }
+
+// metaModel is the properties of one model.
 //
-// Разбирается только то, что использует шлюз: пределы, размышления, приём
-// изображений и поле для размышлений в ответе. Остальные поля каталога шлюзу
-// не нужны, и разбирать их значило бы тащить в код чужую схему целиком.
+// Only what the gateway uses is parsed: limits, reasoning, image acceptance and
+// the field for thinking in the response. The remaining catalog fields are not
+// needed by the gateway, and parsing them would mean dragging someone else's
+// whole schema into the code.
 type metaModel struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
-	// Attachment — принимает ли модель вложения (изображения).
+	// Attachment reports whether the model accepts attachments (images).
 	Attachment bool `json:"attachment"`
-	// Reasoning — умеет ли модель думать.
+	// Reasoning reports whether the model can think.
 	Reasoning bool `json:"reasoning"`
-	// ReasoningOptions — лестница управления усилием.
+	// ReasoningOptions is the effort control ladder.
 	ReasoningOptions []struct {
 		Type   string   `json:"type"`
 		Values []string `json:"values"`
 		Max    int      `json:"max"`
 	} `json:"reasoning_options"`
-	// Interleaved — куда ответ несёт размышления.
+	// Interleaved is where the response carries its thinking.
 	//
-	// Поле объявлено как raw: в каталоге оно встречается в трёх видах —
-	// объектом с именем поля, отсутствующим и ЛОЖЬЮ. Строгий разбор на
-	// ложь падает, и одно такое значение роняло бы весь каталог свойств,
-	// оставляя все модели без пределов. Разбор поэтому терпимый.
+	// The field is declared as raw: in the catalog it occurs in three forms —
+	// as an object with the field name, as absent, and as FALSE. Strict parsing
+	// fails on false, and a single such value would bring down the whole
+	// property catalog, leaving every model without limits. The parsing is
+	// therefore tolerant.
 	Interleaved json.RawMessage `json:"interleaved"`
-	// Modalities — модальности входа и выхода.
+	// Modalities are the input and output modalities.
 	Modalities struct {
 		Input []string `json:"input"`
 	} `json:"modalities"`
-	// Limit — пределы в токенах.
+	// Limit is the limits in tokens.
 	Limit struct {
 		Context int `json:"context"`
 		Output  int `json:"output"`
 	} `json:"limit"`
+	// Cost is the model's price per token.
+	//
+	// It is read not for calculations but for SELECTION: the gateway exists for
+	// free models, and price is the only attribute that distinguishes them in
+	// the catalog. Without it paid ones end up in the list, which is exactly
+	// what happened while the field was not parsed.
+	Cost struct {
+		Input  float64 `json:"input"`
+		Output float64 `json:"output"`
+	} `json:"cost"`
 }
 
-// Meta реализует modelcat.MetaSource.
+// Meta implements modelcat.MetaSource.
 //
-// Ошибка означает, что свойства останутся неизвестными: каталог опишет модели
-// умолчаниями. Это не отказ сервиса, а отсутствие уточнения, поэтому ошибка не
-// прерывает сбор каталога.
+// An error means the properties stay unknown: the catalog will describe the
+// models with defaults. This is not a service refusal but a missing refinement,
+// so the error does not interrupt the catalog assembly.
 func (s *metaSource) Meta(ctx context.Context) (map[string]provider.Model, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, metaTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, metaURL, nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, s.catalogURL(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -116,11 +146,12 @@ func (s *metaSource) Meta(ctx context.Context) (map[string]provider.Model, error
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, &modelcat.Error{Op: "каталог свойств", Status: resp.StatusCode, Reason: "сервис не отдал каталог"}
+		return nil, &modelcat.Error{Op: "property catalog", Status: resp.StatusCode, Reason: "the service did not serve the catalog"}
 	}
 
-	// Каталог описывает все сервисы сразу. Читается целиком: разбирать его
-	// потоково ради одной секции значило бы повторить разбор руками.
+	// The catalog describes all services at once. It is read in full: parsing it
+	// streamingly for the sake of one section would mean reimplementing the
+	// parsing by hand.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxMetaBytes))
 	if err != nil {
 		return nil, err
@@ -135,7 +166,7 @@ func (s *metaSource) Meta(ctx context.Context) (map[string]provider.Model, error
 
 	section, ok := catalog[string(ID)]
 	if !ok {
-		return nil, &modelcat.Error{Op: "каталог свойств", Reason: "секция сервиса отсутствует"}
+		return nil, &modelcat.Error{Op: "property catalog", Reason: "the service section is missing"}
 	}
 
 	out := make(map[string]provider.Model, len(section.Models))
@@ -145,7 +176,7 @@ func (s *metaSource) Meta(ctx context.Context) (map[string]provider.Model, error
 	return out, nil
 }
 
-// toModel переводит свойства в форму шлюза.
+// toModel translates the properties into the gateway form.
 func (m metaModel) toModel(id string) provider.Model {
 	out := provider.Model{ID: id}
 
@@ -162,14 +193,14 @@ func (m metaModel) toModel(id string) provider.Model {
 		out.MaxOutput = m.Limit.Output
 	}
 
-	// Приём изображений объявлен двумя способами: отдельным признаком и
-	// списком модальностей входа. Достаточно любого — каталог заполняет то
-	// одно, то другое.
+	// Image acceptance is declared in two ways: by a separate attribute and by
+	// the list of input modalities. Either is enough — the catalog fills in
+	// sometimes one, sometimes the other.
 	out.Vision = m.Attachment || containsString(m.Modalities.Input, "image")
 
-	// Поле размышлений берётся из свойств: у разных моделей ответ несёт их в
-	// разных местах, и запись не туда сломала бы продолжение по своей же
-	// прошлой мысли.
+	// The reasoning field is taken from the properties: for different models the
+	// response carries it in different places, and writing it to the wrong one
+	// would break continuing from the model's own earlier thought.
 	if field := interleavedField(m.Interleaved); field != "" {
 		out.ReasoningField = field
 	}
@@ -179,15 +210,52 @@ func (m metaModel) toModel(id string) provider.Model {
 		out.ReasoningOptions = reasoningOptions(m.ReasoningOptions)
 	}
 
+	// Both prices are zero exactly when the service charges nothing. A model
+	// is marked free only then, so that the flag means what it says and the
+	// catalog filter can rely on it.
+	out.Free = m.Cost.Input == 0 && m.Cost.Output == 0
+
 	return out
 }
 
-// reasoningOptions переводит лестницу усилий в форму шлюза.
+// isFree admits only models the service charges nothing for.
 //
-// Формы три: переключатель, лестница значений и бюджет в токенах. Каталог
-// может объявить несколько сразу, и все они сохраняются: клиент выбирает ту,
-// которую понимает. Пустой список — норма: часть моделей объявляет умение
-// думать, не описывая, как именно им управлять.
+// The gateway exists to route free models, so a paid one is not a less
+// attractive choice — it is a request that bills the operator. Filtering here
+// rather than in the client keeps a paid model out of every listing, and the
+// listing is what the client picks from.
+//
+// The live list cannot answer this: it names what the service serves and says
+// nothing about price. So the decision comes from the metadata source, which
+// is why eligibility is applied after the merge.
+//
+// The name is the fallback for models the metadata source has not caught up
+// with, and the two cases are genuinely different. When the source described
+// the model, its price is the verdict and the name is not consulted: the
+// service charges, so what it charges decides. When the source has not
+// described it, the price is unknown rather than zero, and the only evidence
+// left is the name the service gave it.
+//
+// That fallback rests on an observation rather than on a hope: across every
+// model appearing in both sources, the `-free` suffix and a zero price agree
+// exactly, with no model advertised as free by name and billed in fact. So a
+// name is enough to ADMIT an unproven model, while a described paid model is
+// still rejected. Being wrong in the admitting direction costs one refusal the
+// operator can see; being wrong in the rejecting direction silently hides a
+// model the service is serving.
+func isFree(m provider.Model, described bool) bool {
+	if described {
+		return m.Free
+	}
+	return strings.HasSuffix(m.ID, "-free")
+}
+
+// reasoningOptions translates the effort ladder into the gateway form.
+//
+// There are three forms: a toggle, a ladder of values and a budget in tokens.
+// The catalog may declare several at once, and all of them are preserved: the
+// client picks the one it understands. An empty list is normal: some models
+// declare the ability to think without describing how exactly to control it.
 func reasoningOptions(in []struct {
 	Type   string   `json:"type"`
 	Values []string `json:"values"`
@@ -215,7 +283,7 @@ func reasoningOptions(in []struct {
 	return out
 }
 
-// containsString сообщает, есть ли значение в списке.
+// containsString reports whether a value is in the list.
 func containsString(list []string, want string) bool {
 	for _, v := range list {
 		if v == want {
@@ -225,12 +293,13 @@ func containsString(list []string, want string) bool {
 	return false
 }
 
-// interleavedField достаёт имя поля размышлений.
+// interleavedField extracts the name of the reasoning field.
 //
-// Поле в каталоге встречается в трёх видах: объектом с именем, отсутствующим
-// и ложью. Ложь означает «размышления не чередуются» — свойства нет, и
-// возвращается пустая строка. Разбор молчаливый намеренно: непонятное
-// значение здесь не повод терять остальные свойства модели.
+// The field occurs in the catalog in three forms: as an object with a name, as
+// absent and as false. False means "thinking is not interleaved" — there is no
+// property, and an empty string is returned. The parsing is deliberately silent:
+// an incomprehensible value here is no reason to lose the model's other
+// properties.
 func interleavedField(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""

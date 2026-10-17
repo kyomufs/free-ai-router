@@ -1,14 +1,16 @@
-// Package catalog собирает провайдеров из конфигурации в рабочий реестр.
+// Package catalog assembles the providers from the configuration into a working
+// registry.
 //
-// ЗАЧЕМ ОТДЕЛЬНЫЙ ПАКЕТ. provider описывает, ЧТО такое провайдер, и не знает
-// о конфигурации. config описывает настройки, но не знает о провайдерах.
-// Связывает их этот пакет — и только он. Благодаря этому ни один из двух не
-// зависит от другого, а добавление нового типа провайдера не требует правки
-// ни того, ни другого: достаточно зарегистрировать конструктор здесь.
+// WHY A SEPARATE PACKAGE. provider describes WHAT a provider is and knows
+// nothing about the configuration. config describes the settings but knows
+// nothing about providers. This package ties them together — and it alone.
+// Thanks to that neither of the two depends on the other, and adding a new
+// provider type requires editing neither: registering a constructor here is
+// enough.
 //
-// РЕГИСТРАЦИЯ ТИПОВ. Тип провайдера — это имя кода, который его обслуживает
-// ("opencode", "openai"). Соответствие «тип → конструктор» задаётся таблицей
-// ниже. Новый тип регистрируется одной строкой.
+// TYPE REGISTRATION. A provider type is the name of the code that serves it
+// ("opencode", "openai"). The mapping "type → constructor" is given by the table
+// below. A new type is registered with a single line.
 package catalog
 
 import (
@@ -23,47 +25,49 @@ import (
 	"free-ai-router/internal/provider/opencode"
 )
 
-// Builder создаёт провайдера из настроек конфигурации.
+// Builder creates a provider from the configuration settings.
 //
-// На вход подаётся идентификатор провайдера (имя секции в конфигурации) и его
-// настройки; на выходе готовый провайдер. Ошибка означает, что секция
-// заполнена неверно, и это должно быть видно сразу, а не при первом запросе.
+// The input is the provider identifier (the name of the section in the
+// configuration) together with its settings; the output is a ready provider. An
+// error means the section is filled in incorrectly, and that must be visible at
+// once rather than on the first request.
 type Builder func(id string, cfg config.ProviderConfig, defaults Defaults) (provider.Provider, error)
 
-// Defaults — значения, общие для всех провайдеров.
+// Defaults — the values common to all providers.
 //
-// Передаются отдельно, чтобы провайдеру не приходилось перечитывать
-// конфигурацию целиком ради одной строки.
+// They are passed separately so that a provider need not re-read the whole
+// configuration for the sake of one line.
 type Defaults struct {
-	// Upstream — адрес по умолчанию для провайдеров, не указавших свой.
+	// Upstream — the default address for providers that did not name their own.
 	Upstream string
-	// HTTP — клиент для запросов каталога.
+	// HTTP — the client for catalog requests.
 	//
-	// Один на всех провайдеров: каталоги запрашиваются редко, и заводить
-	// каждому свой пул соединений значило бы держать несколько наборов
-	// простаивающих сокетов ради одного и того же хоста.
+	// One for all providers: catalogs are requested rarely, and giving each
+	// provider its own connection pool would mean holding several sets of idle
+	// sockets for one and the same host.
 	HTTP *http.Client
 }
 
-// builders — соответствие «тип провайдера → конструктор».
+// builders — the mapping "provider type → constructor".
 //
-// Таблица, а не switch: добавление типа не трогает логику сборки, и её нельзя
-// случайно сломать, дописывая ветку.
+// A table, not a switch: adding a type does not touch the assembly logic, and
+// that logic cannot be broken by accident while appending a branch.
 var builders = map[string]Builder{
-	// Полноценный провайдер со своим контрактом.
+	// A full-fledged provider with a contract of its own.
 	"opencode": buildOpenCode,
 
-	// Шаблон для любого OpenAI-совместимого сервиса. Назван нейтрально: под
-	// ним работает и ZenMux, и Freebuff, и всё, что говорит на том же
-	// протоколе.
+	// A template for any OpenAI-compatible service. Named neutrally: both
+	// ZenMux and Freebuff work under it, and so does anything speaking the same
+	// protocol.
 	"openai": buildOpenAI,
 }
 
-// Build собирает реестр провайдеров из конфигурации.
+// Build assembles the provider registry from the configuration.
 //
-// Провайдеры с enabled: false пропускаются — это способ выключить секцию, не
-// удаляя её. Провайдер без моделей не является ошибкой: у некоторых сервисов
-// каталог узнаётся позже, а сам шлюз работает и без него.
+// Providers with enabled: false are skipped — that is the way to turn a section
+// off without deleting it. A provider without models is not an error: some
+// services have their catalog discovered later, and the gateway itself works
+// without one.
 func Build(cfg *config.Config) (*provider.Registry, error) {
 	defaults := Defaults{Upstream: cfg.Upstream.Val}
 
@@ -94,9 +98,9 @@ func Build(cfg *config.Config) (*provider.Registry, error) {
 			return nil, fmt.Errorf("provider %q: %w", id, err)
 		}
 		if p.ID() != provider.ID(id) {
-			// Конструктор обязан вернуть провайдера под тем именем, которое
-			// назвал оператор: это имя уходит в маршруты клиента, и
-			// расхождение сломало бы выбор провайдера.
+			// The constructor must return the provider under the name the
+			// operator gave: that name goes into the client's routes, and a
+			// mismatch would break provider selection.
 			return nil, fmt.Errorf("provider %q: constructor returned %q", id, p.ID())
 		}
 		reg.Register(p)
@@ -108,10 +112,10 @@ func Build(cfg *config.Config) (*provider.Registry, error) {
 	return reg, nil
 }
 
-// KnownTypes возвращает список зарегистрированных типов.
+// KnownTypes returns the list of registered types.
 //
-// Нужен для сообщения об ошибке: оператор, написавший опечатку, должен сразу
-// увидеть, какие варианты существуют.
+// Needed for the error message: an operator who made a typo must immediately
+// see which variants exist.
 func KnownTypes() []string {
 	out := make([]string, 0, len(builders))
 	for name := range builders {
@@ -121,7 +125,7 @@ func KnownTypes() []string {
 	return out
 }
 
-// buildOpenCode собирает провайдера OpenCode Zen.
+// buildOpenCode assembles the OpenCode Zen provider.
 func buildOpenCode(id string, pc config.ProviderConfig, defaults Defaults) (provider.Provider, error) {
 	baseURL := pc.BaseURL
 	if baseURL == "" {
@@ -141,17 +145,17 @@ func buildOpenCode(id string, pc config.ProviderConfig, defaults Defaults) (prov
 	})
 }
 
-// buildOpenAI собирает провайдера на OpenAI-совместимом протоколе.
+// buildOpenAI assembles a provider on the OpenAI-compatible protocol.
 //
-// Здесь и находится точка расширения: чтобы подключить новый сервис
-// (ZenMux, Freebuff и подобные), достаточно секции в конфигурации с типом
-// "openai". Писать код не нужно.
+// This is where the extension point lives: to hook up a new service (ZenMux,
+// Freebuff and the like), a section in the configuration with the type "openai"
+// is enough. No code needs to be written.
 func buildOpenAI(id string, pc config.ProviderConfig, defaults Defaults) (provider.Provider, error) {
 	baseURL := pc.BaseURL
 	if baseURL == "" {
-		// Общий адрес по умолчанию годится только как подсказка: у каждого
-		// сервиса свой. Но если оператор задал upstream глобально, взять его
-		// разумнее, чем отказ.
+		// The shared default address is good only as a hint: every service has
+		// its own. But if the operator set upstream globally, taking it is more
+		// reasonable than refusing.
 		baseURL = defaults.Upstream
 	}
 	if strings.TrimSpace(baseURL) == "" {
@@ -174,8 +178,8 @@ func buildOpenAI(id string, pc config.ProviderConfig, defaults Defaults) (provid
 	})
 }
 
-// copySettings копирует настройки, чтобы конструктор не мог изменить
-// конфигурацию через полученную карту.
+// copySettings copies the settings so that the constructor cannot change the
+// configuration through the map it received.
 func copySettings(in map[string]any) map[string]any {
 	if in == nil {
 		return nil
@@ -187,11 +191,11 @@ func copySettings(in map[string]any) map[string]any {
 	return out
 }
 
-// stringSetting читает строковую настройку.
+// stringSetting reads a string setting.
 //
-// Неверный тип игнорируется, а не считается ошибкой: настройка с чужим типом
-// почти всегда означает опечатку в имени, и падать из-за неё хуже, чем
-// применить умолчание.
+// A wrong type is ignored rather than counted as an error: a setting with a
+// foreign type almost always means a typo in the name, and failing over it is
+// worse than applying the default.
 func stringSetting(settings map[string]any, key string) string {
 	v, ok := settings[key]
 	if !ok {
@@ -201,7 +205,7 @@ func stringSetting(settings map[string]any, key string) string {
 	return s
 }
 
-// stringMapSetting читает настройку-словарь строк.
+// stringMapSetting reads a string-map setting.
 func stringMapSetting(settings map[string]any, key string) map[string]string {
 	raw, ok := settings[key]
 	if !ok {

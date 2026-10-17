@@ -1,15 +1,17 @@
-// Package state хранит то, что переживает рестарт: счётчики и журнал.
+// Package state stores what survives a restart: counters and the log.
 //
-// ЧТО ЗДЕСЬ ЕСТЬ И ПОЧЕМУ. Шлюз — посредник, поэтому большая часть привычного
-// состояния ему не нужна. Нет ни «что уже израсходовано, чтобы не тратить
-// повторно» (шлюз не выбирает адрес выхода), ни истории провайдеров, ни
-// записей о ротациях. Остаётся ровно то, что отвечает на вопросы оператора:
+// WHAT IS HERE AND WHY. The gateway is a middleman, so most of the usual state
+// is of no use to it. There is neither "what has already been spent, so as not
+// to spend it again" (the gateway does not choose the egress address), nor a
+// history of providers, nor records of rotations. What remains is exactly what
+// answers the operator's questions:
 //
-//	сколько запросов прошло и сколько отказано, по дням и по моделям;
-//	что делал демон, в одном журнале.
+//	how many requests went through and how many were refused, by day and by model;
+//	what the daemon did, in a single log.
 //
-// ФАЙЛОВ РОВНО ДВА: состояние и журнал. Это осознанное ограничение — набор
-// файлов, разбросанных по каталогам, невозможно ни забэкапить, ни понять.
+// THERE ARE EXACTLY TWO FILES: state and log. This is a deliberate limitation —
+// a set of files scattered across directories can be neither backed up nor
+// understood.
 package state
 
 import (
@@ -22,66 +24,66 @@ import (
 	"time"
 )
 
-// Схема состояния. Версия нужна, чтобы будущая смена формы могла отличить
-// старый файл от нового, а не разобрать его наугад.
+// The state schema. The version is needed so that a future change of shape can
+// tell an old file from a new one instead of parsing it at random.
 const schemaVersion = 1
 
-// Окно хранения. Обрезается при записи, поэтому «файл никогда не удаляется»
-// не означает «растёт бесконечно».
+// The retention window. It is trimmed on write, so "the file is never deleted"
+// does not mean "it grows without bound".
 const retentionDays = 30
 
-// Store — состояние демона.
+// Store is the daemon's state.
 //
-// Все методы безопасны для одновременного вызова: счётчики обновляются из
-// обработчиков запросов, которые работают параллельно.
+// All methods are safe for concurrent calls: the counters are updated from
+// request handlers, which run in parallel.
 type Store struct {
 	mu   sync.Mutex
 	path string
 
-	// days — счётчики по дням.
+	// days are the counters by day.
 	days map[string]*DayCounters
 }
 
-// DayCounters — счётчики одного дня.
+// DayCounters are the counters of a single day.
 type DayCounters struct {
-	// OK — число успешных запросов.
+	// OK is the number of successful requests.
 	OK int64 `json:"ok"`
-	// Refused — число отказов, полученных от провайдера.
+	// Refused is the number of refusals received from the provider.
 	Refused int64 `json:"refused"`
-	// ByModel — разбивка по моделям.
+	// ByModel is the breakdown by model.
 	ByModel map[string]*ModelCounters `json:"by_model,omitempty"`
-	// Keys — разбивка по отпечаткам ключей. Пусто при анонимной работе.
+	// Keys is the breakdown by key fingerprints. Empty when running anonymously.
 	Keys map[string]*KeyCounters `json:"keys,omitempty"`
 }
 
-// ModelCounters — счётчики одной модели.
+// ModelCounters are the counters of a single model.
 type ModelCounters struct {
 	OK      int64 `json:"ok"`
 	Refused int64 `json:"refused"`
-	// LastSeen — момент последнего запроса к модели.
+	// LastSeen is the moment of the last request to the model.
 	LastSeen int64 `json:"last_seen,omitempty"`
 }
 
-// KeyCounters — счётчики одного ключа.
+// KeyCounters are the counters of a single key.
 type KeyCounters struct {
 	OK      int64 `json:"ok"`
 	Refused int64 `json:"refused"`
-	// LastRefusalAt — момент последнего отказа по этому ключу.
+	// LastRefusalAt is the moment of the last refusal for this key.
 	LastRefusalAt int64 `json:"last_refusal_at,omitempty"`
 }
 
-// fileShape — форма файла на диске.
+// fileShape is the shape of the file on disk.
 type fileShape struct {
 	Version   int                     `json:"version"`
 	UpdatedAt int64                   `json:"updated_at"`
 	Days      map[string]*DayCounters `json:"days"`
 }
 
-// Open открывает состояние по указанному пути.
+// Open opens the state at the given path.
 //
-// Повреждённый файл не блокирует старт: он заменяется пустым, а причина
-// попадает в журнал. Отказ стартовать из-за счётчиков был бы несоразмерен —
-// они нужны для справки, а не для работы.
+// A corrupt file does not block startup: it is replaced with an empty one, and
+// the reason goes into the log. Refusing to start because of the counters would
+// be out of proportion — they exist for reference, not for work.
 func Open(path string) (*Store, error) {
 	s := &Store{path: path, days: make(map[string]*DayCounters)}
 
@@ -98,8 +100,8 @@ func Open(path string) (*Store, error) {
 
 	var shape fileShape
 	if err := json.Unmarshal(raw, &shape); err != nil {
-		// Файл повреждён: начинаем с чистого, но НЕ удаляем его молча —
-		// оператор должен увидеть, что произошло.
+		// The file is corrupt: we start from a clean one, but do NOT delete
+		// it silently — the operator must see what happened.
 		return s, fmt.Errorf("state: %s is unreadable, starting empty: %w", path, err)
 	}
 
@@ -112,14 +114,14 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
-// RecordSuccess записывает успешный запрос.
+// RecordSuccess records a successful request.
 //
-// Запись идёт и в память, и НА ДИСК. На диск — потому что счётчики существуют
-// ровно ради того, чтобы пережить перезапуск: держать их только в памяти
-// значило бы терять их при каждом рестарте, то есть не иметь вовсе.
+// The record goes both into memory and ONTO DISK. Onto disk because the
+// counters exist precisely to survive a restart: keeping them only in memory
+// would mean losing them on every restart, that is not having them at all.
 //
-// Цена записи невелика: файл маленький, а запросов у шлюза немного. Это дешевле,
-// чем потерять счётчики.
+// The cost of the write is small: the file is small, and the gateway does not
+// serve many requests. That is cheaper than losing the counters.
 func (s *Store) RecordSuccess(model, keyFingerprint string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -139,11 +141,12 @@ func (s *Store) RecordSuccess(model, keyFingerprint string) {
 	_ = s.saveLocked()
 }
 
-// RecordRefusal записывает отказ провайдера.
+// RecordRefusal records a provider refusal.
 //
-// Отказ записывается ДО любого решения о повторе: иначе счётчики не ответят на
-// вопрос «что израсходовано». И сохраняется на диск сразу — по той же причине,
-// что и успех: счётчик, не переживший перезапуск, бесполезен.
+// The refusal is recorded BEFORE any decision about a retry: otherwise the
+// counters would not answer the question "what has been spent". And it is saved
+// to disk straight away, for the same reason as a success: a counter that did
+// not survive a restart is useless.
 func (s *Store) RecordRefusal(model, keyFingerprint string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -164,13 +167,13 @@ func (s *Store) RecordRefusal(model, keyFingerprint string) {
 	_ = s.saveLocked()
 }
 
-// dayLocked возвращает счётчики дня, создавая их при необходимости.
-// Вызывающий держит блокировку.
+// dayLocked returns the counters of the day, creating them if necessary.
+// The caller holds the lock.
 func (s *Store) dayLocked(t time.Time) *DayCounters {
 	return s.dayForLocked(dayKey(t))
 }
 
-// dayForLocked возвращает счётчики по ключу дня.
+// dayForLocked returns the counters for a day key.
 func (s *Store) dayForLocked(key string) *DayCounters {
 	d, ok := s.days[key]
 	if !ok {
@@ -180,7 +183,7 @@ func (s *Store) dayForLocked(key string) *DayCounters {
 	return d
 }
 
-// modelLocked возвращает счётчики модели внутри дня.
+// modelLocked returns the counters of a model within a day.
 func (s *Store) modelLocked(day *DayCounters, model string) *ModelCounters {
 	if day.ByModel == nil {
 		day.ByModel = make(map[string]*ModelCounters)
@@ -193,7 +196,7 @@ func (s *Store) modelLocked(day *DayCounters, model string) *ModelCounters {
 	return m
 }
 
-// keyLocked возвращает счётчики ключа внутри дня.
+// keyLocked returns the counters of a key within a day.
 func (s *Store) keyLocked(day *DayCounters, fingerprint string) *KeyCounters {
 	if day.Keys == nil {
 		day.Keys = make(map[string]*KeyCounters)
@@ -206,17 +209,17 @@ func (s *Store) keyLocked(day *DayCounters, fingerprint string) *KeyCounters {
 	return k
 }
 
-// Save пишет состояние на диск.
+// Save writes the state to disk.
 //
-// Запись атомарна: сначала во временный файл рядом, затем переименование.
-// Прямая запись оставила бы обрезанный файл, если процесс умрёт посередине.
+// The write is atomic: first to a temporary file alongside, then a rename.
+// A direct write would leave a truncated file if the process dies halfway.
 func (s *Store) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.saveLocked()
 }
 
-// saveLocked выполняет запись. Вызывающий держит блокировку.
+// saveLocked performs the write. The caller holds the lock.
 func (s *Store) saveLocked() error {
 	s.pruneLocked(time.Now())
 
@@ -239,7 +242,7 @@ func (s *Store) saveLocked() error {
 		return fmt.Errorf("state: creating a temporary file: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // если переименование не состоялось
+	defer os.Remove(tmpName) // if the rename did not happen
 
 	if _, err := tmp.Write(raw); err != nil {
 		tmp.Close()
@@ -254,9 +257,9 @@ func (s *Store) saveLocked() error {
 	return nil
 }
 
-// pruneLocked выкидывает дни за пределами окна хранения.
+// pruneLocked drops the days outside the retention window.
 //
-// Иначе «файл никогда не удаляется» означало бы «растёт безгранично».
+// Otherwise "the file is never deleted" would mean "it grows without bound".
 func (s *Store) pruneLocked(now time.Time) {
 	cutoff := dayKey(now.AddDate(0, 0, -retentionDays))
 	for key := range s.days {
@@ -266,7 +269,7 @@ func (s *Store) pruneLocked(now time.Time) {
 	}
 }
 
-// Clear обнуляет счётчики.
+// Clear zeroes the counters.
 func (s *Store) Clear() error {
 	s.mu.Lock()
 	s.days = make(map[string]*DayCounters)
@@ -275,19 +278,19 @@ func (s *Store) Clear() error {
 	return err
 }
 
-// Snapshot — снимок состояния для чтения.
+// Snapshot is a snapshot of the state for reading.
 type Snapshot struct {
-	// Version — версия схемы.
+	// Version is the schema version.
 	Version int `json:"version"`
-	// UpdatedAt — момент снимка.
+	// UpdatedAt is the moment of the snapshot.
 	UpdatedAt int64 `json:"updated_at"`
-	// Today — ключ сегодняшнего дня.
+	// Today is the key of today.
 	Today string `json:"today"`
-	// Days — счётчики по дням, свежие первыми.
+	// Days are the counters by day, the newest first.
 	Days []DaySnapshot `json:"days"`
 }
 
-// DaySnapshot — счётчики одного дня для чтения.
+// DaySnapshot are the counters of a single day, for reading.
 type DaySnapshot struct {
 	Day      string          `json:"day"`
 	OK       int64           `json:"ok"`
@@ -297,7 +300,7 @@ type DaySnapshot struct {
 	Keys     []KeySnapshot   `json:"keys,omitempty"`
 }
 
-// ModelSnapshot — счётчики одной модели.
+// ModelSnapshot are the counters of a single model.
 type ModelSnapshot struct {
 	Model    string `json:"model"`
 	OK       int64  `json:"ok"`
@@ -305,7 +308,7 @@ type ModelSnapshot struct {
 	LastSeen int64  `json:"last_seen,omitempty"`
 }
 
-// KeySnapshot — счётчики одного ключа.
+// KeySnapshot are the counters of a single key.
 type KeySnapshot struct {
 	Fingerprint   string `json:"fingerprint"`
 	OK            int64  `json:"ok"`
@@ -313,11 +316,11 @@ type KeySnapshot struct {
 	LastRefusalAt int64  `json:"last_refusal_at,omitempty"`
 }
 
-// Snapshot возвращает снимок для чтения.
+// Snapshot returns a snapshot for reading.
 //
-// Порядок задан явно: дни от свежих к старым, модели и ключи по алфавиту.
-// Без этого вывод менялся бы между вызовами, и сравнить два снимка было бы
-// невозможно.
+// The order is given explicitly: days from the newest to the oldest, models and
+// keys alphabetically. Without that the output would change between calls, and
+// comparing two snapshots would be impossible.
 func (s *Store) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -369,8 +372,8 @@ func (s *Store) Snapshot() Snapshot {
 	return out
 }
 
-// dayKey возвращает ключ дня.
+// dayKey returns the key of a day.
 //
-// Дата берётся в UTC: провайдеры обнуляют суточные лимиты по UTC, и местная
-// дата разошлась бы с их границей суток.
+// The date is taken in UTC: providers reset their daily limits by UTC, and a
+// local date would diverge from their day boundary.
 func dayKey(t time.Time) string { return t.UTC().Format("2006-01-02") }

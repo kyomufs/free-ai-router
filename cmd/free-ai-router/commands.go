@@ -10,14 +10,14 @@ import (
 	"free-ai-router/internal/state"
 )
 
-// Команды чтения работают ЛОКАЛЬНО — с конфигурацией, состоянием и журналом.
+// Read commands work LOCALLY — against the configuration, state and log.
 //
-// Это осознанное решение: они должны отвечать даже когда демон лежит. Оператор,
-// у которого демон не поднялся, идёт смотреть счётчики и журнал первым делом, и
-// команда, требующая живого демона, была бы бесполезна ровно тогда, когда
-// нужнее всего.
+// This is a deliberate decision: they must answer even when the daemon is down.
+// An operator whose daemon failed to start goes to look at the counters and the
+// log first thing, and a command requiring a live daemon would be useless
+// exactly when it is needed most.
 
-// loadConfig читает конфигурацию и разбирает флаги.
+// loadConfig reads the configuration and parses the flags.
 func loadConfig(args []string) (*config.Config, *flags, error) {
 	f, err := parseFlags(args)
 	if err != nil {
@@ -34,7 +34,7 @@ func loadConfig(args []string) (*config.Config, *flags, error) {
 	return cfg, f, nil
 }
 
-// cmdConfig показывает эффективную конфигурацию.
+// cmdConfig shows the effective configuration.
 func cmdConfig(args []string) error {
 	cfg, f, err := loadConfig(args)
 	if err != nil || cfg == nil {
@@ -60,11 +60,11 @@ func cmdConfig(args []string) error {
 	return printEffectiveConfig(cfg)
 }
 
-// cmdStatus показывает состояние.
+// cmdStatus shows the state.
 //
-// Читается С ДИСКА, а не с демона: команда должна отвечать и когда демон
-// остановлен. Живой демон обслуживает ту же информацию богаче — через
-// поверхность управления, — но требовать его здесь нельзя.
+// It is read FROM DISK, not from the daemon: the command must answer even when
+// the daemon is stopped. A live daemon serves the same information more richly
+// — through the control surface — but requiring it here is not acceptable.
 func cmdStatus(args []string) error {
 	cfg, f, err := loadConfig(args)
 	if err != nil || cfg == nil {
@@ -73,7 +73,7 @@ func cmdStatus(args []string) error {
 
 	st, openErr := state.Open(cfg.Paths.StateFile)
 	if openErr != nil {
-		fmt.Fprintf(os.Stderr, "предупреждение: состояние: %v\n", openErr)
+		fmt.Fprintf(os.Stderr, "warning: state: %v\n", openErr)
 	}
 
 	snap := state.Snapshot{}
@@ -91,24 +91,24 @@ func cmdStatus(args []string) error {
 		})
 	}
 
-	fmt.Printf("режим      %s\n", cfg.Mode.Val)
-	fmt.Printf("адрес      %s\n", cfg.Listen.Val)
-	fmt.Printf("транспорт  %s\n", cfg.Transport.Val)
-	fmt.Printf("провайдеры %s\n", strings.Join(providerNames(cfg), ", "))
+	fmt.Printf("mode       %s\n", cfg.Mode.Val)
+	fmt.Printf("address    %s\n", cfg.Listen.Val)
+	fmt.Printf("transport  %s\n", cfg.Transport.Val)
+	fmt.Printf("providers  %s\n", strings.Join(providerNames(cfg), ", "))
 
 	if len(snap.Days) == 0 {
-		fmt.Println("\nсчётчиков пока нет")
+		fmt.Println("\nno counters yet")
 		return nil
 	}
 	fmt.Println()
-	fmt.Printf("%-12s %8s %8s\n", "ДЕНЬ", "УСПЕХ", "ОТКАЗ")
+	fmt.Printf("%-12s %8s %8s\n", "DAY", "OK", "REFUSED")
 	for _, d := range snap.Days {
 		fmt.Printf("%-12s %8d %8d\n", d.Day, d.OK, d.Refused)
 	}
 	return nil
 }
 
-// cmdStats показывает счётчики по дням с разбивкой по моделям.
+// cmdStats shows the counters by day, broken down by model.
 func cmdStats(args []string) error {
 	cfg, f, err := loadConfig(args)
 	if err != nil || cfg == nil {
@@ -128,16 +128,16 @@ func cmdStats(args []string) error {
 		return printJSON(snap)
 	}
 	if len(snap.Days) == 0 {
-		fmt.Println("счётчиков пока нет")
+		fmt.Println("no counters yet")
 		return nil
 	}
 
 	for _, d := range snap.Days {
-		fmt.Printf("%s: успех %d, отказ %d\n", d.Day, d.OK, d.Refused)
+		fmt.Printf("%s: ok %d, refused %d\n", d.Day, d.OK, d.Refused)
 		if len(d.ByModel) == 0 {
 			continue
 		}
-		fmt.Printf("  %-40s %8s %8s\n", "МОДЕЛЬ", "УСПЕХ", "ОТКАЗ")
+		fmt.Printf("  %-40s %8s %8s\n", "MODEL", "OK", "REFUSED")
 		for _, m := range d.ByModel {
 			fmt.Printf("  %-40s %8d %8d\n", m.Model, m.OK, m.Refused)
 		}
@@ -145,10 +145,10 @@ func cmdStats(args []string) error {
 	return nil
 }
 
-// cmdKeys показывает ключи провайдеров.
+// cmdKeys shows the provider keys.
 //
-// Показываются ОТПЕЧАТКИ, а не ключи: нужно понять, сколько их и какие в
-// работе, а не увидеть секрет.
+// FINGERPRINTS are shown, not keys: the point is to learn how many there are
+// and which are in use, not to see the secret.
 func cmdKeys(args []string) error {
 	cfg, f, err := loadConfig(args)
 	if err != nil || cfg == nil {
@@ -184,21 +184,21 @@ func cmdKeys(args []string) error {
 		return printJSON(map[string]any{"providers": out})
 	}
 	if len(out) == 0 {
-		fmt.Println("провайдеры не настроены")
+		fmt.Println("no providers configured")
 		return nil
 	}
 	for _, p := range out {
 		switch {
 		case p.Count == 0:
-			fmt.Printf("%s: ключей нет (анонимная работа)\n", p.Provider)
+			fmt.Printf("%s: no keys (anonymous operation)\n", p.Provider)
 		default:
-			fmt.Printf("%s: %d ключ(ей): %s\n", p.Provider, p.Count, strings.Join(p.Keys, ", "))
+			fmt.Printf("%s: %d key(s): %s\n", p.Provider, p.Count, strings.Join(p.Keys, ", "))
 		}
 	}
 	return nil
 }
 
-// cmdOptions показывает доступные значения словарей.
+// cmdOptions shows the available vocabulary values.
 func cmdOptions(args []string) error {
 	f, err := parseFlags(args)
 	if err != nil {
@@ -228,7 +228,7 @@ func cmdOptions(args []string) error {
 	return nil
 }
 
-// providerNames возвращает идентификаторы провайдеров в стабильном порядке.
+// providerNames returns the provider identifiers in a stable order.
 func providerNames(cfg *config.Config) []string {
 	out := make([]string, 0, len(cfg.Providers))
 	for id, p := range cfg.Providers {

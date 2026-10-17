@@ -9,19 +9,19 @@ import (
 	"free-ai-router/internal/config"
 )
 
-// requireToken оборачивает обработчик проверкой общего секрета.
+// requireToken wraps a handler with a shared-secret check.
 //
-// ЗАЧЕМ ОБЁРТКА, А НЕ ПРОВЕРКА ВНУТРИ ПОВЕРХНОСТЕЙ. Поверхностей две, и обе
-// дают доступ к квоте оператора: одна тратит её запросами, другая умеет менять
-// ключи. Проверка, поставленная внутри одной из них, оставляет вторую
-// открытой — и именно это случилось: управление было закрыто, а поверхность
-// моделей отвечала кому угодно.
+// WHY A WRAPPER AND NOT A CHECK INSIDE THE SURFACES. There are two surfaces, and
+// both give access to the operator's quota: one spends it with requests, the
+// other can change keys. A check placed inside one of them leaves the other
+// open — and that is exactly what happened: the control surface was closed,
+// while the models surface answered anyone.
 //
-// Обёртка вокруг всего маршрутизатора решает вопрос разом и не требует помнить
-// о проверке при добавлении третьей поверхности.
+// A wrapper around the whole router settles the question at once and does not
+// require remembering the check when a third surface is added.
 //
-// В режиме local проверка не выполняется вовсе: до loopback-слушателя кроме
-// этой машины никто не дотянется, и токен там не нужен.
+// In local mode the check is not performed at all: nobody but this machine can
+// reach a loopback listener, and a token is not needed there.
 func requireToken(next http.Handler, cfg *config.Config) http.Handler {
 	if cfg == nil || !cfg.IsServer() {
 		return next
@@ -37,23 +37,24 @@ func requireToken(next http.Handler, cfg *config.Config) http.Handler {
 	})
 }
 
-// tokenMatches сравнивает предъявленный токен с ожидаемым.
+// tokenMatches compares the presented token against the expected one.
 //
-// Сравнение идёт за постоянное время. Побайтовый выход с ранним возвратом
-// позволил бы подобрать секрет по времени ответа.
+// The comparison runs in constant time. A byte-by-byte exit with an early
+// return would let the secret be guessed from the response time.
 //
-// Длина при этом утекает: сравнивать значения разной длины за постоянное время
-// нельзя, не зная длину заранее. Но утекает именно длина, а не содержимое.
+// The length does leak: values of different lengths cannot be compared in
+// constant time without knowing the length in advance. But what leaks is the
+// length, not the content.
 func tokenMatches(r *http.Request, want string) bool {
 	presented := bearerToken(r)
 	return subtle.ConstantTimeCompare([]byte(presented), []byte(want)) == 1
 }
 
-// bearerToken достаёт токен из заголовка.
+// bearerToken pulls the token out of the header.
 //
-// Принимается и форма "Bearer <токен>", и голое значение: разные клиенты ведут
-// себя по-разному, а требовать строго одну форму значит ломать чужой код без
-// причины.
+// Both the "Bearer <token>" form and the bare value are accepted: different
+// clients behave differently, and demanding strictly one form would break
+// someone else's code for no reason.
 func bearerToken(r *http.Request) string {
 	v := r.Header.Get("authorization")
 	if len(v) > 7 && strings.EqualFold(v[:7], "bearer ") {
@@ -62,16 +63,17 @@ func bearerToken(r *http.Request) string {
 	return v
 }
 
-// writeAuthError отвечает отказом доступа.
+// writeAuthError answers with an access refusal.
 //
-// Форма та же, что у остальных ошибок шлюза: у клиента один словарь для
-// ветвления, и второй, отличающийся, заставил бы его держать соответствие.
+// The shape is the same as the other gateway errors: the client has one
+// vocabulary for branching, and a second, different one would force it to keep
+// a mapping.
 func writeAuthError(w http.ResponseWriter) {
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"error": map[string]any{
-			"message": "требуется токен: шлюз работает в режиме server",
+			"message": "a token is required: the gateway runs in server mode",
 			"type":    "AuthError",
 			"code":    "AuthError",
 		},

@@ -8,29 +8,29 @@ import (
 	"time"
 )
 
-// direct реализует транспорт прямой маршрутизации хоста.
+// direct implements the host's direct-routing transport.
 //
-// ЭТО НЕ «заглушка по умолчанию», а часть задачи. Агент живёт долго, а его ход
-// состоит из многих запросов; без удержания соединения каждый ход платит новый
-// TCP- и TLS-handshake. Поэтому транспорт держит тёплый пул соединений — это
-// ровно то, ради чего шлюз существует как отдельный процесс, а не как
-// библиотека внутри агента.
+// THIS IS NOT a "default stub", but part of the job. An agent lives for a long
+// time, and its turn consists of many requests; without connection reuse every
+// turn pays a fresh TCP and TLS handshake. That is why the transport keeps a
+// warm connection pool — it is exactly what the gateway exists as a separate
+// process for, rather than as a library inside the agent.
 type direct struct {
 	rt *http.Transport
 }
 
-// DirectConfig — настройки прямого транспорта.
+// DirectConfig are the settings of the direct transport.
 type DirectConfig struct {
-	// Family пинит адресное семейство: "auto", "v4" или "v6".
+	// Family pins the address family: "auto", "v4" or "v6".
 	//
-	// Смысл не в производительности: у некоторых провайдеров лимит привязан к
-	// строке адреса, и разные семейства могут попадать в разные бакеты.
-	// Пиннинг делает выбор семейства явным.
+	// The point is not performance: some providers tie the limit to the address
+	// string, and different families can land in different buckets. Pinning
+	// makes the family choice explicit.
 	Family string
 }
 
-// Числа пула выбраны под профиль нагрузки шлюза: много последовательных
-// запросов от одного клиента к одному хосту.
+// The pool numbers are chosen for the gateway's load profile: many consecutive
+// requests from one client to one host.
 const (
 	maxIdleConns        = 128
 	maxIdleConnsPerHost = 64
@@ -40,7 +40,7 @@ const (
 	keepAliveInterval   = 30 * time.Second
 )
 
-// NewDirect создаёт прямой транспорт.
+// NewDirect creates the direct transport.
 func NewDirect(cfg map[string]any) (Transport, error) {
 	var parsed DirectConfig
 	if raw, ok := cfg["family"]; ok {
@@ -51,16 +51,16 @@ func NewDirect(cfg map[string]any) (Transport, error) {
 	return &direct{rt: buildDirectTransport(parsed.Family)}, nil
 }
 
-// buildDirectTransport собирает http.Transport с тёплым пулом.
+// buildDirectTransport assembles an http.Transport with a warm pool.
 func buildDirectTransport(family string) *http.Transport {
 	dialer := &net.Dialer{
 		Timeout:   dialTimeout,
 		KeepAlive: keepAliveInterval,
 	}
 
-	// Семейство задано: берём дозвон во владение и подменяем имя сети.
-	// Ошибка семейства становится обычной ошибкой соединения — так её и
-	// увидит вызывающий, и отдельного пути для неё не нужно.
+	// A family is given: we take the dial into our own hands and substitute the
+	// network name. A family error becomes an ordinary connection error — that
+	// is how the caller will see it, and no separate path is needed for it.
 	dial := dialer.DialContext
 	if network := networkFor(family); network != "" {
 		dial = func(ctx context.Context, _, addr string) (net.Conn, error) {
@@ -80,11 +80,11 @@ func buildDirectTransport(family string) *http.Transport {
 	}
 }
 
-// networkFor переводит настройку семейства в имя сети.
+// networkFor turns the family setting into a network name.
 //
-// Пустая строка означает «пусть решает система»: так работает "auto" и любое
-// нераспознанное значение. Неизвестное значение не является ошибкой — оно
-// означает ровно то же, что и "auto".
+// An empty string means "let the system decide": that is how "auto" and any
+// unrecognised value work. An unknown value is not an error — it means exactly
+// the same as "auto".
 func networkFor(family string) string {
 	switch family {
 	case "v4":
@@ -96,38 +96,39 @@ func networkFor(family string) string {
 	}
 }
 
-// ID реализует Transport.
+// ID implements Transport.
 func (d *direct) ID() ID { return Direct }
 
-// RoundTripper реализует Transport.
+// RoundTripper implements Transport.
 func (d *direct) RoundTripper() (http.RoundTripper, error) { return d.rt, nil }
 
-// Start реализует Transport. Прямому транспорту поднимать нечего.
+// Start implements Transport. The direct transport has nothing to bring up.
 func (d *direct) Start(context.Context) error { return nil }
 
-// Stop реализует Transport.
+// Stop implements Transport.
 func (d *direct) Stop() error {
 	d.rt.CloseIdleConnections()
 	return nil
 }
 
-// Info реализует Transport.
+// Info implements Transport.
 func (d *direct) Info() Info {
 	return Info{
 		ID:      Direct,
-		Summary: "прямая маршрутизация хоста с тёплым пулом соединений",
+		Summary: "direct host routing with a warm connection pool",
 	}
 }
 
-// NewRegistryWithDefaults создаёт реестр со всеми встроенными транспортами.
+// NewRegistryWithDefaults creates a registry with all built-in transports.
 //
-// Функция нужна, чтобы точка входа не собирала реестр руками: новый транспорт
-// регистрируется в одном месте, и ни один вызывающий не забывает его добавить.
+// The function exists so that the entry point does not assemble the registry by
+// hand: a new transport is registered in one place, and no caller forgets to
+// add it.
 func NewRegistryWithDefaults() *Registry {
 	r := NewRegistry()
 	r.Register(Info{
 		ID:      Direct,
-		Summary: "прямая маршрутизация хоста с тёплым пулом соединений",
+		Summary: "direct host routing with a warm connection pool",
 	}, NewDirect)
 	return r
 }

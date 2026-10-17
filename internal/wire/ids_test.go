@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// TestSessionIDShape проверяет форму идентификатора: префикс, 12 hex времени
-// и 14 символов хвоста. Это первое, что видит гейт, и форма выведена из
-// identifier.ts.
+// TestSessionIDShape checks the shape of the identifier: the prefix, 12 hex of
+// time and 14 tail characters. This is the first thing the gate sees, and the
+// shape is derived from identifier.ts.
 func TestSessionIDShape(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		id := NewSessionID()
@@ -43,9 +43,9 @@ func TestMessageIDShape(t *testing.T) {
 	}
 }
 
-// TestTimestampRoundTripWithinField — главное проверяемое свойство формулы:
-// пока timestamp помещается в 36 бит, кодирование и декодирование взаимно
-// обратны.
+// TestTimestampRoundTripWithinField — the main property under test of the
+// formula: as long as the timestamp fits in 36 bits, encoding and decoding are
+// mutual inverses.
 func TestTimestampRoundTripWithinField(t *testing.T) {
 	const hi = uint64(idTimeMask >> idCounterBits) // 2^36 - 1
 
@@ -63,17 +63,18 @@ func TestTimestampRoundTripWithinField(t *testing.T) {
 	}
 }
 
-// TestTimestampAboveFieldIsTruncated фиксирует ГРАНИЦУ свойства: timestamp
-// реального времени (41 бит) в шестибайтовое поле не помещается, старшие биты
-// при записи отбрасываются, и обратимость теряется.
+// TestTimestampAboveFieldIsTruncated pins down the BOUNDARY of the property: a
+// real-time timestamp (41 bits) does not fit in the six-byte field, the top bits
+// are discarded on write, and invertibility is lost.
 //
-// Это не дефект шлюза, а свойство формата клиента. Тест написан, чтобы
-// границу не приняли за ошибку и не «исправили» формулу в удобную сторону:
-// форма обязана совпадать с клиентом.
+// This is not a defect of the gateway but a property of the client's format.
+// The test is written so that the boundary is not taken for a bug and the
+// formula is not "fixed" in the convenient direction: the shape must match the
+// client's.
 func TestTimestampAboveFieldIsTruncated(t *testing.T) {
 	const hi = uint64(idTimeMask >> idCounterBits)
 
-	// Проверяем ровно на границе: hi+1 уже не помещается.
+	// Checking exactly at the boundary: hi+1 no longer fits.
 	id := SessionIDPrefix + timeFieldOf(hi+1, 1) + strings.Repeat("0", 14)
 	at, err := DecodeSessionTimestamp(id)
 	if err != nil {
@@ -87,9 +88,9 @@ func TestTimestampAboveFieldIsTruncated(t *testing.T) {
 	}
 }
 
-// TestLiveTimestampIsRepresentable — практическая половина: сегодняшний
-// timestamp усекается, но идентификатор остаётся каноническим, а это всё, что
-// требуется для прохождения.
+// TestLiveTimestampIsRepresentable — the practical half: today's timestamp is
+// truncated, but the identifier stays canonical, and that is all that is
+// required to get through.
 func TestLiveTimestampIsRepresentable(t *testing.T) {
 	const live = 1_792_000_000_000
 
@@ -102,13 +103,13 @@ func TestLiveTimestampIsRepresentable(t *testing.T) {
 	}
 }
 
-// TestIDsDescend проверяет следствие дополнения: у более позднего момента
-// временное поле МЕНЬШЕ. Это и есть смысл descending() — без инверсии формула
-// была бы просто хешем.
+// TestIDsDescend checks the consequence of the complement: for a later moment
+// the time field is SMALLER. That is the point of descending() — without the
+// inversion the formula would be just a hash.
 func TestIDsDescend(t *testing.T) {
 	const hi = uint64(idTimeMask >> idCounterBits)
 
-	// hi-1000 — более поздний момент, чем hi-2000, значит его поле меньше.
+	// hi-1000 is a later moment than hi-2000, so its field is smaller.
 	earlier := timeFieldOf(hi-2000, 1)
 	later := timeFieldOf(hi-1000, 1)
 
@@ -116,7 +117,7 @@ func TestIDsDescend(t *testing.T) {
 		t.Fatalf("expected the later timestamp to sort lower: earlier=%s later=%s", earlier, later)
 	}
 
-	// И то же самое на реальных идентификаторах.
+	// And the same on real identifiers.
 	const base int64 = 1_700_000_000_000
 	first := NewSessionIDAt(base)
 	second := NewSessionIDAt(base + 1)
@@ -126,9 +127,9 @@ func TestIDsDescend(t *testing.T) {
 	}
 }
 
-// TestCounterResetsPerMillisecond воспроизводит сброс счётчика: два
-// идентификатора в одну миллисекунду различаются счётчиком, а в разные —
-// начинаются заново с единицы.
+// TestCounterResetsPerMillisecond reproduces the counter reset: two identifiers
+// in the same millisecond differ by the counter, while in different
+// milliseconds they start over from one.
 func TestCounterResetsPerMillisecond(t *testing.T) {
 	const milli int64 = 1_750_000_000_000
 
@@ -152,8 +153,8 @@ func TestCounterResetsPerMillisecond(t *testing.T) {
 	}
 }
 
-// TestCanonicalSessionIDKeepsValidID: готовый канонический id не пересобирается.
-// Он часть истории сессии, и подмена сломала бы её.
+// TestCanonicalSessionIDKeepsValidID: a ready-made canonical id is not rebuilt.
+// It is part of the session history, and substituting it would break that.
 func TestCanonicalSessionIDKeepsValidID(t *testing.T) {
 	original := NewSessionID()
 	if got := CanonicalSessionID(original); got != original {
@@ -161,7 +162,8 @@ func TestCanonicalSessionIDKeepsValidID(t *testing.T) {
 	}
 }
 
-// TestCanonicalSessionIDReplacesInvalid: неканонический id заменяется свежим.
+// TestCanonicalSessionIDReplacesInvalid: a non-canonical id is replaced with a
+// fresh one.
 func TestCanonicalSessionIDReplacesInvalid(t *testing.T) {
 	cases := []string{
 		"",
@@ -183,7 +185,7 @@ func TestCanonicalSessionIDReplacesInvalid(t *testing.T) {
 	}
 }
 
-// TestDecodeRejectsForeignID: посторонняя строка не декодируется молча.
+// TestDecodeRejectsForeignID: a foreign string is not decoded silently.
 func TestDecodeRejectsForeignID(t *testing.T) {
 	for _, in := range []string{"", "ses_x", "msg_" + strings.Repeat("a", 26), "random"} {
 		if _, err := DecodeSessionTimestamp(in); err == nil {
@@ -192,8 +194,8 @@ func TestDecodeRejectsForeignID(t *testing.T) {
 	}
 }
 
-// TestCounterBitsBound: счётчик не выходит за 12 бит, иначе он затирал бы
-// временное поле.
+// TestCounterBitsBound: the counter does not exceed 12 bits, otherwise it would
+// overwrite the time field.
 func TestCounterBitsBound(t *testing.T) {
 	const milli int64 = 1_760_000_000_000
 	for i := 0; i < (1<<idCounterBits)+5; i++ {

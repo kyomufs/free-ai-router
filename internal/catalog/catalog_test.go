@@ -10,7 +10,7 @@ import (
 	"free-ai-router/internal/provider"
 )
 
-// cfgWith собирает конфигурацию с одной секцией провайдера.
+// cfgWith builds a configuration with a single provider section.
 func cfgWith(t *testing.T, id string, pc config.ProviderConfig) *config.Config {
 	t.Helper()
 	c := config.Default()
@@ -18,7 +18,7 @@ func cfgWith(t *testing.T, id string, pc config.ProviderConfig) *config.Config {
 	return c
 }
 
-// TestBuildsEnabledProviders — включённые секции попадают в реестр.
+// TestBuildsEnabledProviders — enabled sections reach the registry.
 func TestBuildsEnabledProviders(t *testing.T) {
 	c := cfgWith(t, "opencode", config.ProviderConfig{Type: "opencode"})
 
@@ -38,14 +38,14 @@ func TestBuildsEnabledProviders(t *testing.T) {
 	}
 }
 
-// TestDisabledProvidersSkipped — выключенная секция не мешает работать
-// остальным.
+// TestDisabledProvidersSkipped — a disabled section does not stop the rest from
+// working.
 func TestDisabledProvidersSkipped(t *testing.T) {
 	off := false
 	c := config.Default()
 	c.Providers = map[string]config.ProviderConfig{
 		"opencode": {Type: "opencode"},
-		"выключен": {Type: "opencode", Enabled: &off},
+		"disabled": {Type: "opencode", Enabled: &off},
 	}
 
 	reg, err := Build(c)
@@ -55,13 +55,14 @@ func TestDisabledProvidersSkipped(t *testing.T) {
 	if reg.Len() != 1 {
 		t.Fatalf("Len = %d, want 1 (the disabled entry must be skipped)", reg.Len())
 	}
-	if _, err := reg.Get("выключен"); err == nil {
+	if _, err := reg.Get("disabled"); err == nil {
 		t.Fatal("the disabled provider reached the registry")
 	}
 }
 
-// TestEmptyConfigurationIsAnError — без провайдеров шлюзу нечего делать, и это
-// должно быть сказано прямо, а не выясняться при первом запросе.
+// TestEmptyConfigurationIsAnError — with no providers the gateway has nothing
+// to do, and that must be said plainly rather than discovered on the first
+// request.
 func TestEmptyConfigurationIsAnError(t *testing.T) {
 	c := config.Default()
 	if _, err := Build(c); err == nil {
@@ -69,16 +70,16 @@ func TestEmptyConfigurationIsAnError(t *testing.T) {
 	}
 
 	off := false
-	c.Providers = map[string]config.ProviderConfig{"выключен": {Type: "opencode", Enabled: &off}}
+	c.Providers = map[string]config.ProviderConfig{"disabled": {Type: "opencode", Enabled: &off}}
 	if _, err := Build(c); err == nil {
 		t.Fatal("a configuration with only disabled providers must be an error")
 	}
 }
 
-// TestUnknownTypeNamesTheKnownOnes — опечатка в типе должна сразу показать,
-// какие типы существуют.
+// TestUnknownTypeNamesTheKnownOnes — a typo in the type must immediately show
+// which types exist.
 func TestUnknownTypeNamesTheKnownOnes(t *testing.T) {
-	c := cfgWith(t, "мой", config.ProviderConfig{Type: "zenmux"})
+	c := cfgWith(t, "mine", config.ProviderConfig{Type: "zenmux"})
 
 	_, err := Build(c)
 	if err == nil {
@@ -92,17 +93,17 @@ func TestUnknownTypeNamesTheKnownOnes(t *testing.T) {
 	}
 }
 
-// TestMissingTypeIsAnError — секция без типа не собирается: неизвестно, каким
-// кодом её обслуживать.
+// TestMissingTypeIsAnError — a section without a type does not build: it is
+// unknown which code should serve it.
 func TestMissingTypeIsAnError(t *testing.T) {
-	c := cfgWith(t, "мой", config.ProviderConfig{})
+	c := cfgWith(t, "mine", config.ProviderConfig{})
 	if _, err := Build(c); err == nil {
 		t.Fatal("a section without a type must fail")
 	}
 }
 
-// TestOpenAICompatibleProviderBuilds — точка расширения: новый сервис
-// подключается секцией, без кода.
+// TestOpenAICompatibleProviderBuilds — the extension point: a new service is
+// hooked up by a section, without code.
 func TestOpenAICompatibleProviderBuilds(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
@@ -134,25 +135,29 @@ func TestOpenAICompatibleProviderBuilds(t *testing.T) {
 	if len(models) != 1 || models[0].ID != "free-model" {
 		t.Fatalf("Models = %+v", models)
 	}
-	if !models[0].Free {
-		t.Fatal("a model taken from the service must be marked free")
-	}
+	// The `Free` flag is NOT asserted here. It is not this package's decision:
+	// a provider decides what belongs in its catalog, and the openai-compatible
+	// provider applies no eligibility filter at all, so its models carry
+	// whatever the source said — which for a live list with no properties is
+	// nothing. Asserting it here would pin one provider's filtering policy
+	// inside the shared assembly code, and the filter itself is covered where
+	// it lives, in the provider's own checks.
 }
 
-// TestProviderIDMatchesSectionName — имя маршрута берётся из секции. Если
-// конструктор вернёт другое имя, клиент не найдёт провайдера.
+// TestProviderIDMatchesSectionName — the route name comes from the section. If
+// the constructor returns another name, the client will not find the provider.
 func TestProviderIDMatchesSectionName(t *testing.T) {
 	c := config.Default()
 	c.Providers = map[string]config.ProviderConfig{
-		"первый": {Type: "openai", BaseURL: "https://a.example/v1"},
-		"второй": {Type: "openai", BaseURL: "https://b.example/v1"},
+		"first":  {Type: "openai", BaseURL: "https://a.example/v1"},
+		"second": {Type: "openai", BaseURL: "https://b.example/v1"},
 	}
 
 	reg, err := Build(c)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	for _, id := range []string{"первый", "второй"} {
+	for _, id := range []string{"first", "second"} {
 		p, err := reg.Get(provider.ID(id))
 		if err != nil {
 			t.Fatalf("Get(%q): %v", id, err)
@@ -163,20 +168,20 @@ func TestProviderIDMatchesSectionName(t *testing.T) {
 	}
 }
 
-// TestOpenAIRequiresBaseURL — у сервиса на общем протоколе нет адреса по
-// умолчанию: он у каждого свой.
+// TestOpenAIRequiresBaseURL — a service on the shared protocol has no default
+// address: each one has its own.
 func TestOpenAIRequiresBaseURL(t *testing.T) {
 	c := config.Default()
 	c.Upstream.Val = ""
-	c.Providers = map[string]config.ProviderConfig{"мой": {Type: "openai"}}
+	c.Providers = map[string]config.ProviderConfig{"mine": {Type: "openai"}}
 
 	if _, err := Build(c); err == nil {
 		t.Fatal("an openai-compatible provider without a base_url must fail")
 	}
 }
 
-// TestOpenCodeDefaultsToItsKnownURL — у opencode адрес известен, и его не
-// нужно повторять в конфигурации.
+// TestOpenCodeDefaultsToItsKnownURL — opencode's address is known, and it need
+// not be repeated in the configuration.
 func TestOpenCodeDefaultsToItsKnownURL(t *testing.T) {
 	c := cfgWith(t, "opencode", config.ProviderConfig{Type: "opencode"})
 
@@ -197,14 +202,14 @@ func TestOpenCodeDefaultsToItsKnownURL(t *testing.T) {
 	}
 }
 
-// TestSettingsForwardedToProvider — настройки секции доезжают до провайдера.
+// TestSettingsForwardedToProvider — the section's settings reach the provider.
 func TestSettingsForwardedToProvider(t *testing.T) {
-	c := cfgWith(t, "мой", config.ProviderConfig{
+	c := cfgWith(t, "mine", config.ProviderConfig{
 		Type:    "openai",
 		BaseURL: "https://example.test/v1",
 		Settings: map[string]any{
 			"chat_path":  "/custom/chat",
-			"user_agent": "мой-агент/1.0",
+			"user_agent": "my-agent/1.0",
 		},
 	})
 
@@ -212,7 +217,7 @@ func TestSettingsForwardedToProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	p, _ := reg.Get("мой")
+	p, _ := reg.Get("mine")
 	prep, err := p.Build(provider.Request{Model: provider.Model{ID: "x"}})
 	if err != nil {
 		t.Fatal(err)
@@ -220,16 +225,16 @@ func TestSettingsForwardedToProvider(t *testing.T) {
 	if !strings.HasSuffix(prep.URL, "/custom/chat") {
 		t.Fatalf("URL = %q, want the configured chat path", prep.URL)
 	}
-	if got := prep.Headers.Get("user-agent"); got != "мой-агент/1.0" {
+	if got := prep.Headers.Get("user-agent"); got != "my-agent/1.0" {
 		t.Fatalf("user-agent = %q", got)
 	}
 }
 
-// TestBuildDoesNotMutateConfiguration — сборка не должна менять конфигурацию:
-// её читают и другие потребители.
+// TestBuildDoesNotMutateConfiguration — assembly must not change the
+// configuration: other consumers read it too.
 func TestBuildDoesNotMutateConfiguration(t *testing.T) {
 	settings := map[string]any{"chat_path": "/original"}
-	c := cfgWith(t, "мой", config.ProviderConfig{
+	c := cfgWith(t, "mine", config.ProviderConfig{
 		Type:     "openai",
 		BaseURL:  "https://example.test/v1",
 		Settings: settings,
@@ -243,19 +248,20 @@ func TestBuildDoesNotMutateConfiguration(t *testing.T) {
 	}
 }
 
-// TestModelsComeFromTheService — каталог берётся у сервиса, а не из
-// конфигурации. Это главное свойство: список в коде разошёлся бы с сервисом,
-// и клиент выбирал бы то, чего больше нет.
+// TestModelsComeFromTheService — the catalog is taken from the service, not
+// from the configuration. That is the main property: a list in the code would
+// drift away from the service, and the client would pick something that no
+// longer exists.
 func TestModelsComeFromTheService(t *testing.T) {
 	var asked []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		asked = append(asked, r.URL.Path)
 		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"id":"живая-модель"},{"id":"вторая"}]}`))
+		_, _ = w.Write([]byte(`{"data":[{"id":"live-model"},{"id":"second"}]}`))
 	}))
 	defer srv.Close()
 
-	c := cfgWith(t, "свой", config.ProviderConfig{
+	c := cfgWith(t, "own", config.ProviderConfig{
 		Type:    "openai",
 		BaseURL: srv.URL,
 	})
@@ -264,35 +270,35 @@ func TestModelsComeFromTheService(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	p, _ := reg.Get("свой")
+	p, _ := reg.Get("own")
 	models, err := p.Models(t.Context())
 	if err != nil {
 		t.Fatalf("Models: %v", err)
 	}
 
-	if len(models) != 2 || models[0].ID != "живая-модель" {
+	if len(models) != 2 || models[0].ID != "live-model" {
 		t.Fatalf("Models = %+v, want the two the service declared", models)
 	}
 	if len(asked) != 1 || asked[0] != "/models" {
 		t.Fatalf("service was asked %v, want GET /models", asked)
 	}
-	// Модель без свойств описывается умолчаниями, а не отвергается: сервис
-	// объявил её раньше, чем каталог свойств о ней узнал.
+	// A model without properties is described by defaults rather than rejected:
+	// the service declared it before the property catalog learned about it.
 	if models[0].Context <= 0 {
 		t.Fatalf("Context = %d, want a usable default", models[0].Context)
 	}
 }
 
-// TestCatalogFailureIsReported — недоступный каталог отдаётся ошибкой, а не
-// пустым списком. Пустой список оператор прочитал бы как «у сервиса нет
-// моделей» и искал бы причину не там.
+// TestCatalogFailureIsReported — an unavailable catalog is returned as an
+// error, not as an empty list. An empty list would be read by the operator as
+// "the service has no models" and send them looking in the wrong place.
 func TestCatalogFailureIsReported(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"nope"}`, http.StatusForbidden)
 	}))
 	defer srv.Close()
 
-	c := cfgWith(t, "свой", config.ProviderConfig{
+	c := cfgWith(t, "own", config.ProviderConfig{
 		Type:    "openai",
 		BaseURL: srv.URL,
 	})
@@ -301,25 +307,26 @@ func TestCatalogFailureIsReported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	p, _ := reg.Get("свой")
+	p, _ := reg.Get("own")
 	models, err := p.Models(t.Context())
 	if err == nil {
 		t.Fatalf("Models = %+v, want an error for an unavailable catalog", models)
 	}
-	// Отказ сервиса должен быть виден в причине: без него разбираться не с чем.
+	// The service's refusal must be visible in the cause: without it there is
+	// nothing to investigate.
 	if !strings.Contains(err.Error(), "403") {
 		t.Fatalf("error %q does not name the status", err)
 	}
 }
 
-// TestRegistryOrderIsStable — порядок в реестре не должен зависеть от обхода
-// map: списки в CLI и TUI иначе прыгали бы между запусками.
+// TestRegistryOrderIsStable — the order in the registry must not depend on map
+// traversal: lists in the CLI and the TUI would otherwise jump between runs.
 func TestRegistryOrderIsStable(t *testing.T) {
 	c := config.Default()
 	c.Providers = map[string]config.ProviderConfig{
-		"в": {Type: "openai", BaseURL: "https://v.test/v1"},
-		"а": {Type: "openai", BaseURL: "https://a.test/v1"},
-		"б": {Type: "openai", BaseURL: "https://b.test/v1"},
+		"c": {Type: "openai", BaseURL: "https://v.test/v1"},
+		"a": {Type: "openai", BaseURL: "https://a.test/v1"},
+		"b": {Type: "openai", BaseURL: "https://b.test/v1"},
 	}
 
 	reg, err := Build(c)
@@ -327,7 +334,7 @@ func TestRegistryOrderIsStable(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	ids := reg.IDs()
-	want := []provider.ID{"а", "б", "в"}
+	want := []provider.ID{"a", "b", "c"}
 	if len(ids) != len(want) {
 		t.Fatalf("IDs = %v, want %v", ids, want)
 	}

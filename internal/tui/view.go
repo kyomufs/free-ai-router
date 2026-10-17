@@ -8,11 +8,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Update реализует tea.Model.
+// Update implements tea.Model.
 //
-// Клавиши означают одно и то же на всех экранах: переключение экранов, движение
-// по строкам, перечитывание и выход. Неназначенная клавиша не делает НИЧЕГО —
-// ни перерисовки, ни мерцания: лишняя перерисовка читается как сбой.
+// The keys mean the same thing on every screen: switching screens, moving
+// through the rows, re-reading and exiting. An unassigned key does NOTHING — no
+// redraw, no flicker: a superfluous redraw reads as a failure.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -60,10 +60,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// clampCursor удерживает курсор в границах списка строк.
+// clampCursor keeps the cursor within the bounds of the row list.
 //
-// Без этого переключение на экран с меньшим числом строк оставило бы курсор
-// указывающим в пустоту, и выделение исчезло бы без объяснения.
+// Without this, switching to a screen with fewer rows would leave the cursor
+// pointing into the void, and the selection would disappear without
+// explanation.
 func (m *Model) clampCursor() {
 	if n := m.rowCount(); m.Cursor >= n {
 		m.Cursor = n - 1
@@ -73,7 +74,7 @@ func (m *Model) clampCursor() {
 	}
 }
 
-// rowCount возвращает число строк на текущем экране.
+// rowCount returns the number of rows on the current screen.
 func (m Model) rowCount() int {
 	n := 0
 	for _, s := range m.sections {
@@ -82,8 +83,8 @@ func (m Model) rowCount() int {
 	return n
 }
 
-// Стили. Цвета подобраны так, чтобы интерфейс читался и на светлом, и на
-// тёмном фоне, и оставался спокойным: это инструмент, а не витрина.
+// Styles. The colours are picked so that the interface reads both on a light
+// and on a dark background, and stays calm: this is a tool, not a shop window.
 var (
 	styleTitle    = lipgloss.NewStyle().Bold(true)
 	styleSection  = lipgloss.NewStyle().Bold(true).Faint(false)
@@ -94,7 +95,7 @@ var (
 	styleTabs     = lipgloss.NewStyle().Faint(true)
 )
 
-// View реализует tea.Model.
+// View implements tea.Model.
 func (m Model) View() string {
 	if m.quitting {
 		return ""
@@ -108,12 +109,12 @@ func (m Model) View() string {
 	b.WriteString("\n\n")
 
 	if m.err != nil {
-		b.WriteString(styleError.Render("ошибка чтения данных: " + m.err.Error()))
+		b.WriteString(styleError.Render("error reading data: " + m.err.Error()))
 		b.WriteString("\n\n")
 	}
 
 	if len(m.sections) == 0 {
-		b.WriteString(styleNote.Render("данных нет"))
+		b.WriteString(styleNote.Render("no data"))
 		b.WriteString("\n")
 	}
 
@@ -147,12 +148,12 @@ func (m Model) View() string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString(styleTabs.Render("Tab экраны · ↑↓ строки · r обновить · q выход"))
+	b.WriteString(styleTabs.Render("Tab screens · ↑↓ rows · r refresh · q quit"))
 	b.WriteString("\n")
 	return b.String()
 }
 
-// renderTabs рисует полосу экранов.
+// renderTabs draws the screen bar.
 func (m Model) renderTabs() string {
 	names := []Screen{ScreenStatus, ScreenKeys, ScreenControl}
 	parts := make([]string, 0, len(names))

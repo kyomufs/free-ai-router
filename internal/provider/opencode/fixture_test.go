@@ -8,16 +8,17 @@ import (
 	"testing"
 )
 
-// TestClassifyOnRecordedRefusal проверяет разбор отказа на ЗАПИСАННОМ ответе
-// сервиса, а не на выдуманном.
+// TestClassifyOnRecordedRefusal checks refusal parsing on a RECORDED service
+// response rather than on an invented one.
 //
-// Это единственная проверка формы отказа, которую нельзя вывести из кода:
-// измерения в плане получены чтением исходников, а здесь — живой обмен. Файл и
-// его происхождение описаны в testdata/README.md.
+// This is the only check of the refusal shape that cannot be derived from the
+// code: the measurements in the plan were obtained by reading the sources, while
+// here it is a live exchange. The file and its provenance are described in
+// testdata/README.md.
 //
-// Осторожно: ответ зависит от состояния квоты на момент запроса. Если он
-// изменится, тест это покажет — и тогда обновлять надо ФИКСТУРУ, а не
-// подгонять тест.
+// Careful: the response depends on the quota state at the moment of the request.
+// If that changes, the test will show it — and then the FIXTURE is what needs
+// updating, not the test being bent to fit.
 func TestClassifyOnRecordedRefusal(t *testing.T) {
 	body := readFixture(t, "refusal-freetier.json")
 
@@ -29,8 +30,8 @@ func TestClassifyOnRecordedRefusal(t *testing.T) {
 
 	failure := newTestProvider(t).Classify(resp, body)
 
-	// Тело обязано дойти до клиента БЕЗ ИЗМЕНЕНИЙ: клиент ищет в нём признаки
-	// error.type и error.code, по которым принимает решение о повторе.
+	// The body must reach the client WITHOUT CHANGES: the client looks in it for
+	// the error.type and error.code signals by which it decides whether to retry.
 	if string(failure.Body) != string(body) {
 		t.Fatalf("the refusal body was altered:\n got %s\nwant %s", failure.Body, body)
 	}
@@ -38,18 +39,19 @@ func TestClassifyOnRecordedRefusal(t *testing.T) {
 		t.Fatalf("status = %d, want 403", failure.Status)
 	}
 
-	// Отказ в доступе означает, что при наличии ключа осмысленно попробовать
-	// другой: сервис отвечает так и на исчерпанное право доступа.
+	// An access refusal means that, if a key is available, it makes sense to try
+	// another one: the service answers that way also for an exhausted access
+	// right.
 	if !failure.KeyRejected {
 		t.Fatal("403 must be treated as a reason to try another credential")
 	}
 }
 
-// TestRecordedRefusalKeepsClientSignals проверяет, что признаки, по которым
-// клиент принимает решение, доживают до него.
+// TestRecordedRefusalKeepsClientSignals checks that the signals by which the
+// client makes its decision survive all the way to it.
 //
-// Признаки проверяются подстроками: тело передаётся дословно, и разбирать его
-// здесь значило бы заводить второго разборщика того же ответа.
+// The signals are checked as substrings: the body is passed verbatim, and
+// parsing it here would mean introducing a second parser of the same response.
 func TestRecordedRefusalKeepsClientSignals(t *testing.T) {
 	body := string(readFixture(t, "refusal-freetier.json"))
 
@@ -60,8 +62,8 @@ func TestRecordedRefusalKeepsClientSignals(t *testing.T) {
 	}
 }
 
-// TestClassifyLeavesAbsentHeaderAlone: в записанном отказе нет заголовка
-// ожидания, и разбор не должен его выдумывать.
+// TestClassifyLeavesAbsentHeaderAlone: the recorded refusal has no wait header,
+// and the parsing must not invent one.
 func TestClassifyLeavesAbsentHeaderAlone(t *testing.T) {
 	body := readFixture(t, "refusal-freetier.json")
 	resp := &http.Response{StatusCode: http.StatusForbidden, Header: make(http.Header)}
@@ -72,7 +74,7 @@ func TestClassifyLeavesAbsentHeaderAlone(t *testing.T) {
 	}
 }
 
-// readFixture читает записанный обмен.
+// readFixture reads a recorded exchange.
 func readFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	path := filepath.Join("testdata", name)

@@ -11,25 +11,26 @@ import (
 	"free-ai-router/internal/provider"
 )
 
-// keyRegistry хранит механизмы ротации ключей по провайдерам.
+// keyRegistry holds the key rotation mechanisms per provider.
 //
-// ОТДЕЛЬНЫЙ МЕХАНИЗМ НА ПРОВАЙДЕРА, а не один общий. Реализация одинакова, но
-// состояние раздельное: смешав ключи, шлюз отправлял бы ключ одного сервиса в
-// запросы к другому, и счётчики расхода приписывались бы не тому.
+// A SEPARATE MECHANISM PER PROVIDER, not one shared. The implementation is
+// identical, but the state is separate: having mixed the keys, the gateway would
+// send one service's key in requests to another, and the usage counters would be
+// attributed to the wrong one.
 //
-// Механизм подключается только там, где ключи вообще есть. Провайдер без ключей
-// работает анонимно, и это НОРМАЛЬНЫЙ режим, а не отсутствие настройки: сервисы
-// с бесплатным тиром именно так и устроены.
+// The mechanism is attached only where keys exist at all. A provider without
+// keys works anonymously, and that is a NORMAL mode, not a missing setting:
+// services with a free tier are built exactly that way.
 type keyRegistry struct {
 	byProvider map[provider.ID]*capability.KeyRotation
 	order      []provider.ID
 }
 
-// newKeyRegistry собирает механизмы из конфигурации.
+// newKeyRegistry assembles the mechanisms from the configuration.
 //
-// Ключи провайдера берутся из его секции: сначала значение в файле, затем
-// переменная, названная рядом. Отпечатки для справки считаются здесь же, чтобы
-// сам ключ дальше по коду не ходил.
+// A provider's keys come from its section: first the value in the file, then the
+// variable named alongside it. The fingerprints for reference are computed right
+// here, so that the key itself does not travel further through the code.
 func newKeyRegistry(cfg *config.Config, providers *provider.Registry) *keyRegistry {
 	r := &keyRegistry{byProvider: make(map[provider.ID]*capability.KeyRotation)}
 
@@ -43,14 +44,14 @@ func newKeyRegistry(cfg *config.Config, providers *provider.Registry) *keyRegist
 
 		keys := keysFromConfig(pc)
 		if len(keys) == 0 {
-			// Ключей нет: механизм не создаётся, и провайдер пойдёт
-			// анонимно.
+			// No keys: the mechanism is not created, and the provider
+			// will run anonymously.
 			continue
 		}
 
 		built, err := capability.NewKeyRotation(map[string]any{"keys": keys})
 		if err != nil {
-			continue // форма настроек уже проверена каталогом
+			continue // the settings shape has already been checked by the catalog
 		}
 		kr, ok := built.(*capability.KeyRotation)
 		if !ok {
@@ -61,10 +62,11 @@ func newKeyRegistry(cfg *config.Config, providers *provider.Registry) *keyRegist
 	return r
 }
 
-// keysFromConfig извлекает список ключей провайдера.
+// keysFromConfig extracts a provider's list of keys.
 func keysFromConfig(pc config.ProviderConfig) []any {
-	// Основной источник — поля секции. Список может быть и в настройках:
-	// так удобнее, когда ключей много и они лежат отдельно.
+	// The primary source is the section fields. The list may also live in the
+	// settings: that is more convenient when there are many keys and they are
+	// kept separately.
 	var raw []any
 	if k := pc.ProviderKey(); k != "" {
 		raw = append(raw, k)
@@ -80,7 +82,7 @@ func keysFromConfig(pc config.ProviderConfig) []any {
 	return raw
 }
 
-// rotationMap отдаёт карту для поверхности запросов.
+// rotationMap hands out the map for the request surface.
 func (r *keyRegistry) rotationMap() map[string]*capability.KeyRotation {
 	out := make(map[string]*capability.KeyRotation, len(r.byProvider))
 	for id, kr := range r.byProvider {
@@ -92,10 +94,10 @@ func (r *keyRegistry) rotationMap() map[string]*capability.KeyRotation {
 	return out
 }
 
-// firstProvider возвращает провайдера по умолчанию.
+// firstProvider returns the default provider.
 //
-// Первый в порядке конфигурации: когда клиент не назвал провайдера, разумнее
-// взять предсказуемый, чем случайный.
+// The first in configuration order: when the client did not name a provider, it
+// is more reasonable to take a predictable one than a random one.
 func (r *keyRegistry) firstProvider() provider.ID {
 	if len(r.order) == 0 {
 		return ""
@@ -103,7 +105,7 @@ func (r *keyRegistry) firstProvider() provider.ID {
 	return r.order[0]
 }
 
-// Keys реализует gateway.KeyRotationRegistry.
+// Keys implements gateway.KeyRotationRegistry.
 func (r *keyRegistry) Keys(id provider.ID) []string {
 	kr, ok := r.byProvider[id]
 	if !ok {
@@ -112,11 +114,11 @@ func (r *keyRegistry) Keys(id provider.ID) []string {
 	return kr.KeysSnapshot()
 }
 
-// KeyFingerprints реализует gateway.KeyRotationRegistry.
+// KeyFingerprints implements gateway.KeyRotationRegistry.
 //
-// Отдаются ОТПЕЧАТКИ, а не ключи: справка нужна, чтобы понять, сколько ключей
-// в работе, а не чтобы увидеть секрет. Отпечаток короткий — его достаточно для
-// различения и недостаточно для восстановления.
+// FINGERPRINTS are handed out, not keys: the reference is needed to learn how
+// many keys are in use, not to see the secret. A fingerprint is short — enough
+// to tell keys apart and not enough to reconstruct one.
 func (r *keyRegistry) KeyFingerprints(id provider.ID) []string {
 	kr, ok := r.byProvider[id]
 	if !ok {
@@ -130,13 +132,13 @@ func (r *keyRegistry) KeyFingerprints(id provider.ID) []string {
 	return out
 }
 
-// HasRotation реализует gateway.KeyRotationRegistry.
+// HasRotation implements gateway.KeyRotationRegistry.
 func (r *keyRegistry) HasRotation(id provider.ID) bool {
 	kr, ok := r.byProvider[id]
 	return ok && kr.Len() > 1
 }
 
-// AddKey реализует gateway.KeyRotationRegistry.
+// AddKey implements gateway.KeyRotationRegistry.
 func (r *keyRegistry) AddKey(id provider.ID, key string) bool {
 	kr, ok := r.byProvider[id]
 	if !ok {
@@ -145,10 +147,10 @@ func (r *keyRegistry) AddKey(id provider.ID, key string) bool {
 	return kr.Add(key)
 }
 
-// RemoveFingerprint реализует gateway.KeyRotationRegistry.
+// RemoveFingerprint implements gateway.KeyRotationRegistry.
 //
-// Удаление идёт по отпечатку: удаляющий не обязан знать секрет — ему
-// достаточно того, что показала справка.
+// Removal goes by fingerprint: the remover is not obliged to know the secret —
+// what the reference showed is enough for it.
 func (r *keyRegistry) RemoveFingerprint(id provider.ID, fp string) bool {
 	kr, ok := r.byProvider[id]
 	if !ok {
@@ -162,15 +164,15 @@ func (r *keyRegistry) RemoveFingerprint(id provider.ID, fp string) bool {
 	return false
 }
 
-// fingerprint возвращает короткий отпечаток ключа.
+// fingerprint returns a short fingerprint of the key.
 //
-// Длина выбрана так, чтобы случайное совпадение было невероятным, а значение
-// оставалось удобным для глаза и для копирования.
+// The length is chosen so that an accidental collision would be improbable while
+// the value stays convenient for the eye and for copying.
 func fingerprint(key string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(key)))
 	return hex.EncodeToString(sum[:4])
 }
 
-// Проверка на этапе сборки: реестр обязан удовлетворять интерфейсу, которого
-// ждёт поверхность управления.
+// Build-time check: the registry is obliged to satisfy the interface the control
+// surface expects.
 var _ gateway.KeyRotationRegistry = (*keyRegistry)(nil)

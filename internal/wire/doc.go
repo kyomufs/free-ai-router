@@ -1,22 +1,22 @@
-// Package wire — общий контракт провода, не привязанный к конкретному
-// провайдеру.
+// Package wire is the shared wire contract, not tied to a particular provider.
 //
-// Здесь лежит то, что нужно любому провайдеру: идентификаторы, которые шлюз
-// выводит сам, и нейтральное представление запроса. Специфика сервисов живёт в
-// internal/provider/<имя>.
+// It holds what every provider needs: the identifiers the gateway derives
+// itself, and a neutral representation of the request. Service-specific
+// detail lives in internal/provider/<name>.
 //
-// ЧТО ЗДЕСЬ, А ЧТО ТАМ. Разделение проходит по вопросу «чей это факт».
+// WHAT IS HERE AND WHAT IS THERE. The split follows the question "whose fact
+// is this".
 //
-//	идентификаторы сессии и сообщения   здесь — их выводит шлюз
-//	нейтральная форма запроса           здесь — её собирает шлюз
-//	набор обязательных инструментов     у провайдера — это его проверка
-//	вид системного промпта              у провайдера — это его проверка
-//	имена и значения заголовков         у провайдера — это его контракт
+//	session and message identifiers   here — the gateway derives them
+//	the neutral request form          here — the gateway assembles it
+//	the set of required tools         at the provider — that is its check
+//	the system prompt shape           at the provider — that is its check
+//	header names and values           at the provider — that is its contract
 //
-// Пакет чистый: без HTTP, без горутин, без неявного времени. Это позволяет
-// проверять его свойствами и фикстурами без сети, а поведение остаётся
-// полностью воспроизводимым.
+// The package is pure: no HTTP, no goroutines, no implicit time. That makes it
+// testable by properties and fixtures without a network, and the behaviour
+// stays fully reproducible.
 //
-// Формула идентификаторов выведена из исходников opencode 2.0.30
-// (packages/schema/src/identifier.ts и session-message.ts).
+// The identifier formula is derived from the opencode 2.0.30 sources
+// (packages/schema/src/identifier.ts and session-message.ts).
 package wire

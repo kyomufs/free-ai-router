@@ -1,31 +1,33 @@
-// Package provider описывает, что такое «провайдер бесплатных моделей» и как
-// шлюз с ним разговаривает.
+// Package provider describes what a "free model provider" is and how the
+// gateway talks to one.
 //
-// РАЗДЕЛЕНИЕ ОТВЕТСТВЕННОСТИ — главное в этом пакете. Провайдер НЕ описывает
-// свою политику повторов, ротацию ключей или транспорт. Он отвечает ровно на
-// три вопроса:
+// SEPARATION OF RESPONSIBILITIES is the core of this package. A provider does
+// NOT describe its own retry policy, key rotation or transport. It answers
+// exactly three questions:
 //
-//  1. Как называются его модели и что они умеют?     → Models()
-//  2. Как собрать запрос к нему из общего описания?   → Build()
-//  3. Как понять, что он ответил отказом?            → Classify()
+//  1. What are its models called and what can they do?  → Models()
+//  2. How is a request to it built from the common description? → Build()
+//  3. How do we tell that it answered with a refusal?   → Classify()
 //
-// Всё остальное — общая механика шлюза, и она одинакова для всех провайдеров:
+// Everything else is the common gateway machinery, and it is the same for every
+// provider:
 //
-//	ротация ключей      internal/capability/keyrotation
-//	отказ и его передача internal/gateway
-//	транспорт           internal/transport
+//	key rotation        internal/capability/keyrotation
+//	refusal and its forwarding internal/gateway
+//	transport           internal/transport
 //
-// Такое разделение нужно потому, что МЕХАНИЗМЫ ОБХОДА часто совпадают у
-// непохожих провайдеров. Ротация ключей работает одинаково для любого
-// провайдера, выдающего ключи. Подмена формы запроса нужна всем, кто фильтрует
-// клиентов. Проксирование трафика через чужой сервер вообще не зависит от
-// провайдера. Если бы каждый провайдер нёс свою копию этого кода, похожие
-// провайдеры требовали бы его дублировать, а исправление расходилось бы по
-// копиям.
+// This split is needed because BYPASS MECHANISMS often coincide across
+// dissimilar providers. Key rotation works the same for any provider that hands
+// out keys. Rewriting the request shape is needed by everyone who filters
+// clients. Proxying traffic through a third-party server does not depend on the
+// provider at all. If every provider carried its own copy of that code,
+// similar providers would have to duplicate it, and a fix would drift across
+// the copies.
 //
-// Обратное тоже верно: то, что специфично, обязано остаться у провайдера.
-// Набор обязательных инструментов, вид системного промпта, форма заголовков
-// сессии — свойства конкретной проверки, а не общей природы вещей.
+// The converse holds too: whatever is specific must stay with the provider. The
+// set of mandatory tools, the shape of the system prompt, the form of the
+// session headers are properties of a particular check, not of the general
+// nature of things.
 package provider
 
 import (
@@ -41,224 +43,232 @@ import (
 // changing it renames a user-visible route.
 type ID string
 
-// Model — одна модель, которую провайдер предлагает.
+// Model is one model a provider offers.
 //
-// Поля описывают модель, а не способ её вызова: как её зовут, сколько она
-// вмещает и что умеет. Способ вызова решает Build().
+// The fields describe the model, not how to call it: what it is called, how much
+// it holds and what it can do. How to call it is decided by Build().
 type Model struct {
-	// ID — идентификатор в терминах провайдера, уходит в поле "model".
+	// ID is the identifier in the provider's terms; it goes into the "model" field.
 	ID string
-	// Name — отображаемое имя.
+	// Name is the display name.
 	Name string
-	// Description — краткое описание для интерфейсов.
+	// Description is a short description for interfaces.
 	Description string
-	// Context — размер окна в токенах.
+	// Context is the window size in tokens.
 	Context int
-	// MaxOutput — потолок ответа в токенах.
+	// MaxOutput is the response ceiling in tokens.
 	MaxOutput int
-	// Vision — принимает ли модель изображения.
+	// Vision reports whether the model accepts images.
 	Vision bool
-	// Reasoning — умеет ли модель рассуждать.
+	// Reasoning reports whether the model can reason.
 	Reasoning bool
-	// ReasoningOptions — объявленная лестница усилий. Пусто означает, что
-	// модель либо не рассуждает, либо принимает свободную форму.
+	// ReasoningOptions is the declared effort ladder. Empty means the model
+	// either does not reason or accepts a free form.
 	ReasoningOptions []ReasoningOption
-	// ReasoningField — поле, в которое ответ несёт размышления
-	// (например "reasoning_content"). Пусто — размышления не отделяются.
+	// ReasoningField is the field the response carries its thinking in
+	// (for example "reasoning_content"). Empty means thinking is not separated.
 	ReasoningField string
-	// Free — объявлена ли модель бесплатной. Используется только для
-	// фильтрации в списках и никогда не влияет на поведение запроса.
+	// Free reports whether the model is declared free. Used only for filtering
+	// in listings and never affects request behaviour.
 	Free bool
 }
 
-// ReasoningOption — одна форма управления усилием рассуждения.
+// ReasoningOption is one form of controlling reasoning effort.
 //
-// Формы взяты из каталогов моделей и повторяются у разных провайдеров, поэтому
-// описаны типами, а не строкой.
+// The forms come from model catalogs and recur across providers, so they are
+// described by types rather than by a string.
 type ReasoningOption struct {
-	// Kind — toggle, effort или budget_tokens.
+	// Kind is toggle, effort or budget_tokens.
 	Kind ReasoningOptionKind
-	// Values — допустимые значения для Kind == ReasoningEffort.
+	// Values are the allowed values for Kind == ReasoningEffort.
 	Values []string
-	// Max — потолок для Kind == ReasoningBudget.
+	// Max is the ceiling for Kind == ReasoningBudget.
 	Max int
 }
 
-// ReasoningOptionKind различает формы управления усилием.
+// ReasoningOptionKind distinguishes the forms of effort control.
 type ReasoningOptionKind string
 
 const (
-	// ReasoningToggle — рассуждение включается и выключается.
+	// ReasoningToggle — reasoning is switched on and off.
 	ReasoningToggle ReasoningOptionKind = "toggle"
-	// ReasoningEffort — усилие задаётся словом из Values.
+	// ReasoningEffort — effort is set by a word from Values.
 	ReasoningEffort ReasoningOptionKind = "effort"
-	// ReasoningBudget — усилие задаётся числом токенов.
+	// ReasoningBudget — effort is set by a number of tokens.
 	ReasoningBudget ReasoningOptionKind = "budget_tokens"
 )
 
-// Request — общее описание запроса, которое шлюз передаёт провайдеру.
+// Request is the common description of a request that the gateway hands to a
+// provider.
 //
-// Шлюз собирает эту структуру из запроса клиента и метаданных модели; провайдер
-// превращает её в байты тела и набор заголовков. Провайдер видит ровно то, что
-// ему нужно, и не знает ничего о форме клиентского запроса.
+// The gateway assembles this structure from the client request and the model
+// metadata; the provider turns it into body bytes and a set of headers. The
+// provider sees exactly what it needs and knows nothing about the shape of the
+// client request.
 type Request struct {
-	// Model — разрешённая модель (не исходная строка клиента).
+	// Model is the resolved model (not the client's original string).
 	Model Model
-	// Messages — сообщения в нейтральной форме.
+	// Messages are the messages in neutral form.
 	Messages []Message
-	// System — системная часть, уже собранная шлюзом.
+	// System is the system part, already assembled by the gateway.
 	System string
-	// Tools — инструменты, которые клиент объявил.
+	// Tools are the tools the client declared.
 	Tools []Tool
-	// ToolChoice — требование к выбору инструмента. Пусто означает «поле не
-	// отправлять»: клиент opencode именно так и делает, когда инструментов нет.
+	// ToolChoice is the requirement for tool selection. Empty means "do not
+	// send the field": that is exactly what the opencode client does when there
+	// are no tools.
 	ToolChoice string
-	// MaxTokens — резерв на ответ.
+	// MaxTokens is the allowance for the response.
 	MaxTokens int
-	// Temperature — температура, если клиент её задал.
+	// Temperature is the temperature, if the client set one.
 	Temperature *float64
-	// ReasoningEffort — затребованное усилие после клампинга.
+	// ReasoningEffort is the requested effort after clamping.
 	ReasoningEffort string
-	// Stream — всегда истина: шлюз работает потоком.
+	// Stream is always true: the gateway works in streaming mode.
 	Stream bool
-	// Session — идентификаторы сессии, которые провайдер может положить в
-	// заголовки. Провайдер решает, нужны ли они ему.
+	// Session are the session identifiers the provider may put into headers.
+	// The provider decides whether it needs them.
 	Session SessionIDs
 }
 
-// Message — одно сообщение в нейтральной форме.
+// Message is one message in neutral form.
 //
-// Нейтральная форма нужна, чтобы провайдер не разбирал клиентский запрос: шлюз
-// приводит его к этому виду один раз, и каждый провайдер переводит его в свой.
+// The neutral form exists so that a provider does not parse the client request:
+// the gateway reduces it to this shape once, and each provider translates it
+// into its own.
 type Message struct {
-	// Role — system, user, assistant или tool.
+	// Role is system, user, assistant or tool.
 	Role string
-	// Text — текстовая часть.
+	// Text is the text part.
 	Text string
-	// Reasoning — размышления ассистента, если есть.
+	// Reasoning is the assistant's thinking, if any.
 	Reasoning string
-	// ToolCalls — вызовы инструментов, сделанные ассистентом.
+	// ToolCalls are the tool calls the assistant made.
 	ToolCalls []ToolCall
-	// ToolCallID — идентификатор вызова, на который отвечает сообщение роли tool.
+	// ToolCallID is the identifier of the call that the tool-role message answers.
 	ToolCallID string
-	// Images — изображения в сообщении.
+	// Images are the images in the message.
 	Images []Image
 }
 
-// ToolCall — вызов инструмента ассистентом.
+// ToolCall is a tool call made by the assistant.
 type ToolCall struct {
 	ID        string
 	Name      string
 	Arguments string
 }
 
-// Image — вложение изображения.
+// Image is an image attachment.
 type Image struct {
 	MediaType string
 	Data      []byte
 }
 
-// Tool — объявление инструмента.
+// Tool is a tool declaration.
 type Tool struct {
 	Name        string
 	Description string
-	// Schema — JSON-схема параметров, уже сериализованная.
+	// Schema is the JSON schema of the parameters, already serialized.
 	Schema []byte
 }
 
-// SessionIDs — идентификаторы, выведенные шлюзом по контракту клиента.
+// SessionIDs are the identifiers derived by the gateway from the client
+// contract.
 //
-// Провайдер волен их игнорировать; те, кому они нужны, кладут их в свои
-// заголовки.
+// A provider is free to ignore them; those that need them put them into their
+// own headers.
 type SessionIDs struct {
-	// Session — идентификатор этой сессии.
+	// Session is the identifier of this session.
 	Session string
-	// Affinity — идентификатор корня группы для маршрутизации кеша.
+	// Affinity is the identifier of the group root for cache routing.
 	Affinity string
-	// Project — идентификатор проекта.
+	// Project is the project identifier.
 	Project string
-	// Message — идентификатор обрабатываемого сообщения.
+	// Message is the identifier of the message being handled.
 	Message string
-	// Parent — идентификатор родительской сессии, пусто для плоской.
+	// Parent is the identifier of the parent session, empty for a flat one.
 	Parent string
 }
 
-// Prepared — результат сборки запроса.
+// Prepared is the result of building a request.
 //
-// Провайдер возвращает то, что нужно отправить, и больше ничего. Транспорт,
-// повтор и классификация отказа — не его дело.
+// The provider returns what has to be sent and nothing more. Transport, retry
+// and refusal classification are not its business.
 type Prepared struct {
-	// URL — полный адрес, по которому отправлять запрос.
+	// URL is the full address to send the request to.
 	URL string
-	// Headers — заголовки запроса целиком. Шлюз их не дополняет: набор
-	// заголовков и есть часть контракта провайдера.
+	// Headers are the request headers in full. The gateway does not add to
+	// them: the set of headers is itself part of the provider contract.
 	Headers http.Header
-	// Body — сериализованное тело.
+	// Body is the serialized body.
 	Body []byte
-	// IdleTimeout — бюджет молчания потока для этого запроса. Ноль означает
-	// общий бюджет шлюза.
+	// IdleTimeout is the stream silence budget for this request. Zero means the
+	// gateway-wide budget.
 	IdleTimeout time.Duration
-	// FirstEventTimeout — бюджет до первых заголовков. Ноль означает общий.
+	// FirstEventTimeout is the budget until the first headers. Zero means the
+	// gateway-wide one.
 	FirstEventTimeout time.Duration
 }
 
-// Failure — классифицированный отказ провайдера.
+// Failure is a classified provider refusal.
 //
-// Отказ описывается МИНИМАЛЬНО: что ответил провайдер и повторяемо ли это.
-// Как поступить — решает общая механика (ротация ключей) и, в конечном счёте,
-// клиент.
+// A refusal is described MINIMALLY: what the provider answered and whether it
+// is repeatable. What to do about it is decided by the common machinery (key
+// rotation) and, ultimately, by the client.
 type Failure struct {
-	// Status — код, который провайдер вернул.
+	// Status is the code the provider returned.
 	Status int
-	// Body — тело ответа ДОСЛОВНО. Шлюз передаёт его клиенту без изменений,
-	// потому что клиент сам разбирает его поля.
+	// Body is the response body VERBATIM. The gateway passes it to the client
+	// unchanged, because the client parses its fields itself.
 	Body []byte
-	// Headers — заголовки ответа. Нужны целиком: retry-after и подобные
-	// влияют на решение клиента.
+	// Headers are the response headers. They are needed in full: retry-after
+	// and the like influence the client's decision.
 	Headers http.Header
-	// RetryAfter — разобранный retry-after, если он был. Отдельное поле
-	// нужно ротации ключей: она решает по нему, ждать или сменить ключ.
+	// RetryAfter is the parsed retry-after, if there was one. A separate field
+	// is needed by key rotation: it decides from it whether to wait or switch
+	// keys.
 	RetryAfter time.Duration
-	// KeyRejected — признак того, что отказ вызван именно учётными данными.
+	// KeyRejected marks that the refusal was caused specifically by the
+	// credentials.
 	//
-	// Это единственное суждение, которое провайдер делает об отказе, и оно
-	// существует ради ротации ключей: сменить ключ осмысленно только тогда,
-	// когда отвергнут ключ.
+	// This is the only judgement the provider makes about a refusal, and it
+	// exists for the sake of key rotation: switching a key is meaningful only
+	// when a key has been rejected.
 	KeyRejected bool
 }
 
-// Provider — то, что реализует конкретный сервис бесплатных моделей.
+// Provider is what a particular free-model service implements.
 type Provider interface {
-	// ID возвращает стабильный идентификатор.
+	// ID returns the stable identifier.
 	ID() ID
-	// Models возвращает каталог. Вызывается при старте и по запросу; сеть не
-	// предполагается, но и не запрещена — провайдер вправе закешировать
-	// результат.
+	// Models returns the catalog. Called at startup and on demand; the network
+	// is not assumed but is not forbidden either — a provider may cache the
+	// result.
 	Models(ctx context.Context) ([]Model, error)
-	// Build собирает запрос к провайдеру.
+	// Build assembles a request to the provider.
 	Build(req Request) (Prepared, error)
-	// Classify разбирает отказ провайдера.
+	// Classify parses a provider refusal.
 	//
-	// Вызывается только для статусов вне 2xx. Провайдер вправе не распознать
-	// отказ: тогда он возвращает Failure с KeyRejected == false, и шлюз
-	// просто передаст ответ клиенту.
+	// Called only for non-2xx statuses. A provider may fail to recognise a
+	// refusal: then it returns a Failure with KeyRejected == false, and the
+	// gateway simply forwards the response to the client.
 	Classify(resp *http.Response, body []byte) Failure
 }
 
-// Registry — набор доступных провайдеров, собранный из конфигурации.
+// Registry is the set of available providers, assembled from configuration.
 type Registry struct {
 	providers map[ID]Provider
 	order     []ID
 }
 
-// NewRegistry создаёт пустой реестр.
+// NewRegistry creates an empty registry.
 func NewRegistry() *Registry {
 	return &Registry{providers: make(map[ID]Provider)}
 }
 
-// Register добавляет провайдера. Повторная регистрация того же ID заменяет
-// прежнего и сохраняет позицию в порядке — так горячая перезагрузка
-// конфигурации не меняет порядок в списках.
+// Register adds a provider. Registering the same ID again replaces the previous
+// one and keeps its position in the order — that way a hot configuration reload
+// does not change the order in listings.
 func (r *Registry) Register(p Provider) {
 	id := p.ID()
 	if _, exists := r.providers[id]; !exists {
@@ -268,7 +278,7 @@ func (r *Registry) Register(p Provider) {
 	r.providers[id] = p
 }
 
-// Get возвращает провайдера по идентификатору.
+// Get returns a provider by identifier.
 func (r *Registry) Get(id ID) (Provider, error) {
 	p, ok := r.providers[id]
 	if !ok {
@@ -277,14 +287,14 @@ func (r *Registry) Get(id ID) (Provider, error) {
 	return p, nil
 }
 
-// IDs возвращает идентификаторы в стабильном порядке.
+// IDs returns the identifiers in stable order.
 func (r *Registry) IDs() []ID {
 	out := make([]ID, len(r.order))
 	copy(out, r.order)
 	return out
 }
 
-// All возвращает провайдеров в стабильном порядке.
+// All returns the providers in stable order.
 func (r *Registry) All() []Provider {
 	out := make([]Provider, 0, len(r.order))
 	for _, id := range r.order {

@@ -13,7 +13,7 @@ import (
 	"free-ai-router/internal/state"
 )
 
-// stubProvider — провайдер-подставка для проверок control API.
+// stubProvider — a stand-in provider for control API checks.
 type stubProvider struct {
 	id     provider.ID
 	models []provider.Model
@@ -33,7 +33,7 @@ func (s *stubProvider) Classify(*http.Response, []byte) provider.Failure {
 	return provider.Failure{}
 }
 
-// stubKeys — механизм ротации ключей для проверок.
+// stubKeys — a key-rotation mechanism for checks.
 type stubKeys struct {
 	keys map[provider.ID][]string
 }
@@ -71,19 +71,19 @@ func (s *stubKeys) RemoveFingerprint(id provider.ID, fingerprint string) bool {
 	return false
 }
 
-// newTestControl собирает обработчик для проверок.
+// newTestControl assembles the handler for checks.
 func newTestControl(t *testing.T) (*Handler, *http.ServeMux) {
 	t.Helper()
 
 	reg := provider.NewRegistry()
 	reg.Register(&stubProvider{
-		id: "первый",
+		id: "first",
 		models: []provider.Model{
-			{ID: "м1", Name: "Модель 1", Free: true, Context: 1000},
-			{ID: "м2", Name: "Модель 2", Free: true, Context: 2000, Reasoning: true},
+			{ID: "m1", Name: "Model 1", Free: true, Context: 1000},
+			{ID: "m2", Name: "Model 2", Free: true, Context: 2000, Reasoning: true},
 		},
 	})
-	reg.Register(&stubProvider{id: "второй", models: []provider.Model{{ID: "м3", Free: false}}})
+	reg.Register(&stubProvider{id: "second", models: []provider.Model{{ID: "m3", Free: false}}})
 
 	st, err := state.Open(t.TempDir() + "/state.json")
 	if err != nil {
@@ -97,7 +97,7 @@ func newTestControl(t *testing.T) (*Handler, *http.ServeMux) {
 	h := &Handler{
 		Providers: reg,
 		KeyRotation: &stubKeys{keys: map[provider.ID][]string{
-			"первый": {"ключ1", "ключ2"},
+			"first": {"key1", "key2"},
 		}},
 		State:      st,
 		Config:     cfg,
@@ -109,7 +109,7 @@ func newTestControl(t *testing.T) (*Handler, *http.ServeMux) {
 	return h, mux
 }
 
-// get выполняет GET-запрос к control API.
+// get performs a GET request against the control API.
 func get(t *testing.T, mux *http.ServeMux, path string, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -121,30 +121,30 @@ func get(t *testing.T, mux *http.ServeMux, path string, headers map[string]strin
 	return rec
 }
 
-// TestTokenIsEnforced — в режиме server проверка оборачивает И control API.
+// TestTokenIsEnforced — in server mode the check wraps the control API TOO.
 //
-// Control умеет израсходовать ключи провайдера, поэтому открытый control
-// обнулил бы проверку шлюза.
+// Control can burn through a provider's keys, so an open control would nullify
+// the gateway's check.
 func TestTokenIsEnforced(t *testing.T) {
 	_, mux := newTestControl(t)
-	h := &Handler{RequireToken: true, Token: "секрет", Providers: provider.NewRegistry()}
+	h := &Handler{RequireToken: true, Token: "secret", Providers: provider.NewRegistry()}
 	mux2 := http.NewServeMux()
 	h.Routes(mux2)
 
-	// Без токена — отказ.
+	// Without a token — refusal.
 	rec := get(t, mux2, Prefix+"status", nil)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status without a token = %d, want 401", rec.Code)
 	}
 
-	// С неверным токеном — тоже отказ.
-	rec = get(t, mux2, Prefix+"status", map[string]string{"authorization": "Bearer неверный"})
+	// With a wrong token — refusal as well.
+	rec = get(t, mux2, Prefix+"status", map[string]string{"authorization": "Bearer wrong"})
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status with a wrong token = %d, want 401", rec.Code)
 	}
 
-	// С верным — доступ есть.
-	rec = get(t, mux2, Prefix+"status", map[string]string{"authorization": "Bearer секрет"})
+	// With the right one — access is granted.
+	rec = get(t, mux2, Prefix+"status", map[string]string{"authorization": "Bearer secret"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status with the right token = %d, want 200", rec.Code)
 	}
@@ -152,7 +152,7 @@ func TestTokenIsEnforced(t *testing.T) {
 	_ = mux
 }
 
-// TestLocalModeNeedsNoToken — в local проверка не действует.
+// TestLocalModeNeedsNoToken — in local the check is not in force.
 func TestLocalModeNeedsNoToken(t *testing.T) {
 	_, mux := newTestControl(t)
 	if rec := get(t, mux, Prefix+"status", nil); rec.Code != http.StatusOK {
@@ -160,12 +160,12 @@ func TestLocalModeNeedsNoToken(t *testing.T) {
 	}
 }
 
-// TestStatusReportsProvidersAndCounters — снимок содержит провайдеров и
-// сегодняшние счётчики.
+// TestStatusReportsProvidersAndCounters — the snapshot contains the providers
+// and today's counters.
 func TestStatusReportsProvidersAndCounters(t *testing.T) {
 	h, mux := newTestControl(t)
-	h.State.RecordSuccess("м1", "")
-	h.State.RecordRefusal("м2", "")
+	h.State.RecordSuccess("m1", "")
+	h.State.RecordRefusal("m2", "")
 
 	rec := get(t, mux, Prefix+"status", nil)
 	if rec.Code != http.StatusOK {
@@ -187,14 +187,14 @@ func TestStatusReportsProvidersAndCounters(t *testing.T) {
 	for _, p := range st.Providers {
 		byID[p.ID] = p
 	}
-	if got := byID["первый"]; got.Models != 2 || got.FreeModels != 2 {
-		t.Fatalf("первый = %+v, want 2 models both free", got)
+	if got := byID["first"]; got.Models != 2 || got.FreeModels != 2 {
+		t.Fatalf("first = %+v, want 2 models both free", got)
 	}
-	if got := byID["первый"]; got.Keys != 2 || !got.KeyRotation {
-		t.Fatalf("первый keys = %+v, want 2 keys with rotation", got)
+	if got := byID["first"]; got.Keys != 2 || !got.KeyRotation {
+		t.Fatalf("first keys = %+v, want 2 keys with rotation", got)
 	}
-	if got := byID["второй"]; got.Keys != 0 || got.KeyRotation {
-		t.Fatalf("второй = %+v, want no keys", got)
+	if got := byID["second"]; got.Keys != 0 || got.KeyRotation {
+		t.Fatalf("second = %+v, want no keys", got)
 	}
 
 	if st.Totals.OK != 1 || st.Totals.Refused != 1 {
@@ -202,10 +202,10 @@ func TestStatusReportsProvidersAndCounters(t *testing.T) {
 	}
 }
 
-// TestStatsReportsDays — счётчики отдаются по дням.
+// TestStatsReportsDays — the counters are handed out by day.
 func TestStatsReportsDays(t *testing.T) {
 	h, mux := newTestControl(t)
-	h.State.RecordSuccess("м1", "")
+	h.State.RecordSuccess("m1", "")
 
 	rec := get(t, mux, Prefix+"stats", nil)
 	if rec.Code != http.StatusOK {
@@ -220,7 +220,8 @@ func TestStatsReportsDays(t *testing.T) {
 	}
 }
 
-// TestModelsListsEveryProvider — каталог содержит модели всех провайдеров.
+// TestModelsListsEveryProvider — the catalog contains the models of every
+// provider.
 func TestModelsListsEveryProvider(t *testing.T) {
 	_, mux := newTestControl(t)
 
@@ -242,29 +243,29 @@ func TestModelsListsEveryProvider(t *testing.T) {
 	for _, m := range body.Models {
 		providers[m.Provider]++
 	}
-	if providers["первый"] != 2 || providers["второй"] != 1 {
+	if providers["first"] != 2 || providers["second"] != 1 {
 		t.Fatalf("provider split = %v", providers)
 	}
 }
 
-// TestKeysAreFingerprinted — справка отдаёт отпечатки, а не секреты.
+// TestKeysAreFingerprinted — the help text hands out fingerprints, not secrets.
 //
-// Оператору нужно понять, сколько ключей в работе, а не увидеть ключ.
+// The operator needs to understand how many keys are in use, not to see a key.
 func TestKeysAreFingerprinted(t *testing.T) {
 	_, mux := newTestControl(t)
 
 	rec := get(t, mux, Prefix+"keys", nil)
 	body := rec.Body.String()
-	if strings.Contains(body, `"ключ1"`) {
+	if strings.Contains(body, `"key1"`) {
 		t.Fatalf("the raw key leaked into the response: %s", body)
 	}
-	if !strings.Contains(body, "fp-ключ1") {
+	if !strings.Contains(body, "fp-key1") {
 		t.Fatalf("the fingerprint is missing: %s", body)
 	}
 }
 
-// TestKeyAddAndRemove — ключ добавляется и удаляется, при этом повторное
-// добавление не создаёт дубликат.
+// TestKeyAddAndRemove — a key is added and removed, while adding the same one
+// again creates no duplicate.
 func TestKeyAddAndRemove(t *testing.T) {
 	_, mux := newTestControl(t)
 
@@ -275,8 +276,8 @@ func TestKeyAddAndRemove(t *testing.T) {
 		return rec
 	}
 
-	// Добавление нового ключа.
-	rec := post(Prefix+"keys/add", `{"provider":"первый","key":"ключ3"}`)
+	// Adding a new key.
+	rec := post(Prefix+"keys/add", `{"provider":"first","key":"key3"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("add = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -284,18 +285,18 @@ func TestKeyAddAndRemove(t *testing.T) {
 		t.Fatalf("the first add must report a change: %s", rec.Body.String())
 	}
 
-	// Повторное добавление того же ключа изменений не вносит.
-	rec = post(Prefix+"keys/add", `{"provider":"первый","key":"ключ3"}`)
+	// Adding the same key again makes no change.
+	rec = post(Prefix+"keys/add", `{"provider":"first","key":"key3"}`)
 	if !strings.Contains(rec.Body.String(), `"added": false`) {
 		t.Fatalf("a duplicate add must report no change: %s", rec.Body.String())
 	}
 
-	// Удаление по отпечатку.
-	rec = post(Prefix+"keys/remove", `{"provider":"первый","key":"fp-ключ3"}`)
+	// Removal by fingerprint.
+	rec = post(Prefix+"keys/remove", `{"provider":"first","key":"fp-key3"}`)
 	if !strings.Contains(rec.Body.String(), `"removed": true`) {
 		t.Fatalf("remove must report a change: %s", rec.Body.String())
 	}
-	rec = post(Prefix+"keys/remove", `{"provider":"первый","key":"fp-нет-такого"}`)
+	rec = post(Prefix+"keys/remove", `{"provider":"first","key":"fp-no-such-key"}`)
 	if !strings.Contains(rec.Body.String(), `"removed": false`) {
 		t.Fatalf("removing an absent key must report no change: %s", rec.Body.String())
 	}

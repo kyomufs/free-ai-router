@@ -1,18 +1,18 @@
-// Package transport описывает, КУДА уходит трафик к провайдеру.
+// Package transport describes WHERE the traffic to the provider goes.
 //
-// ЗАЧЕМ ОТДЕЛЬНАЯ ОСЬ. Транспорт не зависит ни от того, какой это сервис, ни
-// от того, как он защищается. Проксирование через чужой сервер работает
-// одинаково для всех провайдеров: меняется только адрес, через который
-// выходит запрос. Поэтому транспорт вынесен из провайдера — иначе каждый
-// провайдер нёс бы копию одного и того же механизма.
+// WHY A SEPARATE AXIS. The transport depends neither on which service it is nor
+// on how that service defends itself. Proxying through someone else's server
+// works the same for all providers: only the address the request egresses
+// through changes. That is why the transport is taken out of the provider —
+// otherwise every provider would carry a copy of the same mechanism.
 //
-// Что транспорт делает НЕ:
-//   - не знает о моделях, ключах и заголовках провайдера;
-//   - не решает, повторять ли запрос;
-//   - не разбирает ответ.
+// What the transport does NOT do:
+//   - does not know about the provider's models, keys and headers;
+//   - does not decide whether to repeat a request;
+//   - does not parse the response.
 //
-// Он отвечает ровно на один вопрос: как получить http.RoundTripper, через
-// который пойдёт запрос.
+// It answers exactly one question: how to get an http.RoundTripper through
+// which the request will go.
 package transport
 
 import (
@@ -28,63 +28,63 @@ import (
 type ID string
 
 const (
-	// Direct — прямая маршрутизация хоста. Единственный транспорт, который
-	// существует сегодня.
+	// Direct is direct host routing. The only transport that exists today.
 	Direct ID = "direct"
 )
 
-// Transport — то, что реализует конкретный способ выхода в сеть.
+// Transport is what implements a particular way of reaching the network.
 //
-// Интерфейс намеренно мал: одна фабрика транспортов и жизненный цикл. Всё,
-// что делает выход сложным (процессы-помощники, ротация адресов, прогрев
-// соединений), остаётся внутри реализации.
+// The interface is deliberately small: one transport factory and a lifecycle.
+// Everything that makes egress complicated (helper processes, address
+// rotation, connection warm-up) stays inside the implementation.
 type Transport interface {
-	// ID возвращает стабильный идентификатор.
+	// ID returns a stable identifier.
 	ID() ID
-	// RoundTripper возвращает транспорт для одного запроса.
+	// RoundTripper returns a transport for one request.
 	//
-	// Возвращается на каждый запрос, а не хранится: у реализации может быть
-	// несколько полос, и выбор полосы — её внутреннее дело.
+	// It is returned per request rather than stored: an implementation may have
+	// several lanes, and choosing the lane is its internal business.
 	RoundTripper() (http.RoundTripper, error)
-	// Start поднимает всё, что нужно транспорту для работы. Вызывается один
-	// раз при старте демона.
+	// Start brings up everything the transport needs to work. Called once at
+	// daemon startup.
 	Start(ctx context.Context) error
-	// Stop освобождает ресурсы.
+	// Stop releases resources.
 	Stop() error
-	// Info описывает транспорт для интерфейсов.
+	// Info describes the transport for interfaces.
 	Info() Info
 }
 
-// Info описывает транспорт для справки и интерфейсов.
+// Info describes the transport for reference and for interfaces.
 type Info struct {
-	// ID — идентификатор.
+	// ID is the identifier.
 	ID ID
-	// Summary — одна строка о том, что транспорт делает.
+	// Summary is one line about what the transport does.
 	Summary string
-	// NeedsExternalProcess — поднимает ли транспорт сторонний процесс.
+	// NeedsExternalProcess reports whether the transport brings up a third-party
+	// process.
 	//
-	// Это поле существует, чтобы интерфейсы и установочные проверки могли
-	// предупредить оператора: транспорту, которому нужен внешний бинарь,
-	// требуется не только конфигурация.
+	// This field exists so that interfaces and setup checks can warn the
+	// operator: a transport that needs an external binary requires more than
+	// configuration.
 	NeedsExternalProcess bool
 }
 
-// Factory создаёт транспорт из конфигурации.
+// Factory creates a transport from configuration.
 type Factory func(cfg map[string]any) (Transport, error)
 
-// Registry хранит доступные транспорты.
+// Registry stores the available transports.
 type Registry struct {
 	mu        sync.RWMutex
 	factories map[ID]Factory
 	infos     map[ID]Info
 }
 
-// NewRegistry создаёт пустой реестр.
+// NewRegistry creates an empty registry.
 func NewRegistry() *Registry {
 	return &Registry{factories: make(map[ID]Factory), infos: make(map[ID]Info)}
 }
 
-// Register добавляет транспорт.
+// Register adds a transport.
 func (r *Registry) Register(info Info, factory Factory) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -92,7 +92,7 @@ func (r *Registry) Register(info Info, factory Factory) {
 	r.infos[info.ID] = info
 }
 
-// Build создаёт транспорт по идентификатору.
+// Build creates a transport by identifier.
 func (r *Registry) Build(id ID, cfg map[string]any) (Transport, error) {
 	r.mu.RLock()
 	factory, ok := r.factories[id]
@@ -106,7 +106,7 @@ func (r *Registry) Build(id ID, cfg map[string]any) (Transport, error) {
 	return factory(cfg)
 }
 
-// Infos возвращает описания в стабильном порядке.
+// Infos returns the descriptions in a stable order.
 func (r *Registry) Infos() []Info {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -118,7 +118,7 @@ func (r *Registry) Infos() []Info {
 	return out
 }
 
-// IDs возвращает идентификаторы в стабильном порядке.
+// IDs returns the identifiers in a stable order.
 func (r *Registry) IDs() []ID {
 	infos := r.Infos()
 	out := make([]ID, 0, len(infos))

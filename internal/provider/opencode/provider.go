@@ -1,22 +1,23 @@
-// Package opencode реализует провайдера OpenCode Zen (opencode.ai).
+// Package opencode implements the OpenCode Zen provider (opencode.ai).
 //
-// ЧТО СПЕЦИФИЧНО ДЛЯ НЕГО и поэтому живёт здесь:
+// WHAT IS SPECIFIC TO IT and therefore lives here:
 //
-//   - набор обязательных инструментов: запрос обязан нести определения `shell`
-//     и `read` целиком — имя, описание и схему (проверка сверяет записи, а не
-//     имена);
-//   - вид системного промпта: сервис отвергает конкретный текст генератора
-//     заголовков, поэтому промпт рендерится, а не пробрасывается как есть;
-//   - форма заголовков: имена, разделение сессии и affinity, формат
-//     User-Agent, запрет на префиксы `prj_` и `req_` в отдельных полях;
-//   - поле учётных данных: пустая строка означает анонимный доступ, и это
-//     нормальный режим, а не отсутствие настройки.
+//   - the set of mandatory tools: the request must carry the definitions of
+//     `shell` and `read` in full — name, description and schema (the check
+//     compares entries, not names);
+//   - the shape of the system prompt: the service rejects the specific text of
+//     the title generator, so the prompt is rendered rather than passed through
+//     as-is;
+//   - the form of the headers: names, the separation of session and affinity,
+//     the User-Agent format, the ban on the `prj_` and `req_` prefixes in
+//     individual fields;
+//   - the credentials field: an empty string means anonymous access, and that is
+//     a normal mode rather than a missing setting.
 //
-// ЧЕГО ЗДЕСЬ НЕТ и не должно быть: политики повторов, ротации ключей,
-// транспорта. Это общая механика — см. internal/capability и
-// internal/transport.
+// WHAT IS NOT HERE and must not be: retry policy, key rotation, transport. That
+// is common machinery — see internal/capability and internal/transport.
 //
-// Источник контракта — исходники opencode 2.0.30:
+// The source of the contract is opencode 2.0.30 sources:
 //
 //	headers         packages/core/src/session/model-request.ts
 //	affinity        packages/core/src/session/affinity.ts
@@ -24,7 +25,7 @@
 //	tools           packages/core/src/tool/plugin/shell.ts, read.ts
 //	system prompt   packages/core/src/session/runner/prompt/system.txt
 //	                packages/core/src/session/system-prompt.ts
-//	модели          packages/core/src/models-dev/snapshot.txt
+//	models          packages/core/src/models-dev/snapshot.txt
 package opencode
 
 import (
@@ -39,50 +40,53 @@ import (
 	"free-ai-router/internal/provider/modelcat"
 )
 
-// ID — идентификатор провайдера. Он виден в конфигурации, в CLI и как имя
-// маршрута в клиенте, поэтому менять его нельзя без переименования маршрута.
-// liveModelsPath — путь списка моделей сервиса.
+// ID is the provider identifier. It is visible in configuration, in the CLI and
+// as the route name in the client, so it cannot be changed without renaming the
+// route.
+// liveModelsPath is the path of the service's model list.
 //
-// Тот же эндпоинт, что и у запросов к модели: сервис объявляет состав там же,
-// где обслуживает. Отдельного каталога только для чтения у него нет.
+// The same endpoint as model requests use: the service declares its composition
+// where it serves it. It has no separate read-only catalog.
 const liveModelsPath = "/models"
 
 const ID provider.ID = "opencode"
 
-// DefaultBaseURL — адрес inference-эндпоинта провайдера.
+// DefaultBaseURL is the address of the provider's inference endpoint.
 //
-// Взят из каталога моделей (snapshot.txt, ключ `api`), а не из кода клиента:
-// каталог — это то, на что клиент ориентируется при выборе модели.
+// Taken from the model catalog (snapshot.txt, the `api` key) rather than from
+// the client's code: the catalog is what the client goes by when choosing a
+// model.
 const DefaultBaseURL = "https://opencode.ai/inference/v1"
 
-// Config — настройки провайдера, разобранные из конфигурации шлюза.
+// Config is the provider settings, parsed from the gateway configuration.
 type Config struct {
-	// BaseURL переопределяет адрес провайдера.
+	// BaseURL overrides the provider address.
 	BaseURL string
-	// APIKey — учётные данные. Пустая строка означает анонимный доступ:
-	// провайдер отправляет маркер анонимности, а не Bearer с ключом.
+	// APIKey is the credentials. An empty string means anonymous access: the
+	// provider sends the anonymity marker rather than a Bearer with a key.
 	APIKey string
-	// AnonymousKey — маркер анонимности. По умолчанию "public".
+	// AnonymousKey is the anonymity marker. By default "public".
 	AnonymousKey string
-	// UserAgent переопределяет строку User-Agent.
+	// UserAgent overrides the User-Agent string.
 	UserAgent string
-	// ShellName и OSName попадают в описание инструмента shell. Они часть
-	// проверки, поэтому вынесены в настройки: на другой платформе описание
-	// обязано совпадать с тем, что отправил бы клиент на ней.
+	// ShellName and OSName go into the shell tool description. They are part of
+	// the check, so they are lifted into settings: on another platform the
+	// description must match what the client there would have sent.
 	ShellName string
 	OSName    string
-	// ClientName — значение заголовка x-opencode-client. По умолчанию "cli".
+	// ClientName is the value of the x-opencode-client header. By default "cli".
 	ClientName string
-	// HTTP — клиент для запросов каталога.
+	// HTTP is the client for catalog requests.
 	//
-	// Отдельно от клиента шлюза, потому что живёт по другим правилам: каталог
-	// запрашивается редко и малым телом, а запрос к модели — потоком и долго.
-	// Общий клиент заставлял бы выбирать предел ожидания, годный для обоих, а
-	// такого предела нет. Пусто означает клиент по умолчанию.
+	// Separate from the gateway's client, because it lives by different rules:
+	// the catalog is requested rarely and with a small body, while a model
+	// request is streamed and long. A shared client would force a wait limit
+	// suitable for both, and no such limit exists. Empty means the default
+	// client.
 	HTTP *http.Client
 }
 
-// Provider — реализация provider.Provider для OpenCode Zen.
+// Provider is the provider.Provider implementation for OpenCode Zen.
 type Provider struct {
 	cfg Config
 
@@ -92,11 +96,11 @@ type Provider struct {
 	shellName    string
 	osName       string
 	clientName   string
-	// catalog — каталог моделей, берущийся у сервиса.
+	// catalog is the model catalog obtained from the service.
 	catalog *modelcat.Catalog
 }
 
-// New создаёт провайдера из конфигурации.
+// New creates a provider from configuration.
 func New(cfg Config) (*Provider, error) {
 	p := &Provider{cfg: cfg}
 
@@ -125,12 +129,14 @@ func New(cfg Config) (*Provider, error) {
 		p.clientName = "cli"
 	}
 
-	// Каталог запрашивается теми же заголовками, что и запрос к модели:
-	// сервис узнаёт клиента по ним, и без них каталог может быть урезан.
+	// The catalog is requested with the same headers as a model request: the
+	// service recognises the client by them, and without them the catalog may be
+	// trimmed.
 	//
-	// Состав моделей определяет список сервиса, а свойства дополняет каталог
-	// свойств. Порядок источников здесь и есть приоритет: что сервис называет
-	// живым, то и попадает в каталог.
+	// The composition of models is determined by the service's list, and the
+	// properties are augmented by the property catalog. The order of sources
+	// here is the priority: whatever the service names as live is what ends up
+	// in the catalog.
 	httpClient := cfg.HTTP
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -138,26 +144,26 @@ func New(cfg Config) (*Provider, error) {
 	p.catalog = modelcat.New(
 		p.baseURL, liveModelsPath, httpClient, p.applyHeaders,
 		&metaSource{http: httpClient},
-	)
+	).WithEligibility(isFree)
 	return p, nil
 }
 
-// ID реализует provider.Provider.
+// ID implements provider.Provider.
 func (p *Provider) ID() provider.ID { return ID }
 
-// Models реализует provider.Provider.
+// Models implements provider.Provider.
 //
-// Каталог берётся у сервиса на каждый вызов — с кэшем внутри клиента. Список
-// в коде здесь не хранится намеренно: он разошёлся бы с сервисом, и клиент
-// выбирал бы модели, которых уже нет.
+// The catalog is taken from the service on every call — with caching inside the
+// client. A list in the code is deliberately not kept here: it would drift from
+// the service, and the client would select models that no longer exist.
 func (p *Provider) Models(ctx context.Context) ([]provider.Model, error) {
 	return p.catalog.Models(ctx)
 }
 
-// Credential возвращает значение для Authorization.
+// Credential returns the value for Authorization.
 //
-// Отдельный метод, а не поле структуры: значение зависит от того, какой ключ
-// выдала общая механика ротации, и берётся на каждый запрос.
+// A separate method rather than a struct field: the value depends on which key
+// the common rotation machinery issued, and is taken on every request.
 func (p *Provider) Credential(key string) string {
 	if key == "" {
 		return p.anonymousKey
@@ -165,12 +171,12 @@ func (p *Provider) Credential(key string) string {
 	return key
 }
 
-// Build реализует provider.Provider.
+// Build implements provider.Provider.
 //
-// Тело запроса собирается в форме OpenAI Chat Completions: это то, что
-// понимает провайдер, и то, что уже приходит от клиента. Шлюз передаёт
-// сообщения в нейтральной форме, поэтому здесь происходит единственное
-// преобразование.
+// The request body is assembled in the OpenAI Chat Completions form: that is
+// what the provider understands and what already arrives from the client. The
+// gateway passes messages in neutral form, so the single conversion happens
+// here.
 func (p *Provider) Build(req provider.Request) (provider.Prepared, error) {
 	body, err := p.buildBody(req)
 	if err != nil {
@@ -188,15 +194,15 @@ func (p *Provider) Build(req provider.Request) (provider.Prepared, error) {
 		URL:     p.baseURL + "/chat/completions",
 		Headers: headers,
 		Body:    raw,
-		// Полоса reasoning держит более длинные паузы, чем обычный поток,
-		// потому что модель может молчать несколько минут, продолжая
-		// работать. Разделение бюджетов — часть контракта, а не настройка.
+		// The reasoning band holds longer pauses than an ordinary stream,
+		// because the model can stay silent for several minutes while still
+		// working. Splitting the budgets is part of the contract, not a setting.
 		IdleTimeout:       idleTimeoutFor(req.Model),
 		FirstEventTimeout: firstEventTimeout,
 	}, nil
 }
 
-// buildBody собирает тело запроса.
+// buildBody assembles the request body.
 func (p *Provider) buildBody(req provider.Request) (map[string]any, error) {
 	messages, err := p.buildMessages(req)
 	if err != nil {
@@ -223,9 +229,10 @@ func (p *Provider) buildBody(req provider.Request) (map[string]any, error) {
 	tools := p.buildTools(req.Tools)
 	if len(tools) > 0 {
 		body["tools"] = tools
-		// tool_choice отправляется только когда инструменты есть: клиент
-		// делает так же. Когда инструментов нет, поле отсутствует, а не
-		// содержит "none" — это разные формы, и провайдер их различает.
+		// tool_choice is sent only when there are tools: the client does the
+		// same. When there are no tools, the field is absent rather than
+		// containing "none" — those are different forms, and the provider tells
+		// them apart.
 		if req.ToolChoice != "" {
 			body["tool_choice"] = req.ToolChoice
 		}
@@ -234,11 +241,11 @@ func (p *Provider) buildBody(req provider.Request) (map[string]any, error) {
 	return body, nil
 }
 
-// buildMessages переводит нейтральные сообщения в форму провайдера.
+// buildMessages translates the neutral messages into the provider form.
 func (p *Provider) buildMessages(req provider.Request) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(req.Messages)+1)
 
-	// Системная часть — одно сообщение, отрендеренное провайдером.
+	// The system part is one message, rendered by the provider.
 	if req.System != "" {
 		out = append(out, map[string]any{"role": "system", "content": req.System})
 	}
@@ -248,8 +255,8 @@ func (p *Provider) buildMessages(req provider.Request) ([]map[string]any, error)
 		case "assistant":
 			msg := map[string]any{"role": "assistant", "content": m.Text}
 			if m.Reasoning != "" {
-				// Имя поля берётся из метаданных модели: у разных моделей
-				// размышления ждут в разных местах.
+				// The field name comes from the model metadata: different
+				// models expect the thinking in different places.
 				field := req.Model.ReasoningField
 				if field == "" {
 					field = "reasoning_content"
@@ -270,7 +277,7 @@ func (p *Provider) buildMessages(req provider.Request) ([]map[string]any, error)
 				}
 				msg["tool_calls"] = calls
 			}
-			// Пустой ход ассистента на проводе недопустим.
+			// An empty assistant turn is not allowed on the wire.
 			if m.Text == "" && m.Reasoning == "" && len(m.ToolCalls) == 0 {
 				continue
 			}
@@ -283,7 +290,7 @@ func (p *Provider) buildMessages(req provider.Request) ([]map[string]any, error)
 				"content":      nonEmpty(m.Text),
 			})
 
-		default: // user, system из клиента
+		default: // user, system from the client
 			content, err := p.buildUserContent(m)
 			if err != nil {
 				return nil, err
@@ -297,10 +304,10 @@ func (p *Provider) buildMessages(req provider.Request) ([]map[string]any, error)
 	return out, nil
 }
 
-// buildUserContent собирает содержимое пользовательского сообщения.
+// buildUserContent assembles the content of a user message.
 //
-// Текст без вложений остаётся строкой: так делает клиент, и так короче тело.
-// Вложения переводят содержимое в список частей.
+// Text without attachments stays a string: that is what the client does, and it
+// makes the body shorter. Attachments turn the content into a list of parts.
 func (p *Provider) buildUserContent(m provider.Message) (any, error) {
 	if len(m.Images) == 0 {
 		if m.Text == "" {
@@ -328,18 +335,20 @@ func (p *Provider) buildUserContent(m provider.Message) (any, error) {
 	return parts, nil
 }
 
-// buildTools собирает определения инструментов и ДОПОЛНЯЕТ их обязательными.
+// buildTools assembles the tool definitions and AUGMENTS them with the mandatory
+// ones.
 //
-// Здесь и находится главная специфика провайдера. Проверка сверяет записи
-// целиком: имя, описание и схему. Поэтому:
+// This is where the provider's main specificity lies. The check compares entries
+// in full: name, description and schema. Therefore:
 //
-//   - обязательные инструменты добавляются, если клиент их не прислал;
-//   - если клиент прислал инструмент с тем же именем, но с чужим описанием или
-//     схемой, запись ЗАМЕНЯЕТСЯ канонической. Иначе запрос ушёл бы с правильным
-//     именем и неправильным содержимым — а проверка смотрит на содержимое.
+//   - mandatory tools are added if the client did not send them;
+//   - if the client sent a tool with the same name but someone else's
+//     description or schema, the entry is REPLACED with the canonical one.
+//     Otherwise the request would go out with the right name and the wrong
+//     content — and the check looks at the content.
 //
-// Порядок не важен: проверка его не смотрит. Поэтому инструменты клиента идут
-// первыми, обязательные дописываются в конец.
+// The order does not matter: the check does not look at it. So the client's tools
+// go first, and the mandatory ones are appended at the end.
 func (p *Provider) buildTools(tools []provider.Tool) []map[string]any {
 	gate := p.gateTools()
 	gateByName := make(map[string]map[string]any, len(gate))
@@ -367,14 +376,14 @@ func (p *Provider) buildTools(tools []provider.Tool) []map[string]any {
 	return out
 }
 
-// toolEntry переводит объявление инструмента в форму провода.
+// toolEntry translates a tool declaration into the wire form.
 func toolEntry(t provider.Tool) map[string]any {
 	var schema any
 	if len(t.Schema) > 0 {
 		if err := json.Unmarshal(t.Schema, &schema); err != nil {
-			// Схема клиента не разобралась: отправляем пустой объект, а не
-			// роняем запрос. Проверка смотрит только на обязательные
-			// инструменты, у остальных форма не критична.
+			// The client's schema did not parse: we send an empty object
+			// rather than fail the request. The check looks only at the
+			// mandatory tools; for the rest the shape is not critical.
 			schema = map[string]any{"type": "object", "properties": map[string]any{}}
 		}
 	} else {
@@ -390,26 +399,27 @@ func toolEntry(t provider.Tool) map[string]any {
 	}
 }
 
-// gateTool — обязательный инструмент с уже собранной записью.
+// gateTool is a mandatory tool with its entry already assembled.
 type gateTool struct {
 	name  string
 	entry map[string]any
 }
 
-// gateNameShell и gateNameRead — имена обязательных инструментов.
+// gateNameShell and gateNameRead are the names of the mandatory tools.
 //
-// В v1 клиента инструмент назывался `bash`; в v2 он переименован в `shell`
-// (packages/core/src/database/v1-migration.bun.ts, RENAMED_TOOLS). Целевая
-// версия — 2.0.30, поэтому используется `shell`.
+// In client v1 the tool was called `bash`; in v2 it was renamed to `shell`
+// (packages/core/src/database/v1-migration.bun.ts, RENAMED_TOOLS). The target
+// version is 2.0.30, so `shell` is used.
 const (
 	gateNameShell = "shell"
 	gateNameRead  = "read"
 )
 
-// gateTools возвращает записи обязательных инструментов.
+// gateTools returns the entries of the mandatory tools.
 //
-// Описание shell параметризовано именем оболочки и названием системы: клиент
-// подставляет их из окружения, и проверка сверяет получившийся текст.
+// The shell description is parameterised by the shell name and the system name:
+// the client substitutes them from the environment, and the check compares the
+// resulting text.
 func (p *Provider) gateTools() []gateTool {
 	shellDescription := fmt.Sprintf(shellDescriptionTemplate, p.osName, p.shellName)
 
@@ -482,22 +492,22 @@ func (p *Provider) gateTools() []gateTool {
 	}
 }
 
-// buildHeaders собирает заголовки запроса.
+// buildHeaders assembles the request headers.
 //
-// Разделение сессии и affinity — не деталь: клиент кладёт в
-// `x-opencode-session-id` идентификатор сессии, а в `x-opencode-session` —
-// affinity, то есть корень группы для маршрутизации кеша. Для плоской сессии
-// значения совпадают, для вложенной расходятся.
+// The separation of session and affinity is no detail: the client puts the
+// session identifier into `x-opencode-session-id` and the affinity, i.e. the
+// group root for cache routing, into `x-opencode-session`. For a flat session
+// the values coincide, for a nested one they diverge.
 //
-// Заголовки родителя добавляются ТОЛЬКО когда родитель есть: у плоской сессии
-// их не бывает, и всегда слать их нельзя.
+// The parent headers are added ONLY when there is a parent: a flat session never
+// has one, and they must not always be sent.
 func (p *Provider) buildHeaders(ids provider.SessionIDs) http.Header {
 	h := make(http.Header)
 
 	h.Set("content-type", "application/json")
-	// Постоянные заголовки накладываются общей функцией: каталог пользуется
-	// теми же именами, и расхождение сделало бы клиента неузнаваемым для
-	// сервиса на одном из двух путей.
+	// The permanent headers are applied by a shared function: the catalog uses
+	// the same names, and a divergence would make the client unrecognisable to
+	// the service on one of the two paths.
 	p.applyHeaders(h)
 
 	if ids.Session != "" {
@@ -515,7 +525,7 @@ func (p *Provider) buildHeaders(ids provider.SessionIDs) http.Header {
 		h.Set("x-opencode-project", ids.Project)
 	}
 
-	// Заголовки родителя — только для вложенных сессий.
+	// Parent headers — only for nested sessions.
 	if ids.Parent != "" {
 		h.Set("x-opencode-parent-session-id", ids.Parent)
 		h.Set("x-parent-session-id", ids.Parent)
@@ -524,18 +534,19 @@ func (p *Provider) buildHeaders(ids provider.SessionIDs) http.Header {
 	return h
 }
 
-// applyHeaders накладывает постоянные заголовки провайдера.
+// applyHeaders applies the provider's permanent headers.
 //
-// Принимает http.Header, а не запрос: заголовки нужны в двух местах — у
-// запроса к модели, вместе с заголовками сессии, и у запроса каталога, где
-// сессии нет вовсе. Копия правил в каталоге разошлась бы с этой, и сервис
-// получал бы два несовпадающих представления об одном клиенте.
+// It takes an http.Header rather than a request: the headers are needed in two
+// places — on the model request, together with the session headers, and on the
+// catalog request, where there is no session at all. A copy of the rules in the
+// catalog would drift from this one, and the service would get two mismatching
+// representations of one client.
 func (p *Provider) applyHeaders(h http.Header) {
 	h.Set("user-agent", p.userAgent)
 	h.Set("x-opencode-client", p.clientName)
 }
 
-// nonEmpty возвращает первый непустой аргумент.
+// nonEmpty returns the first non-empty argument.
 func nonEmpty(values ...string) string {
 	for _, v := range values {
 		if v != "" {

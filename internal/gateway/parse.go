@@ -11,25 +11,25 @@ import (
 	"free-ai-router/internal/wire"
 )
 
-// Разбор клиентского запроса в нейтральную форму.
+// Parsing the client request into the neutral form.
 //
-// Всё преобразование делается ЗДЕСЬ, один раз. Провайдер получает готовую
-// нейтральную структуру и переводит её в свой протокол — ему не приходится
-// разбирать клиентский запрос, а значит и расходиться с шлюзом в его
-// понимании.
+// All the conversion is done HERE, once. The provider receives a ready neutral
+// structure and translates it into its own protocol — it does not have to parse
+// the client request, and therefore cannot diverge from the gateway in its
+// understanding of it.
 
-// parseMessages переводит сообщения клиента в нейтральную форму.
+// parseMessages translates the client's messages into the neutral form.
 func parseMessages(raw any) ([]provider.Message, error) {
 	list, ok := raw.([]any)
 	if !ok {
-		return nil, fmt.Errorf("поле messages обязательно и должно быть списком")
+		return nil, fmt.Errorf("the messages field is required and must be a list")
 	}
 
 	out := make([]provider.Message, 0, len(list))
 	for i, item := range list {
 		m, ok := item.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("messages[%d]: ожидался объект", i)
+			return nil, fmt.Errorf("messages[%d]: an object was expected", i)
 		}
 		msg, err := parseMessage(m)
 		if err != nil {
@@ -40,17 +40,17 @@ func parseMessages(raw any) ([]provider.Message, error) {
 	return out, nil
 }
 
-// parseMessage разбирает одно сообщение.
+// parseMessage parses a single message.
 func parseMessage(m map[string]any) (provider.Message, error) {
 	role, _ := m["role"].(string)
 	if role == "" {
-		return provider.Message{}, fmt.Errorf("поле role обязательно")
+		return provider.Message{}, fmt.Errorf("the role field is required")
 	}
 
 	msg := provider.Message{Role: role}
 
-	// Текстовое содержимое бывает строкой или списком частей. Обе формы
-	// законны, и обе надо понимать.
+	// Text content is either a string or a list of parts. Both forms are
+	// legitimate, and both must be understood.
 	switch content := m["content"].(type) {
 	case string:
 		msg.Text = content
@@ -65,13 +65,13 @@ func parseMessage(m map[string]any) (provider.Message, error) {
 			}
 		}
 	case nil:
-		// Пустое содержимое допустимо у вызова инструмента.
+		// Empty content is acceptable for a tool call.
 	default:
-		return provider.Message{}, fmt.Errorf("content: неожиданный тип %T", content)
+		return provider.Message{}, fmt.Errorf("content: unexpected type %T", content)
 	}
 
-	// Имя поля для размышлений у разных моделей разное, поэтому проверяются
-	// оба распространённых.
+	// The field name for reasoning differs between models, so both of the
+	// common ones are checked.
 	if v, ok := m["reasoning_content"].(string); ok {
 		msg.Reasoning = v
 	} else if v, ok := m["reasoning"].(string); ok {
@@ -107,7 +107,7 @@ func parseMessage(m map[string]any) (provider.Message, error) {
 	return msg, nil
 }
 
-// appendContentPart добавляет одну часть содержимого.
+// appendContentPart adds one content part.
 func appendContentPart(msg *provider.Message, part map[string]any) error {
 	kind, _ := part["type"].(string)
 	switch kind {
@@ -125,75 +125,76 @@ func appendContentPart(msg *provider.Message, part map[string]any) error {
 		}
 		msg.Images = append(msg.Images, img)
 	default:
-		// Неизвестную часть пропускаем, а не роняем запрос: протокол
-		// развивается, и отказ из-за новой части был бы хуже её потери.
+		// An unknown part is skipped rather than dropping the request: the
+		// protocol evolves, and a refusal over a new part would be worse than
+		// losing it.
 		_ = kind
 	}
 	return nil
 }
 
-// parseImagePart разбирает часть с изображением.
+// parseImagePart parses an image part.
 //
-// Разбирается форма data-URL: она самодостаточна и не требует сети. Ссылка на
-// внешний ресурс не поддерживается намеренно — шлюз не должен ходить по
-// произвольным адресам от имени клиента.
+// The data-URL form is the one parsed: it is self-contained and requires no
+// network. A link to an external resource is deliberately unsupported — the
+// gateway must not walk arbitrary addresses on the client's behalf.
 func parseImagePart(part map[string]any) (provider.Image, error) {
 	holder, ok := part["image_url"].(map[string]any)
 	if !ok {
 		if s, ok := part["image_url"].(string); ok {
 			holder = map[string]any{"url": s}
 		} else {
-			return provider.Image{}, fmt.Errorf("image_url: ожидался объект или строка")
+			return provider.Image{}, fmt.Errorf("image_url: an object or a string was expected")
 		}
 	}
 	url, _ := holder["url"].(string)
 	if url == "" {
-		return provider.Image{}, fmt.Errorf("image_url: поле url обязательно")
+		return provider.Image{}, fmt.Errorf("image_url: the url field is required")
 	}
 
 	const prefix = "data:"
 	if !strings.HasPrefix(url, prefix) {
-		return provider.Image{}, fmt.Errorf("image_url: поддерживаются только data-URL")
+		return provider.Image{}, fmt.Errorf("image_url: only data-URLs are supported")
 	}
 	rest := url[len(prefix):]
 	sep := strings.Index(rest, ";base64,")
 	if sep <= 0 {
-		return provider.Image{}, fmt.Errorf("image_url: ожидалась форма data:<тип>;base64,<данные>")
+		return provider.Image{}, fmt.Errorf("image_url: the form data:<type>;base64,<data> was expected")
 	}
 	mediaType := rest[:sep]
 	data, err := base64.StdEncoding.DecodeString(rest[sep+len(";base64,"):])
 	if err != nil {
-		return provider.Image{}, fmt.Errorf("image_url: данные не декодируются: %w", err)
+		return provider.Image{}, fmt.Errorf("image_url: the data does not decode: %w", err)
 	}
 	return provider.Image{MediaType: mediaType, Data: data}, nil
 }
 
-// parseTools переводит объявления инструментов в нейтральную форму.
+// parseTools translates tool declarations into the neutral form.
 func parseTools(raw any) ([]provider.Tool, error) {
 	if raw == nil {
 		return nil, nil
 	}
 	list, ok := raw.([]any)
 	if !ok {
-		return nil, fmt.Errorf("поле tools должно быть списком")
+		return nil, fmt.Errorf("the tools field must be a list")
 	}
 
 	out := make([]provider.Tool, 0, len(list))
 	for i, item := range list {
 		m, ok := item.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("tools[%d]: ожидался объект", i)
+			return nil, fmt.Errorf("tools[%d]: an object was expected", i)
 		}
 		fn, ok := m["function"].(map[string]any)
 		if !ok {
-			continue // не функция — пропускаем
+			continue // not a function — skipping
 		}
 		tool := provider.Tool{}
 		if name, ok := fn["name"].(string); ok {
 			tool.Name = name
 		}
 		if tool.Name == "" {
-			return nil, fmt.Errorf("tools[%d]: имя обязательно", i)
+			return nil, fmt.Errorf("tools[%d]: the name is required", i)
 		}
 		if desc, ok := fn["description"].(string); ok {
 			tool.Description = desc
@@ -201,7 +202,7 @@ func parseTools(raw any) ([]provider.Tool, error) {
 		if params, ok := fn["parameters"]; ok {
 			encoded, err := json.Marshal(params)
 			if err != nil {
-				return nil, fmt.Errorf("tools[%d]: параметры не кодируются: %w", i, err)
+				return nil, fmt.Errorf("tools[%d]: the parameters do not encode: %w", i, err)
 			}
 			tool.Schema = encoded
 		}
@@ -210,11 +211,12 @@ func parseTools(raw any) ([]provider.Tool, error) {
 	return out, nil
 }
 
-// systemFrom собирает системную часть из запроса клиента.
+// systemFrom assembles the system part from the client request.
 //
-// Системных сообщений бывает несколько; шлюз объединяет их в одно, потому что
-// провайдер получает системную часть отдельно от истории. Порядок сохраняется:
-// склейка в обратном порядке изменила бы смысл указаний.
+// There can be several system messages; the gateway merges them into one,
+// because the provider receives the system part separately from the history.
+// The order is preserved: merging in reverse order would change the meaning of
+// the instructions.
 func systemFrom(body map[string]any) string {
 	list, ok := body["messages"].([]any)
 	if !ok {
@@ -237,11 +239,11 @@ func systemFrom(body map[string]any) string {
 	return strings.Join(parts, "\n")
 }
 
-// sessionIDs выводит идентификаторы сессии по контракту.
+// sessionIDs derives the session identifiers by the contract.
 //
-// Клиент может прислать свои идентификаторы в заголовках; если прислал,
-// уважаются они. Если нет — выводятся по формуле, потому что провайдеры, у
-// которых есть проверка, ждут идентификатор правильной формы.
+// The client may send its own identifiers in the headers; if it did, they are
+// respected. If not, they are derived by the formula, because the providers
+// that have a check expect an identifier of the right shape.
 func (h *Handler) sessionIDs(r *http.Request, body map[string]any) provider.SessionIDs {
 	ids := provider.SessionIDs{
 		Session:  firstNonEmpty(r.Header.Get("x-opencode-session-id"), r.Header.Get("x-session-id")),
@@ -255,21 +257,56 @@ func (h *Handler) sessionIDs(r *http.Request, body map[string]any) provider.Sess
 		ids.Session = wire.NewSessionID()
 	}
 	if ids.Affinity == "" {
-		// Без родителя affinity совпадает с идентификатором сессии — так
-		// делает и клиент.
+		// Without a parent, affinity equals the session identifier — that is
+		// what the client does too.
 		ids.Affinity = firstNonEmpty(ids.Parent, ids.Session)
 	}
-	if ids.Message == "" {
+	if ids.Message == "" || isRejectedRequestID(ids.Message) {
+		// The header wants the identifier of the MESSAGE being answered and
+		// refuses a per-request one. A client that sent a `req_` value was
+		// following the naming convention of a different identifier, so the
+		// value is replaced rather than forwarded: the prefix alone fails the
+		// whole call, and failing it over a header nobody reads is worse than
+		// deriving a proper one.
 		ids.Message = wire.NewMessageID()
 	}
-	if ids.Project == "" {
-		// Вне git-проекта клиент отправляет литерал "global".
+	if ids.Project == "" || isRejectedProjectID(ids.Project) {
+		// Outside a git project the client sends the literal "global", and a
+		// `prj_`-prefixed value is refused regardless of what follows it. The
+		// project identifier belongs in the request body or path, never here.
 		ids.Project = "global"
 	}
 	return ids
 }
 
-// firstNonEmpty возвращает первый непустой аргумент.
+// Prefixes the upstream refuses to see in these two headers.
+//
+// MEASURED, one header at a time against the live service:
+//
+//	x-opencode-project: prj_f698f87ea99d390458196363 -> refused
+//	x-opencode-project: global                       -> admitted
+//	x-opencode-project: <absent>                     -> admitted
+//	x-opencode-request: req_2cb728ee0be94ed0c7b20920b21fde87 -> refused
+//	x-opencode-request: msg_13b2d53f2001ia66lVkDLegkmV       -> admitted
+//	x-opencode-request: <absent>                             -> admitted
+//
+// What is refused is the PREFIX, not the value: any `prj_`-prefixed string is
+// rejected regardless of what follows it. The check is therefore on the marker
+// rather than on the contents.
+const (
+	rejectedProjectPrefix = "prj_"
+	rejectedRequestPrefix = "req_"
+)
+
+// isRejectedProjectID reports whether a project header value carries the
+// refused marker.
+func isRejectedProjectID(v string) bool { return strings.HasPrefix(v, rejectedProjectPrefix) }
+
+// isRejectedRequestID reports whether a request header value carries the
+// refused marker.
+func isRejectedRequestID(v string) bool { return strings.HasPrefix(v, rejectedRequestPrefix) }
+
+// firstNonEmpty returns the first non-empty argument.
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
 		if v != "" {

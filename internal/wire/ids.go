@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Контракт идентификаторов выведен из
+// The identifier contract is derived from
 // packages/schema/src/identifier.ts (opencode 2.0.30):
 //
 //	const length = 26
@@ -21,36 +21,36 @@ import (
 //	  counter++
 //	  const current = BigInt(timestamp) * 0x1000n + BigInt(counter)
 //	  const value   = descending ? ~current : current
-//	  const time = 6 байт value, big-endian, как 12 hex-символов
+//	  const time = 6 bytes of value, big-endian, as 12 hex characters
 //	  const bytes = crypto.getRandomValues(new Uint8Array(length - 12))
-//	  return time + массив bytes, каждый chars[byte % 62]
+//	  return time + the bytes array, each chars[byte % 62]
 //	}
 //
-// Две вещи здесь не косметика, а часть формулы:
+// Two things here are not cosmetics but part of the formula:
 //
-//   - value инвертируется побитово (descending), поэтому идентификаторы
-//     УБЫВАЮТ во времени;
-//   - счётчик сбрасывается при смене миллисекунды, а не ведёт себя как
-//     глобальный счётчик процесса.
+//   - value is inverted bitwise (descending), so identifiers DECREASE over
+//     time;
+//   - the counter resets when the millisecond changes, rather than behaving
+//     like a process-wide global counter.
 //
-// SessionID дополнительно получает префикс "ses_" (session-id.ts), message id —
-// "msg_" (session-message.ts).
+// SessionID additionally gets the "ses_" prefix (session-id.ts), a message id
+// gets "msg_" (session-message.ts).
 const (
-	// idTotalLength — общая длина части, следующей за префиксом: 12 hex
-	// времени плюс 14 base62.
+	// idTotalLength is the total length of the part following the prefix:
+	// 12 hex of time plus 14 base62.
 	idTotalLength = 26
 
-	// idTimeLength — длина временной части в hex-символах (6 байт).
+	// idTimeLength is the length of the time part in hex characters (6 bytes).
 	idTimeLength = 12
 
-	// base62Alphabet — алфавит хвостовой части, дословно из identifier.ts.
+	// base62Alphabet is the alphabet of the tail part, verbatim from identifier.ts.
 	base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
-	// idCounterBits — сколько младших бит value занимает счётчик
-	// (BigInt(timestamp) * 0x1000n оставляет 12 бит).
+	// idCounterBits is how many low bits of value the counter occupies
+	// (BigInt(timestamp) * 0x1000n leaves 12 bits).
 	idCounterBits = 12
 
-	// idTimeMask — маска 48 бит, которые попадают в шестибайтовое поле.
+	// idTimeMask is the mask of the 48 bits that land in the six-byte field.
 	idTimeMask = 0xFFFFFFFFFFFF
 )
 
@@ -60,21 +60,20 @@ const SessionIDPrefix = "ses_"
 // MessageIDPrefix is the prefix every message id carries.
 const MessageIDPrefix = "msg_"
 
-// canonicalSessionPattern распознаёт уже канонический session id, чтобы не
-// пересобирать его. Совпадает по форме с session-id.ts: "ses_" + 12 hex + 14
-// base62.
+// canonicalSessionPattern recognises an already canonical session id, so as not
+// to rebuild it. It matches session-id.ts in shape: "ses_" + 12 hex + 14 base62.
 var canonicalSessionPattern = regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
 
-// idState счётчик, эквивалентный module-level lastTimestamp/counter из
-// identifier.ts. Клиенты mintят идентификаторы редко, поэтому одного мьютекса
-// достаточно и он честно воспроизводит исходную семантику.
+// idState is the counter equivalent to the module-level lastTimestamp/counter
+// from identifier.ts. Clients mint identifiers rarely, so a single mutex is
+// enough and it faithfully reproduces the original semantics.
 var idState struct {
 	mu        sync.Mutex
 	lastMilli int64
 	counter   int64
 }
 
-// NewSessionID возвращает новый session id, построенный по формуле клиента.
+// NewSessionID returns a new session id built by the client's formula.
 func NewSessionID() string { return NewSessionIDAt(time.Now().UnixMilli()) }
 
 // NewSessionIDAt is NewSessionID with an injected clock, so tests can pin the
@@ -83,7 +82,7 @@ func NewSessionIDAt(nowMillis int64) string {
 	return SessionIDPrefix + newIDAt(nowMillis)
 }
 
-// NewMessageID возвращает новый message id (префикс "msg_").
+// NewMessageID returns a new message id (the "msg_" prefix).
 func NewMessageID() string { return NewMessageIDAt(time.Now().UnixMilli()) }
 
 // NewMessageIDAt is NewMessageID with an injected clock.
@@ -91,11 +90,11 @@ func NewMessageIDAt(nowMillis int64) string {
 	return MessageIDPrefix + newIDAt(nowMillis)
 }
 
-// CanonicalSessionID принимает уже канонический id без изменений, а иначе
-// минтит новый.
+// CanonicalSessionID accepts an already canonical id unchanged, and otherwise
+// mints a new one.
 //
-// Отдельная функция нужна потому, что клиент может прислать готовый id: его
-// нельзя пересобирать, он часть истории сессии.
+// A separate function is needed because the client may send a ready-made id: it
+// must not be rebuilt, it is part of the session history.
 func CanonicalSessionID(id string) string {
 	if canonicalSessionPattern.MatchString(id) {
 		return id
@@ -106,12 +105,13 @@ func CanonicalSessionID(id string) string {
 // IsCanonicalSessionID reports whether id already has the admitted form.
 func IsCanonicalSessionID(id string) bool { return canonicalSessionPattern.MatchString(id) }
 
-// newIDAt — детерминированное ядро формулы, возвращающее часть без префикса.
+// newIDAt is the deterministic core of the formula, returning the part without
+// the prefix.
 func newIDAt(nowMillis int64) string {
 	counter := nextCounter(nowMillis)
 
-	// current = timestamp * 4096 + counter, затем дополнение и маска до 48
-	// бит, которые несёт шестибайтовое поле.
+	// current = timestamp * 4096 + counter, then the complement and a mask down
+	// to the 48 bits the six-byte field carries.
 	current := uint64(nowMillis)<<idCounterBits + uint64(counter)
 	value := (^current) & idTimeMask
 
@@ -123,7 +123,7 @@ func newIDAt(nowMillis int64) string {
 	return timePart + randomBase62(idTotalLength-idTimeLength)
 }
 
-// nextCounter воспроизводит сброс счётчика при смене миллисекунды.
+// nextCounter reproduces the counter reset when the millisecond changes.
 func nextCounter(nowMillis int64) int64 {
 	idState.mu.Lock()
 	defer idState.mu.Unlock()
@@ -135,19 +135,19 @@ func nextCounter(nowMillis int64) int64 {
 	return idState.counter
 }
 
-// randomBase62 возвращает width символов алфавита, каждый выбран из
-// случайного байта через остаток — дословно как Array.from(bytes, byte => chars[byte % 62]).
+// randomBase62 returns width characters of the alphabet, each chosen from a
+// random byte via the remainder — verbatim as Array.from(bytes, byte => chars[byte % 62]).
 //
-// Остаток от 256 по 62 даёт небольшое смещение (байты 0..247 распределены
-// ровно, 248..255 дают лишние попадания в первые 8 символов). Для
-// идентификатора это безразлично: он не обязан быть равномерным, он обязан
-// иметь ту же форму, что у клиента.
+// A remainder of 256 modulo 62 gives a slight bias (bytes 0..247 are
+// distributed evenly, 248..255 give extra hits on the first 8 characters). For
+// an identifier that is irrelevant: it is not obliged to be uniform, it is
+// obliged to have the same shape as the client's.
 func randomBase62(width int) string {
 	buf := make([]byte, width)
 	if _, err := rand.Read(buf); err != nil {
-		// crypto/rand на практике не отказывает; панику заменяем на
-		// math/rand-подобный запасной путь не будем — это скрыло бы
-		// серьёзную проблему окружения.
+		// crypto/rand does not refuse in practice; we will not replace the
+		// panic with a math/rand-like fallback — that would hide a serious
+		// environment problem.
 		panic(fmt.Sprintf("wire: crypto/rand unavailable: %v", err))
 	}
 	out := make([]byte, width)
@@ -157,25 +157,28 @@ func randomBase62(width int) string {
 	return string(out)
 }
 
-// DecodeSessionTimestamp извлекает момент времени, закодированный в session id.
+// DecodeSessionTimestamp extracts the moment in time encoded in a session id.
 //
-// ВНИМАНИЕ О ТОЧНОСТИ. Шестибайтовое поле хранит 48 бит, а `timestamp * 4096`
-// занимает 53 бита, поэтому старшие пять бит значения теряются при записи.
-// Так ведёт себя и сам клиент: identifier.ts сдвигает BigInt вправо и берёт по
-// байту, отбрасывая всё, что не помещается. Значит восстановленный момент
-// времени — это timestamp, усечённый до 36 бит, и он НЕ равен исходному у
-// значений выше примерно 2^36 (около 68.7 млрд мс, то есть после 1972 года).
+// A NOTE ON PRECISION. The six-byte field stores 48 bits, while
+// `timestamp * 4096` takes up 53 bits, so the top five bits of the value are
+// lost on write. The client itself behaves the same way: identifier.ts shifts
+// the BigInt right and takes a byte at a time, discarding whatever does not
+// fit. So the recovered moment is the timestamp truncated to 36 bits, and it is
+// NOT equal to the original for values above roughly 2^36 (about 68.7 billion
+// ms, that is past 1972).
 //
-// Функция поэтому годится для диагностики формы и для тестов, но не как
-// утверждение «здесь лежит время запроса». Каноничность id определяется
-// формой (§IsCanonicalSessionID), а не тем, что время внутри читается.
+// The function is therefore good for diagnosing the shape and for tests, but
+// not as an assertion "the request time is in here". The canonicity of an id is
+// determined by its shape (§IsCanonicalSessionID), not by whether the time
+// inside reads back.
 func DecodeSessionTimestamp(id string) (time.Time, error) {
 	at, _, err := DecodeSessionTimestampCheck(id)
 	return at, err
 }
 
-// DecodeSessionTimestampCheck дополнительно возвращает счётчик из младших бит
-// — он нужен тестам, проверяющим сброс счётчика при смене миллисекунды.
+// DecodeSessionTimestampCheck additionally returns the counter from the low
+// bits — it is needed by the tests that check the counter reset when the
+// millisecond changes.
 func DecodeSessionTimestampCheck(id string) (time.Time, int64, error) {
 	if !canonicalSessionPattern.MatchString(id) {
 		return time.Time{}, 0, fmt.Errorf("wire: %q is not a canonical session id", id)
@@ -196,8 +199,8 @@ func DecodeSessionTimestampCheck(id string) (time.Time, int64, error) {
 	return time.UnixMilli(millis), counter, nil
 }
 
-// base62Value используется только тестами: возвращает индекс символа в
-// алфавите, чтобы утверждения могли говорить о форме хвоста.
+// base62Value is used by the tests only: it returns the index of a character in
+// the alphabet, so that assertions can talk about the shape of the tail.
 func base62Value(c byte) (int, bool) {
 	for i := 0; i < len(base62Alphabet); i++ {
 		if base62Alphabet[i] == c {
@@ -207,10 +210,10 @@ func base62Value(c byte) (int, bool) {
 	return 0, false
 }
 
-// timeFieldOf воспроизводит ровно то, что делает identifier.ts с временным
-// полем, — включая потерю старших бит. Существует, чтобы эталонное значение
-// для тестов получалось тем же кодом, которым пользуется шлюз, и расхождение
-// с реализацией клиента было видно сразу.
+// timeFieldOf reproduces exactly what identifier.ts does with the time field —
+// including the loss of the top bits. It exists so that the reference value for
+// the tests is produced by the same code the gateway uses, and a divergence
+// from the client implementation is visible at once.
 func timeFieldOf(millis, counter uint64) string {
 	value := (^(millis<<idCounterBits + counter)) & idTimeMask
 	return hex.EncodeToString([]byte{
@@ -219,8 +222,8 @@ func timeFieldOf(millis, counter uint64) string {
 	})
 }
 
-// bigIntFromBase62 собирает число из строки алфавита — вспомогательное для
-// тестов, которым нужен порядок, а не значение.
+// bigIntFromBase62 assembles a number from the alphabet string — a helper for
+// the tests, which need the order rather than the value.
 func bigIntFromBase62(s string) *big.Int {
 	out := new(big.Int)
 	base := big.NewInt(int64(len(base62Alphabet)))

@@ -1,22 +1,23 @@
-// Package config собирает конфигурацию демона из трёх уровней.
+// Package config assembles the daemon's configuration from three levels.
 //
-// ПОРЯДОК СТАРШИНСТВА — часть контракта, а не деталь реализации:
+// THE PRECEDENCE ORDER is part of the contract, not an implementation detail:
 //
-//	флаги CLI                  побеждают всё
-//	переменные окружения       перекрывают файл
-//	config.json                базовый слой
+//	CLI flags               beat everything
+//	environment variables   override the file
+//	config.json             the base layer
 //
-// Каждое значение помнит, откуда пришло. Это не украшение: без источника
-// отладка слияния превращается в угадывание, и `--print-config` печатает
-// именно его.
+// Every value remembers where it came from. That is not decoration: without a
+// source, debugging the merge turns into guesswork, and `--print-config` prints
+// exactly that source.
 //
-// РАСКЛАДКА. Пути определяются XDG-переменными, а не самой конфигурацией:
-// иначе получилась бы циклическая зависимость — файл, сообщающий, где лежит
-// файл. Три корня разделены по природе данных:
+// LAYOUT. The paths are determined by XDG variables rather than by the
+// configuration itself: otherwise there would be a circular dependency — a file
+// telling where the file lives. The three roots are separated by the nature of
+// the data:
 //
-//	конфигурация   ты правишь; никогда не создаётся машиной, никогда не чистится
-//	состояние      переживает рестарты; накапливается
-//	временное       живёт, пока живёт процесс
+//	configuration   you edit it; never created by the machine, never cleaned up
+//	state           survives restarts; accumulates
+//	runtime         lives as long as the process does
 package config
 
 import (
@@ -28,30 +29,38 @@ import (
 	"time"
 )
 
-// AppName — имя каталогов приложения в XDG-корнях.
+// AppName — the name of the application's directories under the XDG roots.
 const AppName = "free-ai-router"
 
-// Paths — все места на диске, которые использует демон.
+// Paths — all the places on disk that the daemon uses.
 type Paths struct {
-	// ConfigDir — каталог конфигурации.
+	// ConfigDir — the configuration directory.
 	ConfigDir string
-	// StateDir — каталог состояния.
+	// StateDir — the state directory.
 	StateDir string
-	// RuntimeDir — каталог временных файлов.
+	// RuntimeDir — the temporary-files directory.
 	RuntimeDir string
-	// ConfigFile — файл конфигурации.
+	// ConfigFile — the configuration file.
 	ConfigFile string
-	// StateFile — файл состояния.
+	// StateFile — the state file.
 	StateFile string
-	// LogFile — журнал.
+	// LogFile — the journal.
 	LogFile string
+	// PIDFile — the running daemon's process identifier.
+	//
+	// It lives in the runtime directory rather than beside the state: the
+	// identifier describes THIS boot, and a file left behind by a previous one
+	// would name a process that no longer exists or, worse, a different
+	// process that has since reused the number. The runtime directory is
+	// cleared by the system, which is the lifetime the file needs.
+	PIDFile string
 }
 
-// DefaultPaths разрешает XDG-каталоги.
+// DefaultPaths resolves the XDG directories.
 //
-// Переменные читаются через os.Getenv, а не через os.UserConfigDir: тот
-// подставляет каталог, специфичный для платформы (на macOS — Library), тогда
-// как остальная система ожидает XDG-путь.
+// The variables are read through os.Getenv rather than through
+// os.UserConfigDir: the latter substitutes a platform-specific directory (on
+// macOS, Library), whereas the rest of the system expects an XDG path.
 func DefaultPaths() (Paths, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -72,10 +81,11 @@ func DefaultPaths() (Paths, error) {
 		ConfigFile: filepath.Join(configDir, "config.json"),
 		StateFile:  filepath.Join(stateDir, "state.json"),
 		LogFile:    filepath.Join(stateDir, "app.log"),
+		PIDFile:    filepath.Join(runtimeHome, AppName+".pid"),
 	}, nil
 }
 
-// envOr возвращает значение переменной или запасное.
+// envOr returns the value of a variable or the fallback.
 func envOr(name, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
 		return v
@@ -83,115 +93,118 @@ func envOr(name, fallback string) string {
 	return fallback
 }
 
-// Source указывает, откуда пришло значение настройки.
+// Source indicates where a setting's value came from.
 //
-// Источник нужен для `--print-config`: без него оператор не может отличить
-// значение из флага от значения из файла.
+// The source is needed for `--print-config`: without it the operator cannot
+// tell a value from a flag apart from a value from the file.
 type Source string
 
 const (
-	// SourceDefault — встроенное значение.
+	// SourceDefault — a built-in value.
 	SourceDefault Source = "default"
-	// SourceFile — из config.json.
+	// SourceFile — from config.json.
 	SourceFile Source = "config.json"
-	// SourceEnv — из переменной окружения.
+	// SourceEnv — from an environment variable.
 	SourceEnv Source = "env"
-	// SourceFlag — из флага командной строки.
+	// SourceFlag — from a command-line flag.
 	SourceFlag Source = "flag"
 )
 
-// Value — одно значение настройки вместе с его источником.
+// Value — a single setting value together with its source.
 type Value[T any] struct {
 	Val  T
 	From Source
 }
 
-// Set записывает значение и его источник.
+// Set records the value and its source.
 func (v *Value[T]) Set(val T, from Source) {
 	v.Val = val
 	v.From = from
 }
 
-// OrDefault проставляет источник «по умолчанию», если он ещё не задан.
+// OrDefault stamps the "default" source if none has been set yet.
 func (v *Value[T]) OrDefault() {
 	if v.From == "" {
 		v.From = SourceDefault
 	}
 }
 
-// Config — полностью разрешённая конфигурация.
+// Config — the fully resolved configuration.
 type Config struct {
-	// --- режим работы ------------------------------------------------------
+	// --- operating mode ----------------------------------------------------
 
-	// Mode — форма развёртывания.
+	// Mode — the deployment shape.
 	Mode Value[string]
-	// Listen — адрес прослушивания.
+	// Listen — the listen address.
 	Listen Value[string]
-	// Token — общий секрет для режима server. Отдельно от учётных данных
-	// провайдера: клиент аутентифицируется ИМ, а шлюз — ключом провайдера.
+	// Token — the shared secret for server mode. Separate from the provider's
+	// credentials: the client authenticates WITH IT, while the gateway
+	// authenticates with the provider's key.
 	Token Value[string]
 
-	// --- провайдеры и механизмы --------------------------------------------
+	// --- providers and mechanisms ------------------------------------------
 
-	// Providers — описания провайдеров по их идентификаторам.
+	// Providers — the provider descriptions keyed by their identifiers.
 	Providers map[string]ProviderConfig
 
-	// --- транспорт ---------------------------------------------------------
+	// --- transport ---------------------------------------------------------
 
-	// Transport — идентификатор транспорта.
+	// Transport — the transport identifier.
 	Transport Value[string]
-	// TransportConfig — настройки транспорта.
+	// TransportConfig — the transport settings.
 	TransportConfig map[string]any
 
-	// --- тайминги ----------------------------------------------------------
+	// --- timings -----------------------------------------------------------
 
-	// FirstEventTimeout — бюджет до первых заголовков ответа.
+	// FirstEventTimeout — the budget until the first response headers.
 	FirstEventTimeout Value[time.Duration]
-	// IdleTimeout — бюджет молчания обычного потока.
+	// IdleTimeout — the silence budget of an ordinary stream.
 	IdleTimeout Value[time.Duration]
-	// ReasoningIdleTimeout — бюджет молчания для рассуждающих моделей.
+	// ReasoningIdleTimeout — the silence budget for reasoning models.
 	ReasoningIdleTimeout Value[time.Duration]
 
-	// --- прочее ------------------------------------------------------------
+	// --- misc --------------------------------------------------------------
 
-	// Upstream — базовый адрес по умолчанию для провайдеров, не указавших
-	// свой. Нужен редко, но позволяет не повторять адрес в каждой секции.
+	// Upstream — the default base address for providers that did not name their
+	// own. Needed rarely, but it keeps the address from being repeated in every
+	// section.
 	Upstream Value[string]
 
-	// Paths — места на диске. Не настройка: определяется XDG.
+	// Paths — the places on disk. Not a setting: determined by XDG.
 	Paths Paths
 }
 
-// ProviderConfig — настройки одного провайдера.
+// ProviderConfig — the settings of a single provider.
 //
-// Настройки хранятся как map, а не как структура: у разных типов провайдеров
-// разные поля, и общая структура описывала бы только пересечение. Разбор
-// значений — дело самого провайдера, он же и сообщает об ошибке.
+// The settings are stored as a map rather than as a struct: different provider
+// types have different fields, and a shared struct would describe only the
+// intersection. Parsing the values is the provider's own business, and it is
+// likewise the provider that reports the error.
 type ProviderConfig struct {
-	// Type — какой код обслуживает эту запись ("opencode", "openai").
+	// Type — which code serves this entry ("opencode", "openai").
 	Type string `json:"type"`
-	// Enabled позволяет выключить запись, не удаляя её.
+	// Enabled allows an entry to be turned off without deleting it.
 	Enabled *bool `json:"enabled,omitempty"`
 
-	// Поля ниже — общие для всех провайдеров, потому что нужны почти всем.
-	// Всё, чего здесь нет, задаётся в Settings.
+	// The fields below are common to all providers, because nearly all of them
+	// need these. Anything not found here is set in Settings.
 
-	// BaseURL — адрес сервиса.
+	// BaseURL — the service's address.
 	BaseURL string `json:"base_url,omitempty"`
-	// APIKey — учётные данные прямо в файле.
+	// APIKey — the credentials straight in the file.
 	APIKey string `json:"api_key,omitempty"`
-	// APIKeyEnv — имя переменной с ключом. Предпочтительнее ключа в файле:
-	// конфигурация часто попадает в резервные копии.
+	// APIKeyEnv — the name of the variable holding the key. Preferable to a key
+	// in the file: the configuration often ends up in backups.
 	APIKeyEnv string `json:"api_key_env,omitempty"`
 
-	// Settings — всё остальное, что понимает конкретный тип провайдера.
+	// Settings — everything else a specific provider type understands.
 	Settings map[string]any `json:"settings,omitempty"`
 }
 
-// IsEnabled сообщает, включена ли запись.
+// IsEnabled reports whether the entry is enabled.
 //
-// Отсутствие поля означает «включена»: оператор, добавивший секцию, ждёт, что
-// она работает.
+// A missing field means "enabled": an operator who added a section expects it
+// to work.
 func (p ProviderConfig) IsEnabled() bool {
 	if p.Enabled == nil {
 		return true
@@ -199,18 +212,18 @@ func (p ProviderConfig) IsEnabled() bool {
 	return *p.Enabled
 }
 
-// Режимы работы.
+// Operating modes.
 const (
-	// ModeLocal — шлюз и клиент на одной машине. Токен не проверяется вовсе:
-	// до loopback-слушателя кроме этой машины никто не дотянется.
+	// ModeLocal — the gateway and the client on one machine. The token is not
+	// checked at all: nobody but this machine can reach a loopback listener.
 	ModeLocal = "local"
-	// ModeServer — шлюз на сервере, клиент на другой машине. Токен обязателен,
-	// иначе открытый релей расходует квоту оператора для любого, кто найдёт
-	// порт.
+	// ModeServer — the gateway on a server, the client on another machine. The
+	// token is mandatory, otherwise an open relay spends the operator's quota
+	// for anyone who finds the port.
 	ModeServer = "server"
 )
 
-// Режимы по умолчанию.
+// Default modes.
 const (
 	DefaultMode      = ModeLocal
 	DefaultListen    = "127.0.0.1:8787"
@@ -222,7 +235,7 @@ const (
 	DefaultReasoningIdleTimeout = 300 * time.Second
 )
 
-// Default возвращает конфигурацию со встроенными значениями.
+// Default returns a configuration with the built-in values.
 func Default() *Config {
 	c := &Config{
 		Providers:       make(map[string]ProviderConfig),
@@ -239,13 +252,13 @@ func Default() *Config {
 	return c
 }
 
-// IsServer сообщает, действует ли проверка токена.
+// IsServer reports whether token checking is in force.
 func (c *Config) IsServer() bool { return c.Mode.Val == ModeServer }
 
-// Load читает конфигурацию: файл, затем окружение.
+// Load reads the configuration: the file, then the environment.
 //
-// Отсутствующий файл не ошибка — встроенные значения работают сами. Ошибка
-// разбора это ошибка: молчаливый откат к умолчаниям скрыл бы опечатку.
+// A missing file is not an error — the built-in values work on their own. A
+// parse error is an error: a silent fallback to the defaults would hide a typo.
 func Load() (*Config, error) {
 	paths, err := DefaultPaths()
 	if err != nil {
@@ -254,7 +267,7 @@ func Load() (*Config, error) {
 	return LoadFrom(paths)
 }
 
-// LoadFrom читает конфигурацию по заданным путям.
+// LoadFrom reads the configuration from the given paths.
 func LoadFrom(paths Paths) (*Config, error) {
 	c := Default()
 	c.Paths = paths
@@ -271,10 +284,10 @@ func LoadFrom(paths Paths) (*Config, error) {
 	return c, nil
 }
 
-// fileShape — форма файла конфигурации.
+// fileShape — the shape of the configuration file.
 //
-// Отдельный тип, а не сам Config: в файле значение это просто значение, а
-// источник нужно знать только после слияния.
+// A separate type, not Config itself: in the file a value is just a value,
+// while the source only needs to be known after the merge.
 type fileShape struct {
 	Mode                 *string                   `json:"mode"`
 	Listen               *string                   `json:"listen"`
@@ -288,12 +301,12 @@ type fileShape struct {
 	Providers            map[string]ProviderConfig `json:"providers"`
 }
 
-// applyFile накладывает файл на встроенные значения.
+// applyFile layers the file over the built-in values.
 func (c *Config) applyFile(path string) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // нет файла — работают умолчания
+			return nil // no file — the defaults work
 		}
 		return fmt.Errorf("config: reading %s: %w", path, err)
 	}
@@ -350,21 +363,21 @@ func (c *Config) applyFile(path string) error {
 	return nil
 }
 
-// Переменные окружения. Плоские оси имеют каждая свою переменную; вложенные
-// настройки провайдеров задаются только файлом, потому что их форма зависит
-// от типа провайдера.
+// Environment variables. The flat axes each have a variable of their own;
+// nested provider settings are set by file only, because their shape depends on
+// the provider type.
 const (
 	EnvMode      = "FREE_AI_ROUTER_MODE"
 	EnvListen    = "FREE_AI_ROUTER_LISTEN"
 	EnvToken     = "FREE_AI_ROUTER_TOKEN"
 	EnvTransport = "FREE_AI_ROUTER_TRANSPORT"
 	EnvUpstream  = "FREE_AI_ROUTER_UPSTREAM"
-	// EnvState переопределяет файл состояния — чтобы одноразовый прогон не
-	// тронул рабочее состояние.
+	// EnvState overrides the state file — so that a one-off run does not touch
+	// the working state.
 	EnvState = "FREE_AI_ROUTER_STATE"
 )
 
-// applyEnv накладывает окружение поверх файла.
+// applyEnv layers the environment over the file.
 func (c *Config) applyEnv() error {
 	for _, e := range []struct {
 		name string
@@ -381,7 +394,7 @@ func (c *Config) applyEnv() error {
 		}
 	}
 
-	// Переопределение состояния влияет только на путь, а не на значение оси.
+	// The state override affects only the path, not the axis value.
 	if v := strings.TrimSpace(os.Getenv(EnvState)); v != "" {
 		c.Paths.StateFile = v
 		c.Paths.StateDir = filepath.Dir(v)
@@ -389,10 +402,10 @@ func (c *Config) applyEnv() error {
 	return nil
 }
 
-// ApplyFlags накладывает значения из командной строки.
+// ApplyFlags layers the values from the command line.
 //
-// Принимаются только непустые значения: пустая строка означает «флаг не
-// задан», а не «установить пусто».
+// Only non-empty values are accepted: an empty string means "the flag was not
+// given", not "set it empty".
 func (c *Config) ApplyFlags(mode, listen, token, transport, upstream string) {
 	if mode != "" {
 		c.Mode.Set(mode, SourceFlag)
@@ -411,13 +424,13 @@ func (c *Config) ApplyFlags(mode, listen, token, transport, upstream string) {
 	}
 }
 
-// Validate проверяет инварианты, которые держатся МЕЖДУ осями.
+// Validate checks the invariants that hold BETWEEN axes.
 //
-// Единственный такой инвариант сегодня: режим server требует токена. Шлюз в
-// этом режиме слушает доступный адрес, поэтому без токена он становится
-// открытым релеем, расходующим квоту оператора для любого, кто найдёт порт.
-// Отказ стартовать — правильная реакция; предупреждение, проскочившее в
-// журнале, защитой не является.
+// The only such invariant today: server mode requires a token. The gateway in
+// this mode listens on a reachable address, so without a token it becomes an
+// open relay, spending the operator's quota for anyone who finds the port.
+// Refusing to start is the right reaction; a warning that slipped into the
+// journal is not a protection.
 func (c *Config) Validate() error {
 	switch c.Mode.Val {
 	case ModeLocal, ModeServer:
@@ -445,11 +458,11 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// ProviderKey возвращает учётные данные провайдера.
+// ProviderKey returns the provider's credentials.
 //
-// Порядок: значение в файле, затем переменная, имя которой указано рядом.
-// Обратный порядок был бы опасен — ключ в файле оказался бы сильнее явно
-// заданной переменной.
+// The order: the value in the file, then the variable named alongside it. The
+// reverse order would be dangerous — a key in the file would outweigh an
+// explicitly set variable.
 func (p ProviderConfig) ProviderKey() string {
 	if p.APIKey != "" {
 		return p.APIKey

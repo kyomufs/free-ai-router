@@ -13,11 +13,12 @@ import (
 	"free-ai-router/internal/state"
 )
 
-// stubProvider — провайдер-подставка.
+// stubProvider is a provider stand-in.
 //
-// Задаёт ровно то, что нужно для проверки шлюза: адрес, ответ и разбор отказа.
-// Настоящий провайдер здесь не нужен и мешал бы: проверяется поведение шлюза,
-// а не контракт конкретного сервиса.
+// It sets exactly what is needed to test the gateway: the address, the response
+// and the refusal parsing. A real provider is not needed here and would get in
+// the way: what is tested is the gateway's behaviour, not the contract of a
+// particular service.
 type stubProvider struct {
 	id      provider.ID
 	models  []provider.Model
@@ -49,18 +50,18 @@ func (s *stubProvider) Classify(resp *http.Response, body []byte) provider.Failu
 	return provider.Failure{Status: resp.StatusCode, Body: body, Headers: resp.Header}
 }
 
-// newTestHandler собирает обработчик с подставкой и записывающим транспортом.
+// newTestHandler assembles a handler with a stand-in and a recording transport.
 func newTestHandler(t *testing.T, upstream *httptest.Server) (*Handler, *stubProvider, *state.Store) {
 	t.Helper()
 
 	p := &stubProvider{
 		id:     "test",
-		models: []provider.Model{{ID: "модель", Context: 1000, MaxOutput: 100, Free: true}},
+		models: []provider.Model{{ID: "model", Context: 1000, MaxOutput: 100, Free: true}},
 		build: func(provider.Request) (provider.Prepared, error) {
 			return provider.Prepared{
 				URL:     upstream.URL + "/chat/completions",
 				Headers: http.Header{"content-type": []string{"application/json"}},
-				Body:    []byte(`{"model":"модель"}`),
+				Body:    []byte(`{"model":"model"}`),
 			}, nil
 		},
 	}
@@ -81,12 +82,12 @@ func newTestHandler(t *testing.T, upstream *httptest.Server) (*Handler, *stubPro
 	return h, p, st
 }
 
-// fixedTransport отдаёт заранее заданный транспорт.
+// fixedTransport hands out a pre-set transport.
 type fixedTransport struct{ rt http.RoundTripper }
 
 func (f fixedTransport) RoundTripper() (http.RoundTripper, error) { return f.rt, nil }
 
-// postChat отправляет запрос к обработчику и возвращает ответ.
+// postChat sends a request to the handler and returns the response.
 func postChat(t *testing.T, h *Handler, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
@@ -95,13 +96,13 @@ func postChat(t *testing.T, h *Handler, body string) *httptest.ResponseRecorder 
 	return rec
 }
 
-// TestRefusalPassesThroughVerbatim — ГЛАВНОЕ свойство шлюза.
+// TestRefusalPassesThroughVerbatim is the CENTRAL property of the gateway.
 //
-// Отказ провайдера обязан дойти до клиента байт в байт: тот же статус, то же
-// тело, те же заголовки. Клиент ищет в теле признаки, по которым принимает
-// решение о повторе, и переупаковка лишила бы его этих признаков.
+// A provider refusal must reach the client byte for byte: the same status, the
+// same body, the same headers. The client looks in the body for the signals it
+// decides a retry by, and repackaging would deprive it of those signals.
 func TestRefusalPassesThroughVerbatim(t *testing.T) {
-	const body = `{"error":{"type":"FreeTierError","code":"free_tier","message":"только изнутри"}}`
+	const body = `{"error":{"type":"FreeTierError","code":"free_tier","message":"from the inside only"}}`
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
@@ -112,7 +113,7 @@ func TestRefusalPassesThroughVerbatim(t *testing.T) {
 	defer upstream.Close()
 
 	h, _, st := newTestHandler(t, upstream)
-	rec := postChat(t, h, `{"model":"test/модель","messages":[{"role":"user","content":"привет"}]}`)
+	rec := postChat(t, h, `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`)
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
@@ -124,14 +125,14 @@ func TestRefusalPassesThroughVerbatim(t *testing.T) {
 		t.Fatalf("retry-after = %q, want it forwarded", got)
 	}
 
-	// И отказ записан в счётчики.
+	// And the refusal is recorded in the counters.
 	snap := st.Snapshot()
 	if len(snap.Days) != 1 || snap.Days[0].Refused != 1 {
 		t.Fatalf("the refusal was not counted: %+v", snap.Days)
 	}
 }
 
-// TestSuccessIsCounted — успешный запрос попадает в счётчики.
+// TestSuccessIsCounted — a successful request makes it into the counters.
 func TestSuccessIsCounted(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "text/event-stream")
@@ -140,7 +141,7 @@ func TestSuccessIsCounted(t *testing.T) {
 	defer upstream.Close()
 
 	h, _, st := newTestHandler(t, upstream)
-	rec := postChat(t, h, `{"model":"test/модель","messages":[{"role":"user","content":"привет"}]}`)
+	rec := postChat(t, h, `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -149,15 +150,15 @@ func TestSuccessIsCounted(t *testing.T) {
 	if len(snap.Days) != 1 || snap.Days[0].OK != 1 {
 		t.Fatalf("the success was not counted: %+v", snap.Days)
 	}
-	if len(snap.Days[0].ByModel) != 1 || snap.Days[0].ByModel[0].Model != "модель" {
+	if len(snap.Days[0].ByModel) != 1 || snap.Days[0].ByModel[0].Model != "model" {
 		t.Fatalf("the model rollup is wrong: %+v", snap.Days[0].ByModel)
 	}
 }
 
-// TestStreamIsForwardedIncrementally — поток отдаётся по мере поступления, а
-// не копится до конца: иначе стриминг бессмыслен.
+// TestStreamIsForwardedIncrementally — the stream is handed out as it arrives
+// rather than accumulated to the end: otherwise streaming is pointless.
 func TestStreamIsForwardedIncrementally(t *testing.T) {
-	const chunk = "data: {\"choices\":[{\"delta\":{\"content\":\"привет\"}}]}\n\n"
+	const chunk = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -172,7 +173,7 @@ func TestStreamIsForwardedIncrementally(t *testing.T) {
 	defer upstream.Close()
 
 	h, _, _ := newTestHandler(t, upstream)
-	rec := postChat(t, h, `{"model":"test/модель","messages":[{"role":"user","content":"x"}]}`)
+	rec := postChat(t, h, `{"model":"test/model","messages":[{"role":"user","content":"x"}]}`)
 
 	if got := strings.Count(rec.Body.String(), chunk); got != 3 {
 		t.Fatalf("forwarded %d chunks, want 3", got)
@@ -182,14 +183,14 @@ func TestStreamIsForwardedIncrementally(t *testing.T) {
 	}
 }
 
-// TestUnknownProviderRejected — незнакомый провайдер отвергается с понятным
-// сообщением.
+// TestUnknownProviderRejected — an unknown provider is rejected with a clear
+// message.
 func TestUnknownProviderRejected(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer upstream.Close()
 
 	h, _, _ := newTestHandler(t, upstream)
-	rec := postChat(t, h, `{"model":"незнакомый/модель","messages":[{"role":"user","content":"x"}]}`)
+	rec := postChat(t, h, `{"model":"unknown/model","messages":[{"role":"user","content":"x"}]}`)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
@@ -203,16 +204,58 @@ func TestUnknownProviderRejected(t *testing.T) {
 	}
 }
 
-// TestUnknownModelRejected — модель, которой нет в каталоге, отвергается:
-// каталог это то, что провайдер объявил.
+// TestUnknownModelRejected — a model that is not in the catalog is rejected:
+// the catalog is what the provider has declared.
 func TestUnknownModelRejected(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer upstream.Close()
 
 	h, _, _ := newTestHandler(t, upstream)
-	rec := postChat(t, h, `{"model":"test/нет-такой","messages":[{"role":"user","content":"x"}]}`)
+	rec := postChat(t, h, `{"model":"test/no-such-thing","messages":[{"role":"user","content":"x"}]}`)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// TestRejectedHeaderPrefixesAreReplaced — the two header values the upstream
+// refuses outright are replaced, not forwarded.
+//
+// Both are hard refusals keyed on a PREFIX rather than on a value, so a client
+// that sends either shape would fail the whole call over a header nobody
+// reads. The measurement behind it, and the admitted substitutes, are recorded
+// next to the check itself in parse.go.
+func TestRejectedHeaderPrefixesAreReplaced(t *testing.T) {
+	h := &Handler{}
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	r.Header.Set("x-opencode-project", "prj_f698f87ea99d390458196363")
+	r.Header.Set("x-opencode-request", "req_2cb728ee0be94ed0c7b20920b21fde87")
+
+	ids := h.sessionIDs(r, nil)
+
+	if ids.Project != "global" {
+		t.Errorf("Project = %q, want the admitted literal", ids.Project)
+	}
+	if !strings.HasPrefix(ids.Message, "msg_") {
+		t.Errorf("Message = %q, want a derived message id", ids.Message)
+	}
+}
+
+// TestAdmissibleHeaderValuesSurvive — the replacement must not touch values
+// the upstream admits. A check that rewrote everything would pass the test
+// above while discarding identifiers the client supplied on purpose.
+func TestAdmissibleHeaderValuesSurvive(t *testing.T) {
+	h := &Handler{}
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	r.Header.Set("x-opencode-project", "my-project")
+	r.Header.Set("x-opencode-request", "msg_13b2d53f2001ia66lVkDLegkmV")
+
+	ids := h.sessionIDs(r, nil)
+
+	if ids.Project != "my-project" {
+		t.Errorf("Project = %q, want the caller value preserved", ids.Project)
+	}
+	if ids.Message != "msg_13b2d53f2001ia66lVkDLegkmV" {
+		t.Errorf("Message = %q, want the caller value preserved", ids.Message)
 	}
 }

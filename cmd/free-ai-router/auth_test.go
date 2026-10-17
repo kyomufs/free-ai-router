@@ -8,7 +8,7 @@ import (
 	"free-ai-router/internal/config"
 )
 
-// newServerConfig возвращает конфигурацию в режиме server с токеном.
+// newServerConfig returns a configuration in server mode with a token.
 func newServerConfig(t *testing.T, token string) *config.Config {
 	t.Helper()
 	cfg := config.Default()
@@ -17,17 +17,17 @@ func newServerConfig(t *testing.T, token string) *config.Config {
 	return cfg
 }
 
-// TestTokenCoversEveryPath — главное свойство проверки доступа.
+// TestTokenCoversEveryPath — the main property of the access check.
 //
-// Проверка стоит ВОКРУГ маршрутизатора, а не внутри одной из поверхностей,
-// поэтому закрыт любой путь. Это не деталь: раньше проверка была только в
-// управлении, и поверхность моделей отвечала кому угодно, тратя квоту
-// оператора.
+// The check sits AROUND the router, not inside one of the surfaces, so every
+// path is closed. This is not a detail: previously the check existed only in
+// the control surface, and the models surface answered anyone, spending the
+// operator's quota.
 func TestTokenCoversEveryPath(t *testing.T) {
 	inside := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := requireToken(inside, newServerConfig(t, "секрет"))
+	handler := requireToken(inside, newServerConfig(t, "secret"))
 
 	paths := []string{
 		"/v1/models",
@@ -35,7 +35,7 @@ func TestTokenCoversEveryPath(t *testing.T) {
 		"/_control/status",
 		"/_control/keys",
 		"/p/opencode/v1/models",
-		"/что-угодно",
+		"/anything-at-all",
 	}
 	for _, path := range paths {
 		rec := httptest.NewRecorder()
@@ -46,17 +46,17 @@ func TestTokenCoversEveryPath(t *testing.T) {
 	}
 }
 
-// TestTokenAcceptsBearerAndBare — принимаются обе формы заголовка.
+// TestTokenAcceptsBearerAndBare — both header forms are accepted.
 //
-// Разные клиенты ведут себя по-разному, и требовать строго одну форму значило
-// бы ломать чужой код без причины.
+// Different clients behave differently, and demanding strictly one form would
+// mean breaking someone else's code for no reason.
 func TestTokenAcceptsBearerAndBare(t *testing.T) {
 	inside := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := requireToken(inside, newServerConfig(t, "секрет"))
+	handler := requireToken(inside, newServerConfig(t, "secret"))
 
-	for _, header := range []string{"Bearer секрет", "секрет"} {
+	for _, header := range []string{"Bearer secret", "secret"} {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 		req.Header.Set("authorization", header)
@@ -67,12 +67,12 @@ func TestTokenAcceptsBearerAndBare(t *testing.T) {
 	}
 }
 
-// TestTokenRejectsWrongValue — неверный токен не проходит.
+// TestTokenRejectsWrongValue — a wrong token does not pass.
 func TestTokenRejectsWrongValue(t *testing.T) {
 	inside := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	handler := requireToken(inside, newServerConfig(t, "секрет"))
+	handler := requireToken(inside, newServerConfig(t, "secret"))
 
-	for _, header := range []string{"", "Bearer", "Bearer неверный", "сек", "секрет2", "Bearer секрет "} {
+	for _, header := range []string{"", "Bearer", "Bearer wrong", "sec", "secret2", "Bearer secret "} {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 		if header != "" {
@@ -85,10 +85,10 @@ func TestTokenRejectsWrongValue(t *testing.T) {
 	}
 }
 
-// TestLocalModeSkipsTheCheck — в режиме local проверка не выполняется вовсе.
+// TestLocalModeSkipsTheCheck — in local mode the check is not performed at all.
 //
-// До loopback-слушателя кроме этой машины никто не дотянется, и требовать
-// токен там значило бы усложнять работу без причины.
+// Nobody but this machine can reach a loopback listener, and demanding a token
+// there would mean complicating the work for no reason.
 func TestLocalModeSkipsTheCheck(t *testing.T) {
 	inside := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
@@ -102,11 +102,11 @@ func TestLocalModeSkipsTheCheck(t *testing.T) {
 	}
 }
 
-// TestResponseForm — отказ приходит в общей форме шлюза.
+// TestResponseForm — the refusal arrives in the common gateway shape.
 func TestResponseForm(t *testing.T) {
 	inside := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
 	rec := httptest.NewRecorder()
-	requireToken(inside, newServerConfig(t, "секрет")).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	requireToken(inside, newServerConfig(t, "secret")).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
 
 	if ct := rec.Header().Get("content-type"); ct != "application/json" {
 		t.Fatalf("content-type = %q", ct)
@@ -116,7 +116,7 @@ func TestResponseForm(t *testing.T) {
 	}
 }
 
-// contains сообщает, содержит ли строка подстроку.
+// contains reports whether the string contains the substring.
 func contains(haystack, needle string) bool {
 	for i := 0; i+len(needle) <= len(haystack); i++ {
 		if haystack[i:i+len(needle)] == needle {

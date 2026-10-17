@@ -11,18 +11,19 @@ import (
 	"free-ai-router/internal/provider"
 )
 
-// Классификация отказа для OpenAI-совместимого протокола.
+// Refusal classification for the OpenAI-compatible protocol.
 //
-// Задача одна: решить, осмысленно ли сменить ключ и повторить. Тело, статус и
-// заголовки уходят клиенту дословно — их разбирает он сам.
+// The task is one: decide whether it makes sense to switch the key and retry.
+// The body, status and headers go to the client verbatim — it parses them
+// itself.
 //
-// Признаки берутся из двух источников, потому что сервисы сообщают об одном и
-// том же по-разному: статусом и кодом в теле. Текстовые эвристики здесь не
-// применяются: разнообразие формулировок у разных сервисов слишком велико, и
-// попытка угадать по тексту давала бы ложные срабатывания. Статус и явный код
-// в теле — это то, о чём сервисы договорились.
+// The signals come from two sources, because services report the same thing
+// differently: by status and by a code in the body. Text heuristics are not
+// applied here: the variety of wordings across services is too great, and
+// guessing from the text would produce false positives. The status and an
+// explicit code in the body are what the services have agreed upon.
 
-// authCodes — коды, означающие отказ в учётных данных.
+// authCodes are the codes that mean the credentials were refused.
 var authCodes = map[string]bool{
 	"invalid_api_key":     true,
 	"invalidapikey":       true,
@@ -35,9 +36,9 @@ var authCodes = map[string]bool{
 	"invalidcredential":   true,
 }
 
-// quotaCodes — коды исчерпания квоты. Для решения о ключе они равнозначны
-// отказу в ключе: ограничение сидит на учётных данных, и сменить ключ —
-// единственный способ продолжить.
+// quotaCodes are the codes that mean the quota is exhausted. For the key
+// decision they are equivalent to a key refusal: the limit sits on the
+// credentials, and switching the key is the only way to continue.
 var quotaCodes = map[string]bool{
 	"insufficient_quota":   true,
 	"insufficientquota":    true,
@@ -48,10 +49,10 @@ var quotaCodes = map[string]bool{
 	"billing_error":        true,
 	"usage_limit_exceeded": true,
 	"free_tier_exhausted":  true,
-	"rate_limit_exceeded":  false, // всплеск, а не квота: ключ тут ни при чём
+	"rate_limit_exceeded":  false, // a burst, not a quota: the key is irrelevant here
 }
 
-// Classify реализует provider.Provider.
+// Classify implements provider.Provider.
 func (p *Provider) Classify(resp *http.Response, body []byte) provider.Failure {
 	f := provider.Failure{
 		Status:  resp.StatusCode,
@@ -60,9 +61,9 @@ func (p *Provider) Classify(resp *http.Response, body []byte) provider.Failure {
 	}
 	f.RetryAfter = parseRetryAfter(resp.Header)
 
-	// 401 — отказ в ключе по определению. 403 добавляется к нему: сервисы
-	// отвечают им и на неверный ключ, и на исчерпанное право доступа, а для
-	// решения о повторе различие не важно.
+	// 401 is a key refusal by definition. 403 is added to it: services answer
+	// with it both for a wrong key and for an exhausted access right, and for
+	// the retry decision the difference does not matter.
 	switch resp.StatusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
 		f.KeyRejected = true
@@ -76,10 +77,10 @@ func (p *Provider) Classify(resp *http.Response, body []byte) provider.Failure {
 	return f
 }
 
-// extractCodes собирает коды из тела в тех местах, где их кладут сервисы.
+// extractCodes collects codes from the body in the places services put them.
 //
-// Разбор поверхностный намеренно: тело передаётся клиенту дословно, и здесь
-// нужны только строки-признаки.
+// The parsing is deliberately shallow: the body is passed to the client
+// verbatim, and only marker strings are needed here.
 func extractCodes(body []byte) []string {
 	var seen []string
 	add := func(v any) {
@@ -105,13 +106,13 @@ func extractCodes(body []byte) []string {
 			add(inner["code"])
 		}
 	}
-	// Некоторые сервисы отдают {"error":"строка"} вместо объекта — тогда
-	// кодов нет, и решение принимается по статусу.
+	// some services return {"error":"string"} instead of an object — then
+	// there are no codes, and the decision is made by status.
 	return seen
 }
 
-// parseRetryAfter разбирает заголовки ожидания в том же порядке, что и клиент
-// (packages/ai/src/route/executor.ts): миллисекунды, секунды, HTTP-дата.
+// parseRetryAfter parses the wait headers in the same order as the client
+// (packages/ai/src/route/executor.ts): milliseconds, seconds, HTTP date.
 func parseRetryAfter(h http.Header) time.Duration {
 	if h == nil {
 		return 0

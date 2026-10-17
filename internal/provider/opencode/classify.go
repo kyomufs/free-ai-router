@@ -12,21 +12,24 @@ import (
 	"free-ai-router/internal/provider"
 )
 
-// Классификация отказа.
+// Refusal classification.
 //
-// ЗАЧЕМ ОНА ВООБЩЕ НУЖНА, если шлюз передаёт отказ клиенту дословно.
-// Ровно ради одного вопроса: осмысленно ли сменить ключ и повторить. Тело,
-// статус и заголовки уходят клиенту без изменений — их разбирает он сам.
-// Провайдер отвечает только на вопрос про ключ.
+// WHY IT IS NEEDED AT ALL, if the gateway passes the refusal to the client
+// verbatim. Precisely for one question: is it meaningful to switch the key and
+// retry. The body, status and headers go to the client unchanged — it parses
+// them itself. The provider answers only the question about the key.
 //
-// Источник признаков — packages/ai/src/provider-error.ts (opencode 2.0.30),
-// функция classifyProviderFailure. Провайдер использует ту же логику, что и
-// клиент, чтобы решение шлюза не расходилось с решением клиента.
+// The source of the signals is packages/ai/src/provider-error.ts (opencode
+// 2.0.30), the function classifyProviderFailure. The provider uses the same
+// logic as the client, so that the gateway's decision does not diverge from the
+// client's.
 
-// quotaCodes — коды, означающие исчерпание квоты, а не всплеск запросов.
+// quotaCodes are the codes that mean the quota is exhausted, rather than a burst
+// of requests.
 //
-// В клиенте это QUOTA_CODES; совпадение важно: если шлюз решит, что дело в
-// ключе, а клиент увидит квоту, они разойдутся в том, повторять ли запрос.
+// In the client these are QUOTA_CODES; the match matters: if the gateway decides
+// it is a key issue while the client sees a quota, they will disagree on whether
+// to retry the request.
 var quotaCodes = map[string]bool{
 	"insufficient_quota":     true,
 	"usage_not_included":     true,
@@ -43,7 +46,7 @@ var quotaCodes = map[string]bool{
 	"quotaexceedederror":     true,
 }
 
-// authCodes — коды, означающие отказ в учётных данных.
+// authCodes are the codes that mean the credentials were refused.
 var authCodes = map[string]bool{
 	"authentication_error": true,
 	"permission_error":     true,
@@ -56,19 +59,20 @@ var authCodes = map[string]bool{
 	"unauthorized":         true,
 }
 
-// quotaText — текстовые признаки квоты. Применяются только к 429 и 402, где
-// всплеск запросов и исчерпание квоты делят один статус.
+// quotaText are the text signals of a quota. They are applied only to 429 and
+// 402, where a burst of requests and quota exhaustion share one status.
 var quotaText = regexp.MustCompile(`(?i)insufficient[-_\s]?(?:quota|balance)|quota[-_\s]?exceeded|budget exceeded|usage limit|limit exhausted|credit limit|free tier`)
 
-// authText — текстовые признаки отказа в ключе.
+// authText are the text signals of a key refusal.
 var authText = regexp.MustCompile(`(?i)incorrect api key|invalid api key|api key is invalid|unauthenticated`)
 
-// Classify реализует provider.Provider.
+// Classify implements provider.Provider.
 //
-// Решение о ключе принимается по совокупности признаков, потому что сервисы
-// сообщают об одном и том же разными способами: статусом, кодом в теле, типом
-// или текстом. Провайдер обязан распознать отказ в ключе во всех формах,
-// иначе шлюз не сменит ключ там, где это помогло бы.
+// The decision about the key is made from the totality of signals, because
+// services report the same thing in different ways: by status, by a code in the
+// body, by type or by text. The provider must recognise a key refusal in all
+// forms, otherwise the gateway will not switch the key where that would have
+// helped.
 func (p *Provider) Classify(resp *http.Response, body []byte) provider.Failure {
 	f := provider.Failure{
 		Status:  resp.StatusCode,
@@ -81,23 +85,24 @@ func (p *Provider) Classify(resp *http.Response, body []byte) provider.Failure {
 	codes := extractCodes(body)
 	lower := strings.ToLower(string(body))
 
-	// Отказ в ключе. 401 и 403 относятся сюда: сервис отвечает ими и на
-	// неверный ключ, и на исчерпанное право доступа.
+	// A key refusal. 401 and 403 belong here: the service answers with them both
+	// for a wrong key and for an exhausted access right.
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
 		f.KeyRejected = true
 	case resp.StatusCode == http.StatusForbidden:
-		// 403 бывает и региональным запретом, и отказом по аттестации.
-		// Для решения о ключе различие не важно: если ключ у шлюза есть,
-		// попробовать другой осмысленно, а если нет — повтор не состоится.
+		// 403 can also be a regional ban or an attestation refusal. For the
+		// key decision the difference does not matter: if the gateway has a
+		// key, trying another is meaningful, and if it does not, the retry
+		// will not happen anyway.
 		f.KeyRejected = true
 	}
 	for _, code := range codes {
 		if authCodes[code] {
 			f.KeyRejected = true
 		}
-		// Коды квоты означают, что ограничение сидит на учётных данных:
-		// смена ключа — единственный способ продолжить.
+		// Quota codes mean the limit sits on the credentials: switching the
+		// key is the only way to continue.
 		if quotaCodes[code] {
 			f.KeyRejected = true
 		}
@@ -112,11 +117,12 @@ func (p *Provider) Classify(resp *http.Response, body []byte) provider.Failure {
 	return f
 }
 
-// extractCodes вытаскивает коды из тела в тех местах, где их кладут разные
-// сервисы.
+// extractCodes pulls codes out of the body from the places different services
+// put them.
 //
-// Разбор намеренно поверхностный: тело передаётся клиенту ДОСЛОВНО, и
-// единственная задача здесь — собрать строки-признаки, не меняя сам ответ.
+// The parsing is deliberately shallow: the body is passed to the client
+// VERBATIM, and the only task here is to collect marker strings without altering
+// the response itself.
 func extractCodes(body []byte) []string {
 	var seen []string
 	add := func(v any) {
@@ -141,19 +147,20 @@ func extractCodes(body []byte) []string {
 		add(err["type"])
 		add(err["status"])
 		add(err["error_type"])
-		// Некоторые сервисы кладут причину в innererror.
+		// Some services put the cause in innererror.
 		if inner, ok := err["innererror"].(map[string]any); ok {
 			add(inner["code"])
 		}
-		// И в metadata.
+		// And in metadata.
 		if md, ok := err["metadata"].(map[string]any); ok {
 			add(md["error_type"])
 		}
 	}
 
-	// Обёртка вида {"type":"error","error":{...}} уже разобрана выше.
-	// Осталось вытащить метку из переписанного сообщения: сервис заменяет код
-	// на свой и оставляет исходный в квадратных скобках в начале текста.
+	// A wrapper of the form {"type":"error","error":{...}} has already been
+	// handled above. What is left is to extract the label from a rewritten
+	// message: the service replaces the code with its own and leaves the
+	// original in square brackets at the start of the text.
 	if err, ok := top["error"].(map[string]any); ok {
 		if msg, ok := err["message"].(string); ok {
 			if label := gatewayCodeLabel(msg); label != "" {
@@ -169,11 +176,11 @@ func extractCodes(body []byte) []string {
 	return seen
 }
 
-// gatewayCodeLabelMatch — метка исходного кода в начале переписанного
-// сообщения, например "Gateway: [rate_limit_exceeded] ...".
+// gatewayCodeLabelMatch is the marker of the original code at the start of a
+// rewritten message, for example "Gateway: [rate_limit_exceeded] ...".
 var gatewayCodeLabelMatch = regexp.MustCompile(`^[^:\n]+: \[([A-Za-z0-9_.-]+)\]`)
 
-// gatewayCodeLabel возвращает метку кода, если она есть.
+// gatewayCodeLabel returns the code label, if there is one.
 func gatewayCodeLabel(message string) string {
 	if m := gatewayCodeLabelMatch.FindStringSubmatch(message); len(m) == 2 {
 		return m[1]
@@ -181,12 +188,11 @@ func gatewayCodeLabel(message string) string {
 	return ""
 }
 
-// parseRetryAfter разбирает заголовки ожидания.
+// parseRetryAfter parses the wait headers.
 //
-// Порядок тот же, что у клиента (packages/ai/src/route/executor.ts):
-// сначала миллисекундный заголовок, затем секунды, затем HTTP-дата.
-// Значение может понадобиться ротации ключей, чтобы решить, ждать или менять
-// ключ.
+// The order is the same as the client's (packages/ai/src/route/executor.ts):
+// first the millisecond header, then seconds, then the HTTP date. The value may
+// be needed by key rotation to decide whether to wait or to switch the key.
 func parseRetryAfter(h http.Header) time.Duration {
 	if h == nil {
 		return 0

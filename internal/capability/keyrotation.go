@@ -5,49 +5,49 @@ import (
 	"sync"
 )
 
-// KeyRotation — механизм замены учётных данных при отказе по ключу.
+// KeyRotation — the mechanism that replaces credentials when the key is
+// refused.
 //
-// ОБЛАСТЬ ПРИМЕНЕНИЯ. Механизм не знает, какому провайдеру он служит и как
-// называются его модели. Он отвечает ровно за одно: выдать следующую строку
-// учётных данных и сказать, остались ли ещё варианты. Поэтому он годится для
-// любого провайдера, работающего по ключам, и не требует от провайдера ничего,
-// кроме признака «отвергнут именно ключ».
+// SCOPE. The mechanism does not know which provider it serves or what its
+// models are called. It is responsible for exactly one thing: to hand out the
+// next credential string and to say whether any alternatives remain. That is
+// why it suits any provider that works with keys, and asks nothing of the
+// provider beyond the sign "it was the key that got rejected".
 //
-// ПОЧЕМУ НЕ В ПРОВАЙДЕРЕ. Ротация — не свойство сервиса, а способ обойти
-// ограничение на количество запросов с одного ключа. Сервисы разные, способ
-// один. Держать его в провайдере значило бы копировать одинаковый код туда,
-// где сервисы просто оказались похожи.
+// WHY NOT IN THE PROVIDER. Rotation is not a property of a service but a way to
+// get around a per-key request limit. The services differ; the technique is one.
+// Keeping it in the provider would mean copying identical code into places that
+// merely happened to look alike.
 type KeyRotation struct {
 	mu sync.Mutex
 
-	// keys — доступные ключи. Пустой список означает «ключа нет», и тогда
-	// механизм честно сообщает, что менять нечего.
+	// keys — the available keys. An empty list means "no key", and then the
+	// mechanism honestly reports that there is nothing to change.
 	keys []string
 
-	// next — индекс следующего ключа. Механизм выдаёт ключи по кругу, чтобы
-	// расход распределялся равномерно и ни один не сгорал первым.
+	// next — the index of the next key. The mechanism hands out keys in a
+	// cycle, so that usage is spread evenly and none of them burns out first.
 	next int
 
-	// lastUsed — индекс последнего выданного ключа. Нужен, чтобы не выдать
-	// тот же ключ повторно.
+	// lastUsed — the index of the last key handed out. Needed so that the same
+	// key is not handed out twice in a row.
 	lastUsed int
 }
 
-// KeyRotationConfig — настройки механизма, разобранные из конфигурации.
+// KeyRotationConfig — the mechanism's settings, parsed from the configuration.
 type KeyRotationConfig struct {
-	// Keys — список ключей.
+	// Keys — the list of keys.
 	Keys []string
-	// StartAt — с какого ключа начинать. Отрицательное значение означает
-	// «первый».
+	// StartAt — which key to start from. A negative value means "the first".
 	StartAt int
 }
 
-// NewKeyRotation создаёт механизм из конфигурации.
+// NewKeyRotation creates the mechanism from the configuration.
 //
-// Пустой список ключей не является ошибкой: провайдер может работать без них,
-// и тогда механизм просто всегда отвечает «менять нечего». Ошибкой был бы
-// отказ зарегистрировать механизм из-за отсутствия ключей — это лишило бы
-// оператора возможности добавить их позже.
+// An empty key list is not an error: a provider may work without keys, and then
+// the mechanism simply always answers "nothing to change". It would be an error
+// to refuse to register the mechanism for want of keys — that would deprive the
+// operator of the ability to add them later.
 func NewKeyRotation(cfg map[string]any) (any, error) {
 	var parsed KeyRotationConfig
 
@@ -85,9 +85,9 @@ func NewKeyRotation(cfg map[string]any) (any, error) {
 		start = 0
 	}
 
-	// Отбрасываем пустые ключи: пустая строка в списке — почти всегда след
-	// лишней запятой в конфигурации, и оставлять её значило бы выдавать
-	// заведомо отвергаемый ключ.
+	// Drop empty keys: an empty string in the list is almost always the trace of
+	// a stray comma in the configuration, and keeping it would mean handing out
+	// a key that is bound to be rejected.
 	keys := make([]string, 0, len(parsed.Keys))
 	for _, k := range parsed.Keys {
 		if k != "" {
@@ -98,29 +98,30 @@ func NewKeyRotation(cfg map[string]any) (any, error) {
 	return &KeyRotation{keys: keys, next: start, lastUsed: -1}, nil
 }
 
-// Len сообщает, сколько ключей доступно.
+// Len reports how many keys are available.
 func (k *KeyRotation) Len() int {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return len(k.keys)
 }
 
-// HasAlternatives сообщает, есть ли ключ, отличный от текущего.
+// HasAlternatives reports whether there is a key different from the current
+// one.
 //
-// False означает, что повтор смысла не имеет: либо ключ один, либо их нет
-// вовсе. Это тот случай, когда шлюз обязан отдать отказ клиенту, а не тратить
-// время на заведомо бесплодную попытку.
+// False means a retry makes no sense: either there is only one key, or there
+// are none at all. That is the case where the gateway must hand the refusal
+// back to the client instead of spending time on a plainly fruitless attempt.
 func (k *KeyRotation) HasAlternatives() bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return len(k.keys) > 1
 }
 
-// Next выдаёт следующий ключ и признак того, что ключ есть.
+// Next hands out the next key and the sign that there is a key.
 //
-// Ключи выдаются по кругу. Возвращённый ключ запоминается как использованный,
-// чтобы следующий вызов дал другой: при повторе нужен именно другой ключ, а не
-// тот же самый.
+// Keys are handed out in a cycle. The key returned is remembered as used, so
+// that the next call yields a different one: on a retry the point is exactly to
+// get a different key, not the same one.
 func (k *KeyRotation) Next() (string, bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -134,7 +135,8 @@ func (k *KeyRotation) Next() (string, bool) {
 		return key, true
 	}
 
-	// Пропускаем ключ, выданный в прошлый раз: повтор должен идти с другим.
+	// Skip the key handed out last time: the retry must proceed with a
+	// different one.
 	for i := 0; i < len(k.keys); i++ {
 		idx := k.next % len(k.keys)
 		k.next++
@@ -145,14 +147,15 @@ func (k *KeyRotation) Next() (string, bool) {
 		return k.keys[idx], true
 	}
 
-	// Достижимо только при одном ключе, что разобрано выше.
+	// Reachable only with a single key, which is covered above.
 	return "", false
 }
 
-// Take возвращает ключ, отличный от указанного.
+// Take returns a key different from the one named.
 //
-// Используется при повторе: текущий ключ известен, и нужен именно другой.
-// Если другого нет, второй результат false — повтор бессмыслен.
+// Used on a retry: the current key is known, and it is precisely another one
+// that is needed. If there is no other, the second result is false — the retry
+// is pointless.
 func (k *KeyRotation) Take(current string) (string, bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -171,10 +174,10 @@ func (k *KeyRotation) Take(current string) (string, bool) {
 	return "", false
 }
 
-// Add добавляет ключ, если его ещё нет.
+// Add adds a key if it is not there yet.
 //
-// Возвращает false, если ключ уже был: повторное добавление не должно менять ни
-// порядок обхода, ни счётчики.
+// Returns false if the key was already present: adding it again must change
+// neither the traversal order nor the counters.
 func (k *KeyRotation) Add(key string) bool {
 	if key == "" {
 		return false
@@ -190,7 +193,7 @@ func (k *KeyRotation) Add(key string) bool {
 	return true
 }
 
-// Remove удаляет ключ.
+// Remove deletes a key.
 func (k *KeyRotation) Remove(key string) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -210,10 +213,10 @@ func (k *KeyRotation) Remove(key string) bool {
 	return false
 }
 
-// KeysSnapshot возвращает копию списка ключей.
+// KeysSnapshot returns a copy of the key list.
 //
-// Именно копию, а не срез: вызывающий не должен получить доступ к внутреннему
-// состоянию, иначе блокировка перестанет что-либо защищать.
+// A copy, precisely, and not a slice: the caller must not gain access to the
+// internal state, otherwise the lock would stop protecting anything.
 func (k *KeyRotation) KeysSnapshot() []string {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -222,11 +225,11 @@ func (k *KeyRotation) KeysSnapshot() []string {
 	return out
 }
 
-// Info описывает механизм для справки и интерфейсов.
+// Info describes the mechanism for the help text and the interfaces.
 func (k *KeyRotation) Info() Info {
 	return Info{
 		Kind:    KindKeyRotation,
 		Name:    "pool",
-		Summary: "меняет ключ из списка, когда провайдер отверг текущий",
+		Summary: "switches to another key from the list when the provider rejects the current one",
 	}
 }

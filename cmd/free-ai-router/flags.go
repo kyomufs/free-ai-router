@@ -9,11 +9,11 @@ import (
 	"free-ai-router/internal/config"
 )
 
-// flags — разобранные аргументы командной строки.
+// flags — the parsed command-line arguments.
 //
-// Значения по умолчанию — пустые строки, а не значения из конфигурации.
-// Пустая строка означает «флаг не задан», и это важно: иначе запуск без флагов
-// затирал бы конфигурацию умолчаниями.
+// The defaults are empty strings, not values from the configuration. An empty
+// string means "flag not set", and that matters: otherwise a run without flags
+// would overwrite the configuration with defaults.
 type flags struct {
 	mode      string
 	listen    string
@@ -21,54 +21,57 @@ type flags struct {
 	transport string
 	upstream  string
 
-	// json включает машиночитаемый вывод.
+	// json enables machine-readable output.
 	json bool
-	// printConfig печатает эффективную конфигурацию и выходит.
+	// printConfig prints the effective configuration and exits.
 	printConfig bool
-	// detach запускает демон в фоне.
+	// detach starts the daemon in the background.
 	detach bool
 
-	// Позиционные аргументы, оставшиеся после разбора.
+	// Positional arguments left over after parsing.
 	positional []string
 }
 
-// parseFlags разбирает аргументы.
+// parseFlags parses the arguments.
 //
-// Разбор идёт вручную, а не через flag.Parse: командам нужен РАЗНЫЙ набор
-// флагов, и общий набор заставлял бы принимать то, что команде не нужно.
+// Parsing is done by hand, not through flag.Parse: the commands need DIFFERENT
+// sets of flags, and a common set would force accepting what a command does not
+// need.
 func parseFlags(args []string) (*flags, error) {
 	f := &flags{}
 	fs := flag.NewFlagSet("free-ai-router", flag.ContinueOnError)
-	// Ошибки печатаем сами: у flag своё сообщение, и оно дублировало бы наше.
+	// We print the errors ourselves: flag has its own message, and it would
+	// duplicate ours.
 	fs.SetOutput(io.Discard)
 
-	fs.StringVar(&f.mode, "mode", "", "форма развёртывания: local | server")
-	fs.StringVar(&f.listen, "listen", "", "адрес прослушивания")
-	fs.StringVar(&f.token, "token", "", "токен доступа для режима server")
-	fs.StringVar(&f.transport, "transport", "", "транспорт: direct")
-	fs.StringVar(&f.upstream, "upstream", "", "адрес по умолчанию для провайдеров")
-	fs.BoolVar(&f.json, "json", false, "машиночитаемый вывод")
-	fs.BoolVar(&f.printConfig, "print-config", false, "показать эффективную конфигурацию и выйти")
-	fs.BoolVar(&f.detach, "detach", false, "запустить демон в фоне")
+	fs.StringVar(&f.mode, "mode", "", "deployment form: local | server")
+	fs.StringVar(&f.listen, "listen", "", "listen address")
+	fs.StringVar(&f.token, "token", "", "access token for server mode")
+	fs.StringVar(&f.transport, "transport", "", "transport: direct")
+	fs.StringVar(&f.upstream, "upstream", "", "default address for providers")
+	fs.BoolVar(&f.json, "json", false, "machine-readable output")
+	fs.BoolVar(&f.printConfig, "print-config", false, "show the effective configuration and exit")
+	fs.BoolVar(&f.detach, "detach", false, "start the daemon in the background")
 
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("разбор аргументов: %w", err)
+		return nil, fmt.Errorf("parsing arguments: %w", err)
 	}
 	f.positional = fs.Args()
 	return f, nil
 }
 
-// applyToFlags накладывает разобранные флаги на конфигурацию.
+// applyToFlags applies the parsed flags to the configuration.
 func (f *flags) applyToConfig(c interface {
 	ApplyFlags(mode, listen, token, transport, upstream string)
 }) {
 	c.ApplyFlags(f.mode, f.listen, f.token, f.transport, f.upstream)
 }
 
-// joinArgs собирает описание оставшихся аргументов для сообщения об ошибке.
+// joinArgs assembles a description of the remaining arguments for an error
+// message.
 func joinArgs(args []string) string {
 	if len(args) == 0 {
 		return ""
@@ -76,9 +79,9 @@ func joinArgs(args []string) string {
 	return strings.Join(args, " ")
 }
 
-// loadConfigSimple читает конфигурацию с флагами, но без их разбора в
-// переменную: командам, которым флаги нужны лишь как переопределение, не
-// требуется доступ к самим значениям.
+// loadConfigSimple reads the configuration with the flags, but without parsing
+// them into a variable: commands that need the flags only as an override do not
+// require access to the values themselves.
 func loadConfigSimple(args []string) (*config.Config, error) {
 	cfg, _, err := loadConfig(args)
 	return cfg, err

@@ -1,19 +1,21 @@
-// Package control — управление работающим демоном.
+// Package control — managing a running daemon.
 //
-// ЗАЧЕМ ОТДЕЛЬНАЯ ПОВЕРХНОСТЬ. Демон держит реестр провайдеров, механизмы
-// ротации и счётчики; оператору нужно уметь посмотреть на них и изменить то,
-// что меняется без перезапуска. Control API даёт для этого один набор
-// маршрутов, и им одинаково пользуются CLI, TUI и сторонние скрипты.
+// WHY A SEPARATE SURFACE. The daemon holds the provider registry, the rotation
+// mechanisms and the counters; the operator needs to be able to look at them
+// and to change what changes without a restart. The Control API provides one
+// set of routes for that, and the CLI, the TUI and third-party scripts use it
+// alike.
 //
-// ЧТО МЕНЯЕТСЯ НА ЖИВОМ ДЕМОНЕ, а что нет. Меняется состав ключей и то, какие
-// из них в работе. Не меняется всё, что относится к сокету и к реестру
-// провайдеров: адрес прослушивания уже занят, а реестр собран из конфигурации
-// при старте. Попытка сменить их на живом демоне вернула бы состояние, которое
-// никто не исполняет, — и это хуже отказа.
+// WHAT CHANGES ON A LIVE DAEMON and what does not. The set of keys changes, and
+// so does which of them are in use. Nothing relating to the socket or to the
+// provider registry changes: the listen address is already taken, and the
+// registry was assembled from the configuration at startup. An attempt to
+// change them on a live daemon would return a state that nobody enforces — and
+// that is worse than a refusal.
 //
-// ТОКЕН. В режиме server проверка оборачивает и эту поверхность: control умеет
-// израсходовать ключи провайдера, поэтому открытый control обнулил бы проверку
-// шлюза.
+// TOKEN. In server mode the check wraps this surface too: control can burn
+// through a provider's keys, so an open control would nullify the gateway's
+// check.
 package control
 
 import (
@@ -29,42 +31,43 @@ import (
 	"free-ai-router/internal/state"
 )
 
-// Prefix — префикс всех маршрутов управления.
+// Prefix — the prefix of all management routes.
 const Prefix = "/_control/"
 
-// Handler обслуживает маршруты управления.
+// Handler serves the management routes.
 type Handler struct {
-	// Providers — реестр провайдеров.
+	// Providers — the provider registry.
 	Providers *provider.Registry
-	// KeyRotation — механизмы ротации ключей по провайдерам.
+	// KeyRotation — the key-rotation mechanisms by provider.
 	KeyRotation gateway.KeyRotationRegistry
-	// State — счётчики.
+	// State — the counters.
 	State *state.Store
-	// Log — журнал.
+	// Log — the journal.
 	Log *state.Logger
-	// Config — действующая конфигурация. Только для чтения: смена значений,
-	// влияющих на сокет, требует перезапуска.
+	// Config — the active configuration. Read-only: changing values that affect
+	// the socket requires a restart.
 	Config *config.Config
 
-	// Transports — доступные транспорты. Заполняется точкой входа, потому
-	// что список словарей живёт в одном месте, а не копируется в интерфейсы.
+	// Transports — the available transports. Filled in by the entry point,
+	// because the list of dictionaries lives in one place instead of being
+	// copied into the interfaces.
 	Transports []string
 
-	// Token и RequireToken — проверка доступа.
+	// Token and RequireToken — the access check.
 	Token        string
 	RequireToken bool
 }
 
-// Routes регистрирует маршруты.
+// Routes registers the routes.
 func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc(Prefix, h.serve)
 }
 
-// serve разбирает маршрут и вызывает обработчик.
+// serve parses the route and calls the handler.
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	if !h.authorized(r) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{
-			"error": "требуется токен",
+			"error": "a token is required",
 		})
 		return
 	}
@@ -89,11 +92,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// authorized проверяет токен.
+// authorized checks the token.
 //
-// Сравнение уже не побайтовое с ранним выходом: используется
-// constant-time-сравнение, потому что побайтовый выход утекает префикс секрета
-// через время ответа.
+// The comparison is no longer byte-by-byte with an early exit: a constant-time
+// comparison is used, because a byte-by-byte exit leaks the secret's prefix
+// through the response time.
 func (h *Handler) authorized(r *http.Request) bool {
 	if !h.RequireToken {
 		return true
@@ -102,7 +105,7 @@ func (h *Handler) authorized(r *http.Request) bool {
 	return subtleEquals(presented, h.Token)
 }
 
-// bearerToken достаёт токен из заголовка.
+// bearerToken pulls the token out of the header.
 func bearerToken(r *http.Request) string {
 	v := r.Header.Get("authorization")
 	if len(v) > 7 && strings.EqualFold(v[:7], "bearer ") {
@@ -111,7 +114,7 @@ func bearerToken(r *http.Request) string {
 	return v
 }
 
-// decodeBody разбирает тело запроса.
+// decodeBody parses the request body.
 func decodeBody(r *http.Request, dst any) error {
 	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
@@ -123,7 +126,7 @@ func decodeBody(r *http.Request, dst any) error {
 	return json.Unmarshal(raw, dst)
 }
 
-// writeJSON отвечает телом JSON.
+// writeJSON answers with a JSON body.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(status)
@@ -132,12 +135,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = enc.Encode(v)
 }
 
-// subtleEquals сравнивает строки за постоянное время.
+// subtleEquals compares strings in constant time.
 //
-// Длина утекает в любом случае: сравнивать разной длины значения за постоянное
-// время нельзя, не зная заранее длину. Но содержимое — можно, и именно оно
-// секрет: побайтовый выход с ранним возвратом позволил бы подобрать токен по
-// времени ответа.
+// The length leaks regardless: values of different lengths cannot be compared
+// in constant time without knowing the length in advance. The content can be,
+// and it is the content that is the secret: a byte-by-byte exit with an early
+// return would allow the token to be guessed from the response time.
 func subtleEquals(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }

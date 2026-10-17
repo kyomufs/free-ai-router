@@ -8,39 +8,39 @@ import (
 	"free-ai-router/internal/state"
 )
 
-// Status — снимок состояния демона.
+// Status — a snapshot of the daemon's state.
 //
-// Снимок, а не живой объект: ответ обязан быть согласованным между полями.
-// Отдавая живые структуры, шлюз мог бы показать реестр до изменения, а
-// счётчики после.
+// A snapshot, not a live object: the response must be consistent across its
+// fields. By handing out live structures, the gateway could show the registry
+// before a change and the counters after it.
 type Status struct {
-	// Mode — форма развёртывания.
+	// Mode — the deployment shape.
 	Mode string `json:"mode"`
-	// Listen — адрес прослушивания.
+	// Listen — the listen address.
 	Listen string `json:"listen"`
-	// UptimeSeconds — сколько демон работает.
+	// UptimeSeconds — how long the daemon has been running.
 	UptimeSeconds int64 `json:"uptime_seconds"`
-	// Providers — провайдеры с числом моделей и ключей.
+	// Providers — the providers with their model and key counts.
 	Providers []ProviderStatus `json:"providers"`
-	// Totals — суммарные счётчики за сегодня.
+	// Totals — the aggregate counters for today.
 	Totals state.DaySnapshot `json:"totals_today"`
 }
 
-// ProviderStatus — состояние одного провайдера.
+// ProviderStatus — the state of a single provider.
 type ProviderStatus struct {
-	// ID — идентификатор.
+	// ID — the identifier.
 	ID string `json:"id"`
-	// Models — сколько моделей объявлено.
+	// Models — how many models are declared.
 	Models int `json:"models"`
-	// FreeModels — сколько из них бесплатных.
+	// FreeModels — how many of them are free.
 	FreeModels int `json:"free_models"`
-	// Keys — сколько ключей в работе. Ноль означает анонимную работу.
+	// Keys — how many keys are in use. Zero means anonymous operation.
 	Keys int `json:"keys"`
-	// KeyRotation — подключён ли механизм смены ключа.
+	// KeyRotation — whether the key-rotation mechanism is wired up.
 	KeyRotation bool `json:"key_rotation"`
 }
 
-// handleStatus отвечает снимком состояния.
+// handleStatus answers with a snapshot of the state.
 func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, "status")
@@ -82,7 +82,7 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
-// handleStats отвечает счётчиками по дням.
+// handleStats answers with the counters by day.
 func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, "stats")
@@ -95,7 +95,7 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.State.Snapshot())
 }
 
-// handleModels отвечает каталогом всех провайдеров.
+// handleModels answers with the catalog of all providers.
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, "models")
@@ -135,22 +135,22 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"models": out})
 }
 
-// KeysResponse — список ключей по провайдерам.
+// KeysResponse — the list of keys by provider.
 //
-// Отдаются ОТПЕЧАТКИ, а не сами ключи: справка нужна, чтобы понять, сколько
-// ключей в работе, а не чтобы увидеть секрет.
+// FINGERPRINTS are handed out, not the keys themselves: the help text is needed
+// to understand how many keys are in use, not to see a secret.
 type KeysResponse struct {
 	Providers []ProviderKeys `json:"providers"`
 }
 
-// ProviderKeys — ключи одного провайдера.
+// ProviderKeys — the keys of a single provider.
 type ProviderKeys struct {
 	Provider string   `json:"provider"`
 	Keys     []string `json:"keys"`
 	Rotation bool     `json:"rotation"`
 }
 
-// handleKeys отвечает списком ключей.
+// handleKeys answers with the list of keys.
 func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, "keys")
@@ -159,7 +159,7 @@ func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.keysResponse())
 }
 
-// keysResponse собирает ответ со списком ключей.
+// keysResponse assembles the response with the list of keys.
 func (h *Handler) keysResponse() KeysResponse {
 	var resp KeysResponse
 	if h.Providers == nil || h.KeyRotation == nil {
@@ -180,18 +180,18 @@ func (h *Handler) keysResponse() KeysResponse {
 	return resp
 }
 
-// keyRequest — тело запроса на добавление или удаление ключа.
+// keyRequest — the body of a request to add or remove a key.
 type keyRequest struct {
-	// Provider — к какому провайдеру относится ключ.
+	// Provider — which provider the key belongs to.
 	Provider string `json:"provider"`
-	// Key — сам ключ (при добавлении) или его отпечаток (при удалении).
+	// Key — the key itself (when adding) or its fingerprint (when removing).
 	Key string `json:"key"`
 }
 
-// handleKeyAdd добавляет ключ.
+// handleKeyAdd adds a key.
 //
-// Ключ принимается в теле, а не в адресе: адрес попал бы в журналы доступа и в
-// историю оболочки.
+// The key is accepted in the body rather than in the address: an address would
+// end up in access logs and in the shell history.
 func (h *Handler) handleKeyAdd(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w, "keys/add")
@@ -199,27 +199,27 @@ func (h *Handler) handleKeyAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	var req keyRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "тело не разбирается: " + err.Error()})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "the body does not parse: " + err.Error()})
 		return
 	}
 	if req.Provider == "" || req.Key == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "нужны поля provider и key"})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "the provider and key fields are required"})
 		return
 	}
 	if h.KeyRotation == nil {
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "механизм ротации ключей не подключён"})
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "the key-rotation mechanism is not wired up"})
 		return
 	}
 
 	added := h.KeyRotation.AddKey(provider.ID(req.Provider), req.Key)
-	h.info("ключ добавлен для %q (новый: %t)", req.Provider, added)
+	h.info("key added for %q (new: %t)", req.Provider, added)
 	writeJSON(w, http.StatusOK, map[string]any{"added": added, "keys": h.keysResponse()})
 }
 
-// handleKeyRemove убирает ключ по отпечатку.
+// handleKeyRemove removes a key by fingerprint.
 //
-// Отпечаток, а не сам ключ: удаляющий не обязан знать секрет, ему достаточно
-// того, что показала справка.
+// A fingerprint, not the key itself: the remover need not know the secret, it
+// is enough for them to have what the help text showed.
 func (h *Handler) handleKeyRemove(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w, "keys/remove")
@@ -227,42 +227,43 @@ func (h *Handler) handleKeyRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	var req keyRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "тело не разбирается: " + err.Error()})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "the body does not parse: " + err.Error()})
 		return
 	}
 	if req.Provider == "" || req.Key == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "нужны поля provider и key"})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "the provider and key fields are required"})
 		return
 	}
 	if h.KeyRotation == nil {
-		writeJSON(w, http.StatusConflict, map[string]any{"error": "механизм ротации ключей не подключён"})
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "the key-rotation mechanism is not wired up"})
 		return
 	}
 
 	removed := h.KeyRotation.RemoveFingerprint(provider.ID(req.Provider), req.Key)
-	h.info("ключ удалён для %q (найден: %t)", req.Provider, removed)
+	h.info("key removed for %q (found: %t)", req.Provider, removed)
 	writeJSON(w, http.StatusOK, map[string]any{"removed": removed, "keys": h.keysResponse()})
 }
 
-// OptionsResponse — то, что можно выбрать в интерфейсах.
+// OptionsResponse — what can be chosen in the interfaces.
 //
-// Отдаётся демоном, а не хранится в CLI и TUI: список значений живёт в одном
-// месте, и его нельзя забыть обновить. Копия в интерфейсе устаревает молча —
-// именно так и случалось раньше.
+// Handed out by the daemon rather than stored in the CLI and the TUI: the list
+// of values lives in one place, and it cannot be forgotten when updating. A
+// copy in the interface goes stale silently — which is exactly what used to
+// happen.
 type OptionsResponse struct {
-	// Providers — идентификаторы провайдеров.
+	// Providers — the provider identifiers.
 	Providers []string `json:"providers"`
-	// Modes — формы развёртывания.
+	// Modes — the deployment shapes.
 	Modes []string `json:"modes"`
-	// Transports — доступные транспорты.
+	// Transports — the available transports.
 	Transports []string `json:"transports"`
-	// Toggle — словарь включения и выключения.
+	// Toggle — the on/off dictionary.
 	Toggle []string `json:"toggle"`
-	// Scopes — области очистки данных.
+	// Scopes — the data-clearing scopes.
 	Scopes []string `json:"scopes"`
 }
 
-// handleOptions отвечает словарями значений.
+// handleOptions answers with the dictionaries of values.
 func (h *Handler) handleOptions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, "options")
@@ -290,24 +291,24 @@ func (h *Handler) handleOptions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// methodNotAllowed отвечает на неверный метод.
+// methodNotAllowed answers a wrong method.
 func methodNotAllowed(w http.ResponseWriter, route string) {
 	writeJSON(w, http.StatusMethodNotAllowed, map[string]any{
-		"error": "метод не поддерживается для " + route,
+		"error": "method not supported for " + route,
 	})
 }
 
-// info пишет сообщение в журнал, если он есть.
+// info writes a message to the journal, if there is one.
 func (h *Handler) info(format string, args ...any) {
 	if h.Log != nil {
 		h.Log.Info(format, args...)
 	}
 }
 
-// sortedKeys возвращает ключи карты в стабильном порядке.
+// sortedKeys returns the keys of a map in a stable order.
 //
-// Нужна для диагностического вывода: без неё порядок менялся бы между
-// вызовами, и два снимка нельзя было бы сравнить.
+// Needed for diagnostic output: without it the order would change between calls
+// and two snapshots could not be compared.
 func sortedKeys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

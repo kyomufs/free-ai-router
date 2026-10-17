@@ -1,19 +1,21 @@
-// Package gateway — поверхность OpenAI, которую видит клиент.
+// Package gateway is the OpenAI surface the client sees.
 //
-// ЧТО ЗДЕСЬ ГЛАВНОЕ. Шлюз — ПРОЗРАЧНЫЙ ПОСРЕДНИК. Он делает то, что сделал бы
-// клиент при прямом обращении, и не добавляет поведения поверх. Отсюда два
-// правила, которым подчинён весь пакет:
+// WHAT IS CENTRAL HERE. The gateway is a TRANSPARENT MIDDLEMAN. It does what
+// the client would have done on a direct call, and adds no behaviour on top.
+// Hence two rules to which the whole package is subject:
 //
-//  1. ОТКАЗ ПЕРЕДАЁТСЯ ДОСЛОВНО. Статус, тело и заголовки уходят клиенту
-//     байт в байт. Клиент сам разбирает тело: он ищет там `error.type`,
-//     `error.code`, вложенные коды и метки, и принимает по ним решение о
-//     повторе. Любая переупаковка лишила бы его этих признаков.
+//  1. A REFUSAL IS PASSED THROUGH VERBATIM. The status, body and headers reach
+//     the client byte for byte. The client parses the body itself: it looks
+//     there for `error.type`, `error.code`, nested codes and markers, and
+//     decides about a retry from them. Any repackaging would deprive it of
+//     those signals.
 //
-//  2. ШЛЮЗ НЕ ПОВТОРЯЕТ ЗАПРОСЫ. У клиента своя политика повторов, подробно
-//     разработанная: экспонента с потолком, до десяти раз, с ограничением на
-//     таймауты. Вторая политика поверх неё дала бы тридцать запросов там, где
-//     клиент рассчитывал на десять. Единственное исключение — смена ключа:
-//     ключей у клиента нет, они у шлюза, и со стороны клиента это один запрос.
+//  2. THE GATEWAY DOES NOT REPEAT REQUESTS. The client has its own retry
+//     policy, worked out in detail: an exponent with a ceiling, up to ten
+//     times, with a limit on timeouts. A second policy on top of it would give
+//     thirty requests where the client counted on ten. The only exception is a
+//     key switch: the client has no keys, the gateway does, and from the
+//     client's side it is one request.
 package gateway
 
 import (
@@ -32,65 +34,66 @@ import (
 	"free-ai-router/internal/state"
 )
 
-// Пределы. Тело запроса ограничено, потому что клиент может прислать
-// что угодно, а память не бесконечна.
+// Limits. The request body is bounded, because the client can send anything,
+// and memory is not infinite.
 const (
 	maxBodyBytes = 4 << 20 // 4 MiB
 )
 
-// Handler — HTTP-обработчик поверхности OpenAI.
+// Handler is the HTTP handler of the OpenAI surface.
 type Handler struct {
-	// Providers — реестр доступных провайдеров.
+	// Providers is the registry of the available providers.
 	Providers *provider.Registry
-	// Transport отдаёт RoundTripper для запросов.
+	// Transport hands out the RoundTripper for requests.
 	Transport RoundTripperFactory
-	// State — счётчики.
+	// State is the counters.
 	State *state.Store
-	// Log — журнал.
+	// Log is the log.
 	Log *state.Logger
 
-	// DefaultProvider — провайдер, используемый когда клиент не назвал его.
-	// Пусто означает первого в реестре.
+	// DefaultProvider is the provider used when the client did not name one.
+	// Empty means the first in the registry.
 	DefaultProvider provider.ID
 
-	// KeyRotation хранит механизмы ротации ключей по провайдерам. Пусто
-	// означает анонимную работу: провайдер подставит свой маркер
-	// анонимности, и это нормальный режим, а не отсутствие настройки.
+	// KeyRotation stores the key rotation mechanisms by provider. Empty means
+	// anonymous operation: the provider will substitute its own anonymity
+	// marker, and that is a normal mode, not a missing setting.
 	KeyRotation map[string]*capability.KeyRotation
 
-	// Client — HTTP-клиент. Задаётся полем, а не создаётся на каждый запрос:
-	// клиент держит пул соединений, и терять его нельзя.
+	// Client is the HTTP client. It is set by a field rather than created per
+	// request: the client holds a connection pool, and losing it is not
+	// acceptable.
 	Client *http.Client
 }
 
-// RoundTripperFactory отдаёт транспорт для запросов.
+// RoundTripperFactory hands out the transport for requests.
 //
-// Интерфейс, а не конкретный тип: шлюзу не нужно знать, сколько транспортов
-// существует и как они устроены.
+// An interface rather than a concrete type: the gateway does not need to know
+// how many transports exist or how they are arranged.
 type RoundTripperFactory interface {
 	RoundTripper() (http.RoundTripper, error)
 }
 
-// Routes регистрирует маршруты на переданном mux.
+// Routes registers the routes on the given mux.
 func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/models", h.handleModels)
 	mux.HandleFunc("/v1/chat/completions", h.handleChat)
 }
 
-// ProviderRoute — префикс для выбора провайдера прямо в пути.
+// ProviderRoute is the prefix for choosing the provider right in the path.
 //
-// Форма: /p/<провайдер>/v1/chat/completions. Нужна, когда клиент умеет
-// адресовать несколько маршрутов: тогда каждый провайдер виден как отдельный
-// эндпоинт, и переключаться между ними можно на стороне клиента.
+// Form: /p/<provider>/v1/chat/completions. It is needed when the client can
+// address several routes: then every provider is visible as a separate
+// endpoint, and switching between them can happen on the client's side.
 const ProviderRoute = "/p/"
 
-// routes регистрирует оба вида маршрутов.
+// routes registers both kinds of routes.
 func (h *Handler) AllRoutes(mux *http.ServeMux) {
 	h.Routes(mux)
 	mux.HandleFunc(ProviderRoute, h.handleProviderRoute)
 }
 
-// resolveClient возвращает HTTP-клиент.
+// resolveClient returns the HTTP client.
 func (h *Handler) resolveClient() *http.Client {
 	if h.Client != nil {
 		return h.Client
@@ -98,12 +101,12 @@ func (h *Handler) resolveClient() *http.Client {
 	return http.DefaultClient
 }
 
-// resolveProvider выбирает провайдера по запросу.
+// resolveProvider chooses the provider for a request.
 //
-// Порядок: явное имя в теле запроса, затем имя в пути, затем провайдер по
-// умолчанию. Явное имя в теле уважается, потому что клиент может отправлять
-// `model` вида "провайдер/модель" — это распространённая форма, и её лучше
-// понимать, чем отвергать.
+// The order: an explicit name in the request body, then the name in the path,
+// then the default provider. An explicit name in the body is respected, because
+// the client may send a `model` of the form "provider/model" — that is a common
+// shape, and it is better to understand it than to reject it.
 func (h *Handler) resolveProvider(body map[string]any, pathID provider.ID) (provider.Provider, string, error) {
 	if pathID != "" {
 		p, err := h.Providers.Get(pathID)
@@ -138,12 +141,12 @@ func (h *Handler) resolveProvider(body map[string]any, pathID provider.ID) (prov
 	return all[0], rawModel, nil
 }
 
-// splitProviderPrefix разбирает форму "провайдер/модель".
+// splitProviderPrefix parses the form "provider/model".
 //
-// Разделитель ищется до первого слэша; имя провайдера не может содержать
-// слэш, а идентификаторы моделей часто содержат (например
-// "poolside/laguna-s-2.1:free"), поэтому первая часть проверяется по реестру
-// вызывающим.
+// The separator is looked for up to the first slash; a provider name cannot
+// contain a slash, while model identifiers often do (for instance
+// "poolside/laguna-s-2.1:free"), so the first part is checked against the
+// registry by the caller.
 func splitProviderPrefix(model string) (name, rest string) {
 	i := strings.Index(model, "/")
 	if i <= 0 || i == len(model)-1 {
@@ -152,7 +155,7 @@ func splitProviderPrefix(model string) (name, rest string) {
 	return model[:i], model[i+1:]
 }
 
-// stripProviderPrefix убирает префикс провайдера из имени модели.
+// stripProviderPrefix strips the provider prefix from the model name.
 func stripProviderPrefix(model string, id provider.ID) string {
 	prefix := string(id) + "/"
 	if strings.HasPrefix(model, prefix) {
@@ -161,7 +164,7 @@ func stripProviderPrefix(model string, id provider.ID) string {
 	return model
 }
 
-// handleProviderRoute разбирает путь вида /p/<провайдер>/v1/...
+// handleProviderRoute parses a path of the form /p/<provider>/v1/...
 func (h *Handler) handleProviderRoute(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, ProviderRoute)
 	slash := strings.Index(rest, "/")
@@ -182,35 +185,36 @@ func (h *Handler) handleProviderRoute(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleModels отвечает списком моделей всех провайдеров.
+// handleModels answers with the list of models of all providers.
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "не поддерживается",
-			"GET /v1/models: метод должен быть GET")
+		writeError(w, http.StatusMethodNotAllowed, "not supported",
+			"GET /v1/models: the method must be GET")
 		return
 	}
 	h.serveModels(w, r, "")
 }
 
-// handleModelsFor отвечает списком моделей одного провайдера.
+// handleModelsFor answers with the list of models of one provider.
 func (h *Handler) handleModelsFor(w http.ResponseWriter, r *http.Request, id provider.ID) {
 	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "не поддерживается",
-			"GET /v1/models: метод должен быть GET")
+		writeError(w, http.StatusMethodNotAllowed, "not supported",
+			"GET /v1/models: the method must be GET")
 		return
 	}
 	if _, err := h.Providers.Get(id); err != nil {
-		writeError(w, http.StatusNotFound, "провайдер не найден", err.Error())
+		writeError(w, http.StatusNotFound, "provider not found", err.Error())
 		return
 	}
 	h.serveModels(w, r, id)
 }
 
-// serveModels собирает список моделей.
+// serveModels assembles the list of models.
 //
-// Формат — список OpenAI. Идентификатор модели составной: "провайдер/модель",
-// иначе две модели с одинаковым именем у разных провайдеров были бы
-// неразличимы, а клиент не смог бы выбрать нужную.
+// The format is the OpenAI list. The model identifier is composite:
+// "provider/model", otherwise two models with the same name at different
+// providers would be indistinguishable, and the client could not pick the one
+// it needs.
 func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request, only provider.ID) {
 	type modelEntry struct {
 		ID      string `json:"id"`
@@ -226,7 +230,7 @@ func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request, only provi
 		}
 		models, err := p.Models(r.Context())
 		if err != nil {
-			h.warn("провайдер %q: каталог недоступен: %v", p.ID(), err)
+			h.warn("provider %q: the catalog is unavailable: %v", p.ID(), err)
 			continue
 		}
 		for _, m := range models {
@@ -248,80 +252,80 @@ func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request, only provi
 	})
 }
 
-// modelsCreatedAt — постоянная отметка создания для списка моделей. Список
-// статичен, поэтому выдумывать каждый раз новое время было бы нечестно.
+// modelsCreatedAt is a constant creation marker for the model list. The list is
+// static, so inventing a new time every time would be dishonest.
 const modelsCreatedAt int64 = 1759718400
 
-// handleChat обрабатывает запрос к модели.
+// handleChat handles a request to a model.
 func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
 	h.handleChatFor(w, r, "")
 }
 
-// handleChatFor обрабатывает запрос, при необходимости адресуя его
-// конкретному провайдеру.
+// handleChatFor handles a request, addressing it to a particular provider where
+// necessary.
 func (h *Handler) handleChatFor(w http.ResponseWriter, r *http.Request, pathID provider.ID) {
 	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "не поддерживается",
-			"POST /v1/chat/completions: метод должен быть POST")
+		writeError(w, http.StatusMethodNotAllowed, "not supported",
+			"POST /v1/chat/completions: the method must be POST")
 		return
 	}
 
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "неверный запрос", "чтение тела: "+err.Error())
+		writeError(w, http.StatusBadRequest, "invalid request", "reading the body: "+err.Error())
 		return
 	}
 
 	var body map[string]any
 	if err := json.Unmarshal(raw, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "неверный запрос", "разбор тела: "+err.Error())
+		writeError(w, http.StatusBadRequest, "invalid request", "parsing the body: "+err.Error())
 		return
 	}
 
 	p, modelID, err := h.resolveProvider(body, pathID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "провайдер не найден", err.Error())
+		writeError(w, http.StatusBadRequest, "provider not found", err.Error())
 		return
 	}
 	if modelID == "" {
-		writeError(w, http.StatusBadRequest, "неверный запрос", "поле model обязательно")
+		writeError(w, http.StatusBadRequest, "invalid request", "the model field is required")
 		return
 	}
 
 	model, err := h.resolveModel(r, p, modelID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "модель не найдена", err.Error())
+		writeError(w, http.StatusNotFound, "model not found", err.Error())
 		return
 	}
 
 	req, err := h.buildRequest(r, body, p, model)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "неверный запрос", err.Error())
+		writeError(w, http.StatusBadRequest, "invalid request", err.Error())
 		return
 	}
 
 	h.forward(w, r, p, req, model)
 }
 
-// resolveModel находит модель в каталоге провайдера.
+// resolveModel finds a model in the provider's catalog.
 //
-// Модель, которой нет в каталоге, отвергается: каталог — это то, что
-// провайдер объявил, и отправлять запрос к неизвестной модели значило бы
-// получить отказ позже и менее понятный.
+// A model that is not in the catalog is rejected: the catalog is what the
+// provider has declared, and sending a request to an unknown model would mean
+// getting a refusal later and a less understandable one.
 func (h *Handler) resolveModel(r *http.Request, p provider.Provider, id string) (provider.Model, error) {
 	models, err := p.Models(r.Context())
 	if err != nil {
-		return provider.Model{}, fmt.Errorf("каталог провайдера недоступен: %w", err)
+		return provider.Model{}, fmt.Errorf("the provider catalog is unavailable: %w", err)
 	}
 	for _, m := range models {
 		if m.ID == id {
 			return m, nil
 		}
 	}
-	return provider.Model{}, fmt.Errorf("провайдер %q не объявляет модель %q", p.ID(), id)
+	return provider.Model{}, fmt.Errorf("provider %q does not declare model %q", p.ID(), id)
 }
 
-// buildRequest переводит клиентский запрос в форму провайдера.
+// buildRequest translates the client request into the provider's shape.
 func (h *Handler) buildRequest(r *http.Request, body map[string]any, p provider.Provider, model provider.Model) (provider.Request, error) {
 	messages, err := parseMessages(body["messages"])
 	if err != nil {
@@ -339,8 +343,8 @@ func (h *Handler) buildRequest(r *http.Request, body map[string]any, p provider.
 		Messages: messages,
 		System:   systemFrom(body),
 		Tools:    tools,
-		// Stream всегда истина: апстрим обязан стримить, потому что на этом
-		// держится передача потока клиенту.
+		// Stream is always true: the upstream is obliged to stream, because
+		// passing the stream to the client rests on it.
 		Stream:  true,
 		Session: ids,
 	}
@@ -361,33 +365,35 @@ func (h *Handler) buildRequest(r *http.Request, body map[string]any, p provider.
 	return req, nil
 }
 
-// forward отправляет запрос провайдеру и передаёт ответ клиенту.
+// forward sends the request to the provider and passes the response to the
+// client.
 func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Provider, req provider.Request, model provider.Model) {
 	prepared, err := p.Build(req)
 	if err != nil {
-		h.warn("провайдер %q: сборка запроса: %v", p.ID(), err)
-		writeError(w, http.StatusInternalServerError, "ошибка шлюза", err.Error())
+		h.warn("provider %q: assembling the request: %v", p.ID(), err)
+		writeError(w, http.StatusInternalServerError, "gateway error", err.Error())
 		h.recordRefusal(model.ID, "")
 		return
 	}
 
-	// Учётные данные подставляет шлюз: у клиента ключей нет.
+	// The gateway substitutes the credentials: the client has no keys.
 	key := h.credentialFor(p)
 	h.applyCredential(p, prepared, key)
 
 	upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost, prepared.URL, bytes.NewReader(prepared.Body))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "ошибка шлюза", err.Error())
+		writeError(w, http.StatusInternalServerError, "gateway error", err.Error())
 		return
 	}
 	upstream.Header = prepared.Headers
 
 	resp, err := h.do(upstream, p)
 	if err != nil {
-		// Апстрим недостижим. Это НЕ отказ провайдера, и выдавать его за
-		// отказ нельзя: клиент должен видеть транспортный сбой.
-		h.warn("провайдер %q: соединение: %v", p.ID(), err)
-		writeError(w, http.StatusBadGateway, "транспорт", "провайдер недоступен: "+err.Error())
+		// The upstream is unreachable. This is NOT a provider refusal, and
+		// presenting it as one is not allowed: the client must see a transport
+		// failure.
+		h.warn("provider %q: connection: %v", p.ID(), err)
+		writeError(w, http.StatusBadGateway, "transport", "the provider is unreachable: "+err.Error())
 		h.recordRefusal(model.ID, h.fingerprint(key))
 		return
 	}
@@ -402,7 +408,7 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Pro
 	h.recordSuccess(model.ID, h.fingerprint(key))
 }
 
-// do выполняет запрос через транспорт шлюза.
+// do performs the request through the gateway's transport.
 func (h *Handler) do(req *http.Request, p provider.Provider) (*http.Response, error) {
 	client := *h.resolveClient()
 	if h.Transport != nil {
@@ -413,24 +419,25 @@ func (h *Handler) do(req *http.Request, p provider.Provider) (*http.Response, er
 	return client.Do(req)
 }
 
-// passThroughError передаёт отказ клиенту ДОСЛОВНО.
+// passThroughError passes the refusal to the client VERBATIM.
 //
-// Здесь и находится главное правило пакета. Ни статус, ни тело, ни заголовки
-// не меняются. Клиент ищет в теле признаки, по которым принимает решение:
-// `error.type`, `error.code`, вложенные коды, метку исходного кода в
-// переписанном сообщении. Переупаковка лишила бы его этих признаков, и решение
-// разошлось бы с тем, что клиент принял бы при прямом обращении.
+// This is where the package's central rule lives. Neither the status, nor the
+// body, nor the headers change. The client looks in the body for the signals it
+// decides by: `error.type`, `error.code`, nested codes, the upstream code
+// marker in a rewritten message. Repackaging would deprive it of those signals,
+// and the decision would diverge from the one the client would have made on a
+// direct call.
 func (h *Handler) passThroughError(w http.ResponseWriter, r *http.Request, p provider.Provider, resp *http.Response, model provider.Model, key string) {
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if readErr != nil {
-		writeError(w, http.StatusBadGateway, "транспорт", "чтение ответа: "+readErr.Error())
+		writeError(w, http.StatusBadGateway, "transport", "reading the response: "+readErr.Error())
 		return
 	}
 
 	failure := p.Classify(resp, body)
 
-	// Заголовки, влияющие на решение клиента, пробрасываются как есть.
-	// retry-after и retry-after-ms клиент читает сам.
+	// The headers that influence the client's decision are forwarded as they
+	// are. retry-after and retry-after-ms the client reads itself.
 	for _, name := range []string{"retry-after", "retry-after-ms", "content-type"} {
 		if v := resp.Header.Get(name); v != "" {
 			w.Header().Set(name, v)
@@ -444,10 +451,10 @@ func (h *Handler) passThroughError(w http.ResponseWriter, r *http.Request, p pro
 	_, _ = w.Write(body)
 
 	h.recordRefusal(model.ID, h.fingerprint(key))
-	h.warn("провайдер %q: отказ %d, ключ отвергнут: %t", p.ID(), failure.Status, failure.KeyRejected)
+	h.warn("provider %q: refusal %d, key rejected: %t", p.ID(), failure.Status, failure.KeyRejected)
 }
 
-// passThroughStream передаёт поток клиенту.
+// passThroughStream passes the stream to the client.
 func (h *Handler) passThroughStream(w http.ResponseWriter, resp *http.Response) {
 	if ct := resp.Header.Get("content-type"); ct != "" {
 		w.Header().Set("content-type", ct)
@@ -465,8 +472,8 @@ func (h *Handler) passThroughStream(w http.ResponseWriter, resp *http.Response) 
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				return
 			}
-			// Поток отдаётся по мере поступления: задержка до полного
-			// ответа сделала бы стриминг бессмысленным.
+			// The stream is handed out as it arrives: a delay until the full
+			// response would make streaming pointless.
 			if canFlush {
 				flusher.Flush()
 			}
@@ -477,10 +484,11 @@ func (h *Handler) passThroughStream(w http.ResponseWriter, resp *http.Response) 
 	}
 }
 
-// applyCredential подставляет учётные данные в собранный запрос.
+// applyCredential substitutes the credentials into the assembled request.
 //
-// Провайдер собирает заголовки, но НЕ знает, какой ключ выдан на этот запрос:
-// ключи выдаёт общая механика. Поэтому заголовок ставится здесь.
+// The provider assembles the headers but does NOT know which key was issued for
+// this request: the keys are issued by the shared mechanism. That is why the
+// header is set here.
 func (h *Handler) applyCredential(p provider.Provider, prepared provider.Prepared, key string) {
 	if prepared.Headers == nil {
 		return
@@ -489,18 +497,18 @@ func (h *Handler) applyCredential(p provider.Provider, prepared provider.Prepare
 	if value == "" {
 		return
 	}
-	// Имя заголовка и префикс — часть контракта провайдера, поэтому берутся
-	// у него, а не задаются здесь.
+	// The header name and the prefix are part of the provider's contract, so
+	// they are taken from it rather than set here.
 	name, prefix := credentialShape(p)
 	prepared.Headers.Set(name, prefix+value)
 }
 
-// credentialScheme описывает, куда провайдер ждёт учётные данные.
+// credentialScheme describes where the provider expects the credentials.
 type credentialScheme interface {
 	Credential(key string) string
 }
 
-// credentialValue спрашивает у провайдера, что положить в заголовок.
+// credentialValue asks the provider what to put in the header.
 func credentialValue(p provider.Provider, key string) string {
 	if cs, ok := p.(credentialScheme); ok {
 		return cs.Credential(key)
@@ -511,10 +519,10 @@ func credentialValue(p provider.Provider, key string) string {
 	return key
 }
 
-// credentialShape возвращает имя заголовка и префикс значения.
+// credentialShape returns the header name and the value prefix.
 //
-// Провайдер, которому это небезразлично, сообщает форму сам; остальные
-// получают стандартную.
+// A provider that cares about this reports the shape itself; the rest get the
+// standard one.
 func credentialShape(p provider.Provider) (name, prefix string) {
 	if shaped, ok := p.(interface{ CredentialHeader() (string, string) }); ok {
 		return shaped.CredentialHeader()
@@ -522,42 +530,43 @@ func credentialShape(p provider.Provider) (name, prefix string) {
 	return "authorization", "Bearer "
 }
 
-// warn пишет предупреждение в журнал, если он есть.
+// warn writes a warning to the log, if there is one.
 func (h *Handler) warn(format string, args ...any) {
 	if h.Log != nil {
 		h.Log.Warn(format, args...)
 	}
 }
 
-// recordSuccess записывает успешный запрос.
+// recordSuccess records a successful request.
 func (h *Handler) recordSuccess(model, key string) {
 	if h.State != nil {
 		h.State.RecordSuccess(model, key)
 	}
 }
 
-// recordRefusal записывает отказ.
+// recordRefusal records a refusal.
 func (h *Handler) recordRefusal(model, key string) {
 	if h.State != nil {
 		h.State.RecordRefusal(model, key)
 	}
 }
 
-// writeJSON отвечает телом JSON.
+// writeJSON answers with a JSON body.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// writeError отвечает конвертом ошибки OpenAI.
+// writeError answers with the OpenAI error envelope.
 //
-// Конверт используется ТОЛЬКО для ошибок самого шлюза: неверный запрос,
-// недостижимый апстрим, незнакомая модель. Отказы провайдера через него не
-// ПРОХОДЯТ — они передаются дословно (см. passThroughError).
+// The envelope is used ONLY for the gateway's own errors: an invalid request,
+// an unreachable upstream, an unknown model. Provider refusals do not GO
+// through it — they are passed on verbatim (see passThroughError).
 //
-// type и code несут одну строку: у клиента один словарь для ветвления, и
-// второй, отличающийся, заставил бы его держать соответствие между ними.
+// type and code carry the same string: the client has one vocabulary to branch
+// on, and a second, different one would force it to keep a mapping between
+// them.
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]any{
 		"error": map[string]any{
@@ -568,10 +577,10 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	})
 }
 
-// Timeout подсказывает вызывающему бюджет молчания для запроса.
+// Timeout suggests to the caller a silence budget for the request.
 //
-// Провайдер объявляет его сам: рассуждающие модели держат паузы заметно
-// дольше обычных, и общий бюджет рвал бы их поток.
+// The provider declares it itself: reasoning models hold pauses noticeably
+// longer than ordinary ones, and a shared budget would tear their stream.
 func Timeout(prepared provider.Prepared, fallback time.Duration) time.Duration {
 	if prepared.IdleTimeout > 0 {
 		return prepared.IdleTimeout
@@ -579,10 +588,10 @@ func Timeout(prepared provider.Prepared, fallback time.Duration) time.Duration {
 	return fallback
 }
 
-// fingerprint возвращает отпечаток ключа для счётчиков.
+// fingerprint returns a key fingerprint for the counters.
 //
-// Сам ключ в состояние не попадает никогда: это секрет, а для ответа на
-// вопрос «что израсходовано» достаточно короткого отпечатка.
+// The key itself never reaches the state: it is a secret, and a short
+// fingerprint is enough to answer the question "what has been spent".
 func (h *Handler) fingerprint(key string) string {
 	if key == "" {
 		return ""

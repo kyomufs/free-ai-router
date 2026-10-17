@@ -1,114 +1,115 @@
-// Package tui — встроенный терминальный интерфейс.
+// Package tui is the built-in terminal interface.
 //
-// ПОЧЕМУ ВСТРОЕННЫЙ, А НЕ СКРИПТ. Внешняя обёртка не может быть частью
-// контракта: она способна отсутствовать, требовать чужих программ,
-// расходиться с бинарём в знании словарей и не проверяется как код проекта.
-// Интерфейс внутри бинаря этих свойств не имеет по построению.
+// WHY BUILT IN, AND NOT A SCRIPT. An external wrapper cannot be part of the
+// contract: it may be absent, require other people's programs, diverge from the
+// binary in its knowledge of the catalogs, and is not tested as project code.
+// An interface inside the binary has none of these properties by construction.
 //
-// ЧЕГО ИНТЕРФЕЙС НЕ ДЕЛАЕТ:
+// WHAT THE INTERFACE DOES NOT DO:
 //
-//   - НЕ переопределяет терминал. Полноэкранный режим не включается:
-//     интерфейс сосуществует с терминалом, а вывод остаётся пригодным для
-//     копирования.
-//   - НЕ держит состояние. Каждый экран читает данные заново, а изменения
-//     идут через тот же код, что и команды: у настройки одно место применения.
-//   - НЕ требует ничего сверх бинаря.
+//   - It does NOT take over the terminal. Full-screen mode is not entered: the
+//     interface coexists with the terminal, and the output stays fit for
+//     copying.
+//   - It does NOT hold state. Every screen reads the data afresh, and changes
+//     go through the same code as the commands: settings have one place where
+//     they are applied.
+//   - It requires nothing beyond the binary.
 package tui
 
 import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// Экран — раздел интерфейса.
+// Screen is a section of the interface.
 //
-// Экраны разделены по вопросу, на который они отвечают: что происходит сейчас,
-// чем это оплачено, и что можно изменить. Три вопроса — три экрана, и никаких
-// вложенных меню.
+// The screens are split by the question they answer: what is happening now,
+// what it costs, and what can be changed. Three questions — three screens, and
+// no nested menus.
 type Screen int
 
 const (
-	// ScreenStatus — состояние демона, оси, счётчики.
+	// ScreenStatus is the daemon state, the axes, the counters.
 	ScreenStatus Screen = iota
-	// ScreenKeys — ключи провайдеров.
+	// ScreenKeys are the provider keys.
 	ScreenKeys
-	// ScreenControl — изменяемые настройки.
+	// ScreenControl are the mutable settings.
 	ScreenControl
 )
 
-// String возвращает имя экрана.
+// String returns the screen name.
 func (s Screen) String() string {
 	switch s {
 	case ScreenStatus:
-		return "состояние"
+		return "status"
 	case ScreenKeys:
-		return "ключи"
+		return "keys"
 	case ScreenControl:
-		return "настройки"
+		return "settings"
 	default:
-		return "неизвестно"
+		return "unknown"
 	}
 }
 
-// DataSource отдаёт данные для экранов.
+// DataSource supplies the data for the screens.
 //
-// Интерфейс, а не конкретный тип: интерфейс не должен знать, откуда берутся
-// данные — с демона или из конфигурации. Это позволяет проверять его без
-// запуска демона.
+// An interface rather than a concrete type: the interface must not know where
+// the data comes from — from the daemon or from the configuration. That makes
+// it testable without starting the daemon.
 type DataSource interface {
-	// Status возвращает строки для экрана состояния.
+	// Status returns the rows for the status screen.
 	Status() ([]Section, error)
-	// Keys возвращает строки для экрана ключей.
+	// Keys returns the rows for the keys screen.
 	Keys() ([]Section, error)
-	// Options возвращает строки для экрана настроек.
+	// Options returns the rows for the settings screen.
 	Options() ([]Section, error)
 }
 
-// Section — раздел экрана с заголовком и строками.
+// Section is a screen section with a heading and rows.
 type Section struct {
-	// Title — заголовок раздела.
+	// Title is the section heading.
 	Title string
-	// Rows — строки в форме «имя — значение».
+	// Rows are the rows in the form "name — value".
 	Rows []Row
 }
 
-// Row — одна строка раздела.
+// Row is a single row of a section.
 type Row struct {
-	// Name — имя настройки или поля.
+	// Name is the name of the setting or field.
 	Name string
-	// Value — значение.
+	// Value is the value.
 	Value string
-	// Note — пояснение. Показывается там, где значение требует объяснения —
-	// например, когда настройка не действует.
+	// Note is an explanation. It is shown where the value needs explaining —
+	// for instance when the setting is not in effect.
 	Note string
 }
 
-// Model — состояние интерфейса.
+// Model is the interface state.
 type Model struct {
-	// Source отдаёт данные.
+	// Source supplies the data.
 	Source DataSource
-	// Screen — текущий экран.
+	// Screen is the current screen.
 	Screen Screen
-	// Cursor — выбранная строка на экране настроек.
+	// Cursor is the selected row on the settings screen.
 	Cursor int
-	// sections — данные текущего экрана.
+	// sections is the data of the current screen.
 	sections []Section
-	// err — ошибка чтения данных.
+	// err is the data-reading error.
 	err error
-	// width и height — размер терминала.
+	// width and height are the terminal size.
 	width, height int
-	// quitting — признак запрошенного выхода.
+	// quitting marks that an exit has been requested.
 	quitting bool
 }
 
-// New создаёт интерфейс.
+// New creates the interface.
 func New(source DataSource) Model {
 	return Model{Source: source}
 }
 
-// Init реализует tea.Model.
+// Init implements tea.Model.
 func (m Model) Init() tea.Cmd { return m.load() }
 
-// load читает данные текущего экрана.
+// load reads the data of the current screen.
 func (m Model) load() tea.Cmd {
 	source, screen := m.Source, m.Screen
 	return func() tea.Msg {
@@ -131,7 +132,7 @@ func (m Model) load() tea.Cmd {
 	}
 }
 
-// loadedMsg — результат чтения данных.
+// loadedMsg is the result of reading the data.
 type loadedMsg struct {
 	sections []Section
 	err      error

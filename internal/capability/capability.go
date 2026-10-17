@@ -1,19 +1,19 @@
-// Package capability содержит переиспользуемый инструментарий обхода.
+// Package capability holds the reusable circumvention toolkit.
 //
-// ЗАЧЕМ ОТДЕЛЬНЫЙ ПАКЕТ. Разные провайдеры бесплатных моделей часто
-// защищаются похожими способами, и один приём помогает нескольким сразу.
-// Ротация ключей работает у любого, кто выдаёт ключи. Подмена формы запроса
-// нужна каждому, кто фильтрует клиентов по виду запроса. Кеш ответов полезен
-// там, где провайдер считает запросы.
+// WHY A SEPARATE PACKAGE. Different free-model providers often defend themselves
+// in similar ways, and a single technique helps several of them at once. Key
+// rotation works for anyone who hands out keys. Request-shape substitution is
+// needed by everyone who filters clients by the look of the request. A response
+// cache is useful wherever the provider counts requests.
 //
-// Если бы каждый провайдер нёс свою копию такого кода, получилось бы две
-// беды: похожие провайдеры заводили бы одинаковые копии, а исправление,
-// найденное на одном, не доходило бы до остальных. Поэтому механизмы живут
-// здесь, а провайдер ССЫЛАЕТСЯ на нужные ему — по имени, из конфигурации.
+// If every provider carried its own copy of such code, two problems would
+// follow: similar providers would end up with identical copies, and a fix found
+// in one would never reach the others. So the mechanisms live here, and a
+// provider REFERENCES the ones it needs — by name, from the configuration.
 //
-// Пакет намеренно не зависит ни от provider, ни от gateway: он ничего не знает
-// ни о запросах, ни о моделях. Каждый механизм — маленькая функция над общим
-// типом данных, которую можно собрать в цепочку.
+// The package deliberately depends on neither provider nor gateway: it knows
+// nothing about requests or models. Each mechanism is a small function over a
+// shared data type, and the mechanisms can be chained together.
 package capability
 
 import (
@@ -22,54 +22,55 @@ import (
 	"sync"
 )
 
-// Kind различает виды механизмов, чтобы их можно было выбирать по имени из
-// конфигурации, не заводя отдельный тип на каждый.
+// Kind distinguishes the sorts of mechanisms, so they can be selected by name
+// from the configuration without declaring a separate type for each.
 type Kind string
 
 const (
-	// KindKeyRotation — замена учётных данных при отказе по ключу.
+	// KindKeyRotation — replacing credentials when the key is refused.
 	KindKeyRotation Kind = "key_rotation"
-	// KindDisguise — подмена формы запроса под вид другого клиента.
+	// KindDisguise — substituting the request shape for that of another client.
 	KindDisguise Kind = "disguise"
-	// KindRetry — повтор запроса по своей политике.
+	// KindRetry — retrying the request under its own policy.
 	KindRetry Kind = "retry"
 )
 
-// Info описывает механизм для интерфейсов и справки.
+// Info describes a mechanism for the interfaces and the help text.
 //
-// Описание нужно, чтобы `free-ai-router capabilities` и TUI могли показать, что
-// вообще есть в системе, не зная ни одной реализации.
+// The description exists so that `free-ai-router capabilities` and the TUI can
+// show what the system has at all, without knowing a single implementation.
 type Info struct {
-	// Kind — вид механизма.
+	// Kind — the sort of mechanism.
 	Kind Kind
-	// Name — имя, которым механизм выбирается в конфигурации.
+	// Name — the name by which the mechanism is selected in the configuration.
 	Name string
-	// Summary — одна строка о том, что механизм делает.
+	// Summary — one line about what the mechanism does.
 	Summary string
-	// Providers — провайдеры, для которых механизм предназначен. Пусто
-	// означает «годится для любого».
+	// Providers — the providers the mechanism is meant for. Empty means
+	// "good for any".
 	Providers []string
 }
 
-// Factory создаёт экземпляр механизма.
+// Factory creates an instance of a mechanism.
 //
-// Механизм получает настройки как map[string]any: у разных механизмов разные
-// параметры, и общий тип описывал бы только пересечение. Разбор значений —
-// дело самого механизма, он же и сообщает об ошибке.
+// The mechanism receives its settings as map[string]any: different mechanisms
+// have different parameters, and a shared type would describe only the
+// intersection. Parsing the values is the mechanism's own business, and it is
+// likewise the mechanism that reports the error.
 type Factory func(cfg map[string]any) (any, error)
 
-// Registry хранит доступные механизмы.
+// Registry holds the available mechanisms.
 //
-// Реестр существует, чтобы провайдер не создавал механизмы сам: он лишь
-// объявляет, какие ему нужны, и получает готовые. Так один и тот же механизм
-// используется несколькими провайдерами в одном процессе.
+// The registry exists so a provider does not build mechanisms itself: it merely
+// declares which ones it needs and receives them ready-made. That way one and
+// the same mechanism is shared by several providers in a single process.
 type Registry struct {
 	mu        sync.RWMutex
 	factories map[Kind]map[string]Factory
 	infos     map[Kind]map[string]Info
 }
 
-// NewRegistry создаёт пустой реестр.
+// NewRegistry creates an empty registry.
 func NewRegistry() *Registry {
 	return &Registry{
 		factories: make(map[Kind]map[string]Factory),
@@ -77,7 +78,7 @@ func NewRegistry() *Registry {
 	}
 }
 
-// Register добавляет механизм.
+// Register adds a mechanism.
 func (r *Registry) Register(info Info, factory Factory) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -89,7 +90,7 @@ func (r *Registry) Register(info Info, factory Factory) {
 	r.infos[info.Kind][info.Name] = info
 }
 
-// Build создаёт механизм по виду и имени.
+// Build creates a mechanism by kind and name.
 func (r *Registry) Build(kind Kind, name string, cfg map[string]any) (any, error) {
 	r.mu.RLock()
 	factory, ok := r.factories[kind][name]
@@ -100,7 +101,8 @@ func (r *Registry) Build(kind Kind, name string, cfg map[string]any) (any, error
 	return factory(cfg)
 }
 
-// Infos возвращает описания механизмов одного вида в стабильном порядке.
+// Infos returns the descriptions of the mechanisms of one kind in a stable
+// order.
 func (r *Registry) Infos(kind Kind) []Info {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -112,7 +114,7 @@ func (r *Registry) Infos(kind Kind) []Info {
 	return out
 }
 
-// Names возвращает имена механизмов одного вида.
+// Names returns the names of the mechanisms of one kind.
 func (r *Registry) Names(kind Kind) []string {
 	infos := r.Infos(kind)
 	out := make([]string, 0, len(infos))

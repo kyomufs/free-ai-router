@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// TestDirectRoundTripperIsUsable — прямой транспорт обязан отдавать рабочий
-// RoundTripper и уметь останавливаться без ошибок.
+// TestDirectRoundTripperIsUsable — the direct transport must hand out a working
+// RoundTripper and be able to stop without errors.
 func TestDirectRoundTripperIsUsable(t *testing.T) {
 	v, err := NewDirect(map[string]any{})
 	if err != nil {
@@ -36,13 +36,13 @@ func TestDirectRoundTripperIsUsable(t *testing.T) {
 	}
 }
 
-// TestDirectFamilyPinsNetwork — пиннинг семейства обязан менять сеть дозвона,
-// иначе настройка ничего не значит.
+// TestDirectFamilyPinsNetwork — pinning the family must change the dial
+// network, otherwise the setting means nothing.
 //
-// Проверяется поведение, а не поле: RoundTripper должен оставаться рабочим при
-// любом семействе, включая нераспознанное.
+// What is checked is behaviour, not a field: the RoundTripper must stay usable
+// for any family, including an unrecognised one.
 func TestDirectFamilyPinsNetwork(t *testing.T) {
-	for _, family := range []string{"", "auto", "v4", "v6", "мусор"} {
+	for _, family := range []string{"", "auto", "v4", "v6", "garbage"} {
 		v, err := NewDirect(map[string]any{"family": family})
 		if err != nil {
 			t.Fatalf("family %q: %v", family, err)
@@ -53,15 +53,16 @@ func TestDirectFamilyPinsNetwork(t *testing.T) {
 	}
 }
 
-// TestNetworkFor — перевод настройки в имя сети. Нераспознанное значение
-// означает «пусть решает система», а не ошибку: это то же самое, что "auto".
+// TestNetworkFor — translating the setting into a network name. An
+// unrecognised value means "let the system decide", not an error: it is the
+// same as "auto".
 func TestNetworkFor(t *testing.T) {
 	cases := map[string]string{
-		"":       "",
-		"auto":   "",
-		"v4":     "tcp4",
-		"v6":     "tcp6",
-		"что-то": "",
+		"":        "",
+		"auto":    "",
+		"v4":      "tcp4",
+		"v6":      "tcp6",
+		"somehow": "",
 	}
 	for in, want := range cases {
 		if got := networkFor(in); got != want {
@@ -70,8 +71,8 @@ func TestNetworkFor(t *testing.T) {
 	}
 }
 
-// TestRegistryWithDefaultsHasDirect — реестр по умолчанию содержит прямой
-// транспорт, и точка входа не обязана его регистрировать.
+// TestRegistryWithDefaultsHasDirect — the default registry contains the direct
+// transport, and the entry point does not have to register it.
 func TestRegistryWithDefaultsHasDirect(t *testing.T) {
 	r := NewRegistryWithDefaults()
 
@@ -98,17 +99,17 @@ func TestRegistryWithDefaultsHasDirect(t *testing.T) {
 	}
 }
 
-// TestRegistryRejectsUnknown — сборка незарегистрированного транспорта это
-// ошибка, а не молчаливый откат к чему-то другому.
+// TestRegistryRejectsUnknown — building an unregistered transport is an error,
+// not a silent fallback to something else.
 func TestRegistryRejectsUnknown(t *testing.T) {
 	r := NewRegistryWithDefaults()
-	if _, err := r.Build("нет-такого", nil); err == nil {
+	if _, err := r.Build("no-such-thing", nil); err == nil {
 		t.Fatal("an unknown transport must fail")
 	}
 }
 
-// TestRegistryIDsStableOrder — порядок стабилен, иначе списки в CLI и TUI
-// прыгали бы между вызовами.
+// TestRegistryIDsStableOrder — the order is stable, otherwise the lists in the
+// CLI and the TUI would jump between calls.
 func TestRegistryIDsStableOrder(t *testing.T) {
 	r := NewRegistryWithDefaults()
 	first := r.IDs()

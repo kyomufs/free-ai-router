@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// TestLoggerWritesAndReadsBack — журнал пишется и читается.
+// TestLoggerWritesAndReadsBack — the log is written and read back.
 func TestLoggerWritesAndReadsBack(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.log")
 	l, err := OpenLogger(path)
@@ -17,9 +17,9 @@ func TestLoggerWritesAndReadsBack(t *testing.T) {
 	}
 	defer l.Close()
 
-	l.Info("демон запущен на %s", "127.0.0.1:8787")
-	l.Warn("модель %q недоступна", "м")
-	l.Error("отказ: %d", 403)
+	l.Info("daemon started on %s", "127.0.0.1:8787")
+	l.Warn("model %q is unavailable", "m")
+	l.Error("refusal: %d", 403)
 
 	lines, err := Tail(path, 10)
 	if err != nil {
@@ -28,7 +28,7 @@ func TestLoggerWritesAndReadsBack(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("Tail returned %d lines, want 3: %v", len(lines), lines)
 	}
-	if !strings.Contains(lines[0], "INFO") || !strings.Contains(lines[0], "демон запущен") {
+	if !strings.Contains(lines[0], "INFO") || !strings.Contains(lines[0], "daemon started") {
 		t.Fatalf("the first line lacks the level or the message: %q", lines[0])
 	}
 	if !strings.Contains(lines[1], "WARN") {
@@ -39,7 +39,7 @@ func TestLoggerWritesAndReadsBack(t *testing.T) {
 	}
 }
 
-// TestTailReturnsLastLines — нужны последние строки, а не первые.
+// TestTailReturnsLastLines — the last lines are needed, not the first.
 func TestTailReturnsLastLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.log")
 	l, err := OpenLogger(path)
@@ -47,7 +47,7 @@ func TestTailReturnsLastLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 50; i++ {
-		l.Info("строка %d", i)
+		l.Info("line %d", i)
 	}
 	l.Close()
 
@@ -58,18 +58,18 @@ func TestTailReturnsLastLines(t *testing.T) {
 	if len(lines) != 5 {
 		t.Fatalf("Tail returned %d lines, want 5", len(lines))
 	}
-	if !strings.Contains(lines[4], "строка 49") {
+	if !strings.Contains(lines[4], "line 49") {
 		t.Fatalf("the last line is %q, want the newest entry", lines[4])
 	}
-	if strings.Contains(lines[0], "строка 0") {
+	if strings.Contains(lines[0], "line 0") {
 		t.Fatal("Tail returned the oldest lines instead of the newest")
 	}
 }
 
-// TestTailOnMissingFile — отсутствующий журнал это не ошибка: демон мог ещё
-// ничего не записать.
+// TestTailOnMissingFile — a missing log is not an error: the daemon may not
+// have written anything yet.
 func TestTailOnMissingFile(t *testing.T) {
-	lines, err := Tail(filepath.Join(t.TempDir(), "нет.log"), 10)
+	lines, err := Tail(filepath.Join(t.TempDir(), "missing.log"), 10)
 	if err != nil {
 		t.Fatalf("Tail on a missing file: %v", err)
 	}
@@ -78,18 +78,19 @@ func TestTailOnMissingFile(t *testing.T) {
 	}
 }
 
-// TestRotateShiftsGenerations — ротация сдвигает поколения, не затирая их.
+// TestRotateShiftsGenerations — rotation shifts the generations without
+// overwriting them.
 func TestRotateShiftsGenerations(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app.log")
 
-	// Наполняем файл выше порога ротации.
+	// Fill the file above the rotation threshold.
 	big := strings.Repeat("x", rotateAt+1)
 	if err := os.WriteFile(path, []byte(big), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Кладём уже существующее поколение, чтобы проверить сдвиг.
-	if err := os.WriteFile(path+".1", []byte("прошлое поколение"), 0o644); err != nil {
+	// Put an existing generation in place to check the shift.
+	if err := os.WriteFile(path+".1", []byte("the previous generation"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -99,19 +100,19 @@ func TestRotateShiftsGenerations(t *testing.T) {
 	}
 	defer l.Close()
 
-	// Прежнее поколение уехало на позицию 2.
+	// The former generation moved to position 2.
 	raw, err := os.ReadFile(path + ".2")
 	if err != nil {
 		t.Fatalf("the previous generation was not shifted: %v", err)
 	}
-	if string(raw) != "прошлое поколение" {
+	if string(raw) != "the previous generation" {
 		t.Fatalf("generation 2 = %q, want the previous content", raw)
 	}
-	// Большой файл стал поколением 1.
+	// The big file became generation 1.
 	if _, err := os.ReadFile(path + ".1"); err != nil {
 		t.Fatalf("the rotated file did not become generation 1: %v", err)
 	}
-	// Текущий файл пуст: он только что создан.
+	// The current file is empty: it has just been created.
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -121,12 +122,12 @@ func TestRotateShiftsGenerations(t *testing.T) {
 	}
 }
 
-// TestRotateKeepsBoundedGenerations — число поколений ограничено, иначе
-// журнал рос бы безгранично.
+// TestRotateKeepsBoundedGenerations — the number of generations is bounded,
+// otherwise the log would grow without bound.
 //
-// Замечание о форме: сама rotate() только СДВИГАЕТ файлы — текущий уезжает в
-// .1, а новый создаётся при открытии. Поэтому здесь проверяется число
-// сохранённых поколений, а не общее число файлов.
+// A note on the shape: rotate() itself only SHIFTS files — the current one
+// moves to .1, and a new one is created on open. Therefore what is checked here
+// is the number of kept generations, not the total number of files.
 func TestRotateKeepsBoundedGenerations(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app.log")
@@ -141,11 +142,11 @@ func TestRotateKeepsBoundedGenerations(t *testing.T) {
 		}
 	}
 
-	// Старше keepGenerations поколений быть не должно.
+	// There must be nothing older than keepGenerations generations.
 	if _, err := os.Stat(fmt.Sprintf("%s.%d", path, keepGenerations+1)); err == nil {
 		t.Fatalf("generation %d survived, so the log grows without bound", keepGenerations+1)
 	}
-	// А сами поколения на месте.
+	// And the generations themselves are in place.
 	for i := 1; i <= keepGenerations; i++ {
 		if _, err := os.Stat(fmt.Sprintf("%s.%d", path, i)); err != nil {
 			t.Fatalf("generation %d is missing: %v", i, err)
@@ -153,11 +154,11 @@ func TestRotateKeepsBoundedGenerations(t *testing.T) {
 	}
 }
 
-// TestRotateIsNoopBelowThreshold — маленький журнал не трогается.
+// TestRotateIsNoopBelowThreshold — a small log is left alone.
 func TestRotateIsNoopBelowThreshold(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app.log")
-	if err := os.WriteFile(path, []byte("мало"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("small"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := rotate(path); err != nil {
@@ -168,12 +169,12 @@ func TestRotateIsNoopBelowThreshold(t *testing.T) {
 	}
 }
 
-// TestTruncateKeepsTheFile — обрезка сохраняет файл на месте, а не удаляет
-// его: демон держит дескриптор открытым, и удаление оставило бы его писать в
-// никуда.
+// TestTruncateKeepsTheFile — truncation keeps the file in place rather than
+// deleting it: the daemon keeps the descriptor open, and removal would leave it
+// writing into nowhere.
 func TestTruncateKeepsTheFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.log")
-	if err := os.WriteFile(path, []byte("данные\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("data\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := Truncate(path); err != nil {
@@ -188,26 +189,26 @@ func TestTruncateKeepsTheFile(t *testing.T) {
 	}
 }
 
-// TestTruncateOnMissingFile — отсутствующий файл не ошибка.
+// TestTruncateOnMissingFile — a missing file is not an error.
 func TestTruncateOnMissingFile(t *testing.T) {
-	if err := Truncate(filepath.Join(t.TempDir(), "нет.log")); err != nil {
+	if err := Truncate(filepath.Join(t.TempDir(), "missing.log")); err != nil {
 		t.Fatalf("Truncate on a missing file: %v", err)
 	}
 }
 
-// TestLogFileSizeCountsGenerations — команда `data` должна видеть полный
-// размер, а не только текущий файл.
+// TestLogFileSizeCountsGenerations — the `data` command must see the full size,
+// not just the current file.
 func TestLogFileSizeCountsGenerations(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app.log")
-	if err := os.WriteFile(path, []byte("текущий"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("current"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path+".1", []byte("прошлый"), 0o644); err != nil {
+	if err := os.WriteFile(path+".1", []byte("previous"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Посторонний файл не должен попасть в подсчёт.
-	if err := os.WriteFile(filepath.Join(dir, "другое.json"), []byte("мимо"), 0o644); err != nil {
+	// A foreign file must not make it into the count.
+	if err := os.WriteFile(filepath.Join(dir, "other.json"), []byte("miss"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -218,13 +219,14 @@ func TestLogFileSizeCountsGenerations(t *testing.T) {
 	if files != 2 {
 		t.Fatalf("files = %d, want 2", files)
 	}
-	if want := int64(len("текущий") + len("прошлый")); bytes != want {
+	if want := int64(len("current") + len("previous")); bytes != want {
 		t.Fatalf("bytes = %d, want %d", bytes, want)
 	}
 }
 
-// TestLogFilesOrderedNewestFirst — порядок задан вручную: сортировка имён
-// поставила бы текущий файл перед поколениями, а он самый свежий по смыслу.
+// TestLogFilesOrderedNewestFirst — the order is given by hand: sorting the
+// names would put the current file before the generations, while it is the
+// newest in meaning.
 func TestLogFilesOrderedNewestFirst(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app.log")
@@ -246,8 +248,8 @@ func TestLogFilesOrderedNewestFirst(t *testing.T) {
 	}
 }
 
-// TestConcurrentWritesDoNotInterleave — строки не перемешиваются: журнал
-// читают глазами, и склеенная строка бесполезна.
+// TestConcurrentWritesDoNotInterleave — lines do not get mixed up: the log is
+// read with the eyes, and a glued-together line is useless.
 func TestConcurrentWritesDoNotInterleave(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.log")
 	l, err := OpenLogger(path)
@@ -262,7 +264,7 @@ func TestConcurrentWritesDoNotInterleave(t *testing.T) {
 		go func(id int) {
 			defer func() { done <- struct{}{} }()
 			for i := 0; i < each; i++ {
-				l.Info("писатель %d строка %d", id, i)
+				l.Info("writer %d line %d", id, i)
 			}
 		}(w)
 	}
@@ -278,24 +280,24 @@ func TestConcurrentWritesDoNotInterleave(t *testing.T) {
 		t.Fatalf("lines = %d, want %d (writes were lost)", len(lines), writers*each)
 	}
 	for _, line := range lines {
-		// Каждая строка обязана начинаться с метки времени и содержать ровно
-		// одно сообщение.
+		// Every line must start with a timestamp and contain exactly one
+		// message.
 		if !strings.Contains(line, "INFO") {
 			t.Fatalf("a line lacks its level: %q", line)
 		}
-		if strings.Count(line, "писатель") != 1 {
+		if strings.Count(line, "writer") != 1 {
 			t.Fatalf("lines interleaved: %q", line)
 		}
 	}
 }
 
-// TestNilLoggerIsSafe — вызовы на nil-журнале не паникуют: так код, которому
-// журнал не передали, остаётся рабочим.
+// TestNilLoggerIsSafe — calls on a nil log do not panic: that way code which
+// was not given a log keeps working.
 func TestNilLoggerIsSafe(t *testing.T) {
 	var l *Logger
-	l.Info("ничего")
-	l.Warn("ничего")
-	l.Error("ничего")
+	l.Info("nothing")
+	l.Warn("nothing")
+	l.Error("nothing")
 	if err := l.Close(); err != nil {
 		t.Fatalf("Close on nil: %v", err)
 	}

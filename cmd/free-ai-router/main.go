@@ -1,20 +1,21 @@
-// Команда free-ai-router — шлюз-агрегатор бесплатных AI-провайдеров.
+// The free-ai-router command is a gateway that aggregates free AI providers.
 //
-// ЧТО ДЕЛАЕТ ТОЧКА ВХОДА. Собирает работающий демон из частей: читает
-// конфигурацию, строит реестр провайдеров, поднимает транспорт и механизмы,
-// навешивает поверхности и запускает сервер. Вся логика живёт в пакетах; здесь
-// только соединение и разбор командной строки.
+// WHAT THE ENTRY POINT DOES. It assembles a working daemon out of parts: reads
+// the configuration, builds the provider registry, brings up the transport and
+// the mechanisms, attaches the surfaces and starts the server. All the logic
+// lives in the packages; here there is only the wiring and the command-line
+// parsing.
 //
-// ТРИ УРОВНЯ НАСТРОЙКИ, в порядке старшинства:
+// THREE LEVELS OF SETTINGS, in order of precedence:
 //
-//	флаги этой команды   побеждают всё
-//	переменные окружения перекрывают файл
-//	config.json          базовый слой
+//	this command's flags   beat everything
+//	environment variables  override the file
+//	config.json            the base layer
 //
-// ПЕРЕОПРЕДЕЛЕНИЕ ЧЕРЕЗ ФЛАГИ существует не для удобства, а потому что
-// декларативная система не всегда под рукой: на NixOS конфигурацией владеет
-// модуль, и смена настройки означала бы пересборку. Флаги дают тот же демон с
-// непривычной настройкой, не трогая ни файл, ни модуль.
+// OVERRIDING THROUGH FLAGS exists not for convenience, but because the
+// declarative system is not always at hand: on NixOS the configuration is owned
+// by a module, and changing a setting would mean rebuilding. Flags give the same
+// daemon with an unfamiliar setting, touching neither the file nor the module.
 package main
 
 import (
@@ -25,16 +26,16 @@ import (
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "ошибка: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-// run разбирает команду и выполняет её.
+// run parses the command and executes it.
 func run(args []string) error {
 	if len(args) == 0 {
 		usage()
-		return fmt.Errorf("команда не указана")
+		return fmt.Errorf("no command given")
 	}
 
 	cmd, rest := args[0], args[1:]
@@ -69,6 +70,6 @@ func run(args []string) error {
 		return nil
 	default:
 		usage()
-		return fmt.Errorf("неизвестная команда %q", cmd)
+		return fmt.Errorf("unknown command %q", cmd)
 	}
 }

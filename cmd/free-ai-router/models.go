@@ -7,16 +7,16 @@ import (
 	"free-ai-router/internal/catalog"
 )
 
-// cmdModels показывает каталог моделей.
+// cmdModels shows the catalog of models.
 //
-// КАТАЛОГ СПРАШИВАЕТСЯ У СЕРВИСА, а не читается из конфигурации: списка
-// моделей в конфигурации больше нет. Состав известен только сервису, и
-// показать его может только запрос к нему.
+// THE CATALOG IS QUERIED FROM THE SERVICE, not read from the configuration: the
+// list of models no longer exists in the configuration. The composition is known
+// only to the service, and only a request to it can show it.
 //
-// Демон для этого не нужен и намеренно не требуется: команда собирает
-// провайдеров тем же кодом, что и демон, и спрашивает их напрямую. Требовать
-// запущенный демон значило бы не дать посмотреть каталог до первого запуска —
-// ровно тогда, когда он нужнее всего.
+// A daemon is not needed for this and is deliberately not required: the command
+// assembles the providers with the same code as the daemon and asks them
+// directly. Requiring a running daemon would mean not letting the catalog be
+// viewed before the first start — exactly when it is needed most.
 func cmdModels(ctx context.Context, args []string) error {
 	cfg, f, err := loadConfig(args)
 	if err != nil || cfg == nil {
@@ -44,9 +44,9 @@ func cmdModels(ctx context.Context, args []string) error {
 	for _, p := range reg.All() {
 		models, err := p.Models(ctx)
 		if err != nil {
-			// Провайдер, каталог которого не ответил, называется отдельно:
-			// иначе пустой список выглядел бы как отсутствие моделей у
-			// сервиса, а не как недоступность каталога.
+			// A provider whose catalog did not answer is named separately:
+			// otherwise an empty list would look like the service having no
+			// models rather than the catalog being unavailable.
 			refused = append(refused, fmt.Sprintf("%s: %v", p.ID(), err))
 			continue
 		}
@@ -68,28 +68,28 @@ func cmdModels(ctx context.Context, args []string) error {
 	}
 
 	for _, r := range refused {
-		fmt.Printf("каталог недоступен — %s\n", r)
+		fmt.Printf("catalog unavailable — %s\n", r)
 	}
 	if len(rows) == 0 {
 		if len(refused) == 0 {
-			fmt.Println("ни один провайдер не объявил моделей")
+			fmt.Println("no provider declared any models")
 		}
 		return nil
 	}
 
-	fmt.Printf("%-10s %-38s %9s %8s %5s %5s\n", "ПРОВАЙДЕР", "МОДЕЛЬ", "ОКНО", "ОТВЕТ", "ФОТО", "ДУМАЕТ")
+	fmt.Printf("%-10s %-38s %9s %8s %5s %5s\n", "PROVIDER", "MODEL", "CONTEXT", "OUTPUT", "VISION", "REASONING")
 	for _, r := range rows {
 		fmt.Printf("%-10s %-38s %9d %8d %5s %5s\n",
 			r.Provider, r.ID, r.Context, r.Output, yesNo(r.Vision), yesNo(r.Reasoning))
 	}
-	fmt.Printf("\nвсего моделей: %d\n", len(rows))
+	fmt.Printf("\ntotal models: %d\n", len(rows))
 	return nil
 }
 
-// yesNo переводит признак в короткую пометку для таблицы.
+// yesNo turns a flag into a short mark for the table.
 func yesNo(v bool) string {
 	if v {
-		return "да"
+		return "yes"
 	}
 	return "—"
 }

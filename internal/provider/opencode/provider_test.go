@@ -8,10 +8,11 @@ import (
 	"testing"
 
 	"free-ai-router/internal/provider"
+	"free-ai-router/internal/provider/modelcat"
 )
 
-// newTestProvider создаёт провайдера с предсказуемыми подстановками, чтобы
-// утверждения не зависели от окружения машины.
+// newTestProvider creates a provider with predictable substitutions, so that the
+// assertions do not depend on the machine's environment.
 func newTestProvider(t *testing.T) *Provider {
 	t.Helper()
 	p, err := New(Config{OSName: "Linux", ShellName: "bash"})
@@ -21,8 +22,8 @@ func newTestProvider(t *testing.T) *Provider {
 	return p
 }
 
-// TestGateToolsAlwaysPresent — свойство контракта: запрос обязан нести оба
-// обязательных инструмента, даже если клиент не прислал ни одного.
+// TestGateToolsAlwaysPresent is a contract property: the request must carry both
+// mandatory tools, even if the client sent none.
 func TestGateToolsAlwaysPresent(t *testing.T) {
 	p := newTestProvider(t)
 
@@ -30,8 +31,8 @@ func TestGateToolsAlwaysPresent(t *testing.T) {
 		name  string
 		tools []provider.Tool
 	}{
-		{"клиент не прислал инструментов", nil},
-		{"клиент прислал один посторонний", []provider.Tool{{Name: "grep", Description: "search"}}},
+		{"the client sent no tools", nil},
+		{"the client sent one unrelated tool", []provider.Tool{{Name: "grep", Description: "search"}}},
 	}
 
 	for _, tc := range cases {
@@ -54,9 +55,9 @@ func TestGateToolsAlwaysPresent(t *testing.T) {
 	}
 }
 
-// TestGateToolReplacedWhenCallerSendsOwn — клиент может прислать инструмент с
-// правильным именем и чужим содержимым. Проверка сверяет записи целиком,
-// поэтому такая запись обязана быть ЗАМЕНЕНА канонической, а не оставлена.
+// TestGateToolReplacedWhenCallerSendsOwn — the client may send a tool with the
+// right name and someone else's content. The check compares entries in full, so
+// such an entry must be REPLACED with the canonical one rather than kept.
 func TestGateToolReplacedWhenCallerSendsOwn(t *testing.T) {
 	p := newTestProvider(t)
 
@@ -64,7 +65,7 @@ func TestGateToolReplacedWhenCallerSendsOwn(t *testing.T) {
 		Model: provider.Model{ID: "mimo-v2.6-flash-free"},
 		Tools: []provider.Tool{{
 			Name:        gateNameShell,
-			Description: "зову себя bash и ничего не умею",
+			Description: "I call myself bash and can do nothing",
 			Schema:      []byte(`{"type":"object","properties":{}}`),
 		}},
 	})
@@ -101,8 +102,8 @@ func TestGateToolReplacedWhenCallerSendsOwn(t *testing.T) {
 	}
 }
 
-// TestGateShellDescriptionCarriesOSAndShell: описание инструмента
-// параметризовано системой и оболочкой, и подстановка обязана произойти.
+// TestGateShellDescriptionCarriesOSAndShell: the tool description is
+// parameterised by system and shell, and the substitution must happen.
 func TestGateShellDescriptionCarriesOSAndShell(t *testing.T) {
 	p := newTestProvider(t)
 	prep, err := p.Build(provider.Request{Model: provider.Model{ID: "x"}})
@@ -115,15 +116,15 @@ func TestGateShellDescriptionCarriesOSAndShell(t *testing.T) {
 	}
 }
 
-// TestToolChoiceFollowsClientSignalledChoice — форма, которую шлёт клиент.
+// TestToolChoiceFollowsClientSignalledChoice is the shape the client sends.
 //
-// Обязательные инструменты добавляются ВСЕГДА, поэтому массив `tools` в теле
-// непуст даже когда клиент не прислал ничего. Из этого следует, что
-// `tool_choice` не может зависеть от «прислал ли клиент инструменты»: он
-// зависит только от того, задал ли клиент требование.
+// The mandatory tools are added ALWAYS, so the `tools` array in the body is
+// non-empty even when the client sent nothing. It follows that `tool_choice`
+// cannot depend on "whether the client sent tools": it depends only on whether
+// the client stated a requirement.
 //
-// Проверяется обе половины: без требования поля нет вовсе; с требованием оно
-// доезжает дословно.
+// Both halves are checked: without a requirement the field is absent entirely;
+// with a requirement it arrives verbatim.
 func TestToolChoiceFollowsClientSignalledChoice(t *testing.T) {
 	p := newTestProvider(t)
 
@@ -138,7 +139,8 @@ func TestToolChoiceFollowsClientSignalledChoice(t *testing.T) {
 	if _, present := unsetBody["tool_choice"]; present {
 		t.Fatalf("tool_choice must be absent when the client set none, got %v", unsetBody["tool_choice"])
 	}
-	// При этом сами инструменты на месте: их наличие не зависит от клиента.
+	// Meanwhile the tools themselves are there: their presence does not depend
+	// on the client.
 	if tools, _ := unsetBody["tools"].([]any); len(tools) == 0 {
 		t.Fatal("the gate tools must be present even without caller tools")
 	}
@@ -159,8 +161,8 @@ func TestToolChoiceFollowsClientSignalledChoice(t *testing.T) {
 	}
 }
 
-// TestSessionAndAffinityAreDistinct — свойство контракта: заголовки сессии и
-// affinity несут РАЗНЫЕ значения, когда сессия вложенная.
+// TestSessionAndAffinityAreDistinct is a contract property: the session and
+// affinity headers carry DIFFERENT values when the session is nested.
 func TestSessionAndAffinityAreDistinct(t *testing.T) {
 	p := newTestProvider(t)
 
@@ -190,8 +192,8 @@ func TestSessionAndAffinityAreDistinct(t *testing.T) {
 	}
 }
 
-// TestParentHeadersOnlyForNestedSessions — заголовки родителя присутствуют
-// тогда и только тогда, когда родитель есть.
+// TestParentHeadersOnlyForNestedSessions — the parent headers are present if and
+// only if there is a parent.
 func TestParentHeadersOnlyForNestedSessions(t *testing.T) {
 	p := newTestProvider(t)
 
@@ -227,7 +229,8 @@ func TestParentHeadersOnlyForNestedSessions(t *testing.T) {
 	}
 }
 
-// TestProjectHeaderForwarded — значение проекта уходит как есть, без подстановок.
+// TestProjectHeaderForwarded — the project value goes out as-is, without
+// substitutions.
 func TestProjectHeaderForwarded(t *testing.T) {
 	p := newTestProvider(t)
 
@@ -245,16 +248,16 @@ func TestProjectHeaderForwarded(t *testing.T) {
 	}
 }
 
-// TestReasoningFieldFromModel — размышления пишутся в то поле, которое
-// объявила модель, а не в произвольное.
+// TestReasoningFieldFromModel — the thinking is written to the field the model
+// declared, not to an arbitrary one.
 func TestReasoningFieldFromModel(t *testing.T) {
 	p := newTestProvider(t)
 
 	prep, err := p.Build(provider.Request{
 		Model: provider.Model{ID: "x", ReasoningField: "reasoning_content"},
 		Messages: []provider.Message{
-			{Role: "user", Text: "привет"},
-			{Role: "assistant", Text: "ответ", Reasoning: "размышление"},
+			{Role: "user", Text: "hi"},
+			{Role: "assistant", Text: "answer", Reasoning: "thinking"},
 		},
 	})
 	if err != nil {
@@ -273,7 +276,7 @@ func TestReasoningFieldFromModel(t *testing.T) {
 			continue
 		}
 		found = true
-		if m["reasoning_content"] != "размышление" {
+		if m["reasoning_content"] != "thinking" {
 			t.Fatalf("reasoning landed in the wrong field: %v", m)
 		}
 	}
@@ -282,17 +285,17 @@ func TestReasoningFieldFromModel(t *testing.T) {
 	}
 }
 
-// TestEmptyAssistantDropped — пустой ход ассистента на проводе недопустим и
-// обязан быть отброшен.
+// TestEmptyAssistantDropped — an empty assistant turn is not allowed on the wire
+// and must be dropped.
 func TestEmptyAssistantDropped(t *testing.T) {
 	p := newTestProvider(t)
 
 	prep, err := p.Build(provider.Request{
 		Model: provider.Model{ID: "x"},
 		Messages: []provider.Message{
-			{Role: "user", Text: "привет"},
+			{Role: "user", Text: "hi"},
 			{Role: "assistant"},
-			{Role: "user", Text: "ещё"},
+			{Role: "user", Text: "again"},
 		},
 	})
 	if err != nil {
@@ -311,8 +314,8 @@ func TestEmptyAssistantDropped(t *testing.T) {
 	}
 }
 
-// TestSystemPromptIsPureFunctionOfToolNames — свойство из плана: промпт есть
-// чистая функция от списка имён активных инструментов.
+// TestSystemPromptIsPureFunctionOfToolNames is a property from the plan: the
+// prompt is a pure function of the list of active tool names.
 func TestSystemPromptIsPureFunctionOfToolNames(t *testing.T) {
 	base := RenderSystemPrompt(nil)
 	if strings.Contains(base, "Prefer dedicated tools over shell commands") {
@@ -338,17 +341,17 @@ func TestSystemPromptIsPureFunctionOfToolNames(t *testing.T) {
 		}
 	}
 
-	// Идемпотентность: один и тот же вход даёт один и тот же выход.
+	// Idempotence: the same input gives the same output.
 	if RenderSystemPrompt([]string{"shell", "write", "edit"}) != withAll {
 		t.Fatal("RenderSystemPrompt is not deterministic")
 	}
-	// Порядок имён на входе не влияет на результат.
+	// The order of the names in the input does not affect the result.
 	if RenderSystemPrompt([]string{"edit", "write", "shell"}) != withAll {
 		t.Fatal("RenderSystemPrompt depends on the order of tool names")
 	}
 }
 
-// --- вспомогательные ---
+// --- helpers ---
 
 func toolNamesFromBody(t *testing.T, body []byte) []string {
 	t.Helper()
@@ -401,13 +404,13 @@ func contains(list []string, want string) bool {
 	return false
 }
 
-// --- каталог ---
+// --- catalog ---
 
-// newCatalogProvider поднимает провайдера, указывающего на подставной сервис.
+// newCatalogProvider brings up a provider pointing at a stub service.
 //
-// Сеть в проверках каталога недопустима: она сделала бы результат зависимым
-// от состояния чужого сервиса, а такой тест перестаёт что-либо утверждать —
-// он либо падает без причины, либо проходит независимо от кода.
+// The network is not allowed in catalog checks: it would make the result depend
+// on the state of someone else's service, and such a test stops asserting
+// anything — it either fails for no reason or passes regardless of the code.
 func newCatalogProvider(t *testing.T, listBody string, listStatus int) *Provider {
 	t.Helper()
 
@@ -433,34 +436,146 @@ func newCatalogProvider(t *testing.T, listBody string, listStatus int) *Provider
 	return p
 }
 
-// TestCatalogComesFromService — состав каталога определяет сервис. Это
-// главное свойство: список в коде разошёлся бы с сервисом, и клиент выбирал
-// бы модели, которых больше нет.
+// newCatalogProviderWithMeta serves both sources from one stub.
+//
+// The live list and the property catalog are separate requests, so the stub
+// answers them by path. That is what lets a check reach the eligibility logic
+// at all: the logic reads prices, and prices only exist in the property
+// catalog — against a stub that serves the list alone, every model looks
+// unpriced and the filter cannot be observed.
+//
+// Passing nil meta means the property source is not described at all, which is
+// the case the fallback exists for.
+func newCatalogProviderWithMeta(t *testing.T, listBody string, meta map[string]string) *Provider {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+
+		// The property catalog is one document holding every service; the
+		// gateway reads its own section out of it.
+		if r.URL.Path == "/meta.json" {
+			models := make(map[string]any, len(meta))
+			for id, raw := range meta {
+				var parsed map[string]any
+				if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+					t.Errorf("bad meta fixture for %q: %v", id, err)
+					continue
+				}
+				models[id] = parsed
+			}
+			body, err := json.Marshal(map[string]any{
+				string(ID): map[string]any{"models": models},
+			})
+			if err != nil {
+				t.Errorf("encoding meta fixture: %v", err)
+				return
+			}
+			_, _ = w.Write(body)
+			return
+		}
+		_, _ = w.Write([]byte(listBody))
+	}))
+	t.Cleanup(srv.Close)
+
+	p, err := New(Config{
+		BaseURL:   srv.URL,
+		OSName:    "Linux",
+		ShellName: "bash",
+		HTTP:      srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	p.catalog = modelcat.New(
+		srv.URL, liveModelsPath, srv.Client(), p.applyHeaders,
+		&metaSource{http: srv.Client(), url: srv.URL + "/meta.json"},
+	).WithEligibility(isFree)
+	return p
+}
+
+// TestCatalogComesFromService — the composition of the catalog is determined by
+// the service. This is the main property: a list in the code would drift from
+// the service, and the client would select models that no longer exist.
 func TestCatalogComesFromService(t *testing.T) {
-	p := newCatalogProvider(t, `{"data":[{"id":"живая"},{"id":"вторая"}]}`, http.StatusOK)
+	p := newCatalogProvider(t, `{"data":[{"id":"alive-free"},{"id":"second-free"}]}`, http.StatusOK)
 
 	models, err := p.Models(t.Context())
 	if err != nil {
 		t.Fatalf("Models: %v", err)
 	}
-	if len(models) != 2 || models[0].ID != "живая" || models[1].ID != "вторая" {
+	if len(models) != 2 || models[0].ID != "alive-free" || models[1].ID != "second-free" {
 		t.Fatalf("Models = %+v, want exactly what the service declared", models)
 	}
 	for _, m := range models {
-		if !m.Free {
-			t.Fatalf("model %q is not marked free", m.ID)
-		}
-		// Свойств у этих моделей нет, и они описываются умолчаниями, а не
-		// отвергаются.
+		// These models have no properties, so they are described with
+		// defaults rather than rejected.
 		if m.Context <= 0 || m.MaxOutput <= 0 {
 			t.Fatalf("model %q came back without usable limits: %+v", m.ID, m)
 		}
 	}
 }
 
-// TestCatalogRefusalIsAnError — недоступный каталог отдаётся ошибкой, а не
-// пустым списком. Пустой список оператор прочитал бы как «у сервиса нет
-// моделей» и искал бы причину не там.
+// TestPaidModelsAreFilteredOut — a paid model must not reach the listing.
+//
+// The gateway routes free models, so a paid one is a request that bills the
+// operator rather than a less attractive choice. The listing is what a client
+// picks from, so the exclusion has to happen there.
+func TestPaidModelsAreFilteredOut(t *testing.T) {
+	p := newCatalogProviderWithMeta(t,
+		`{"data":[{"id":"free-one-free"},{"id":"paid-one"}]}`,
+		map[string]string{
+			"free-one-free": `{"name":"Free One","cost":{"input":0,"output":0}}`,
+			"paid-one":      `{"name":"Paid One","cost":{"input":3,"output":15}}`,
+		})
+
+	models, err := p.Models(t.Context())
+	if err != nil {
+		t.Fatalf("Models: %v", err)
+	}
+	if len(models) != 1 || models[0].ID != "free-one-free" {
+		t.Fatalf("Models = %+v, want only the free model", models)
+	}
+}
+
+// TestUnpricedModelWithFreeNameIsKept — the fallback for a model the property
+// source has not reached.
+//
+// The price is unknown in that case, not zero, and the name is the only
+// evidence left. Omitting the model would silently hide something the service
+// is serving, which the operator could not distinguish from a withdrawal.
+func TestUnpricedModelWithFreeNameIsKept(t *testing.T) {
+	p := newCatalogProviderWithMeta(t, `{"data":[{"id":"newly-added-free"}]}`, nil)
+
+	models, err := p.Models(t.Context())
+	if err != nil {
+		t.Fatalf("Models: %v", err)
+	}
+	if len(models) != 1 || models[0].ID != "newly-added-free" {
+		t.Fatalf("Models = %+v, want the unpriced free-named model kept", models)
+	}
+}
+
+// TestUnpricedModelWithoutFreeNameIsDropped — the other half of the fallback.
+//
+// A model the source does not describe and whose name claims nothing gets the
+// benefit of no doubt: it is left out. Admitting it would put a model of
+// unknown price into a listing offered as free.
+func TestUnpricedModelWithoutFreeNameIsDropped(t *testing.T) {
+	p := newCatalogProviderWithMeta(t, `{"data":[{"id":"some-paid-looking-name"}]}`, nil)
+
+	models, err := p.Models(t.Context())
+	if err != nil {
+		t.Fatalf("Models: %v", err)
+	}
+	if len(models) != 0 {
+		t.Fatalf("Models = %+v, want the unproven model left out", models)
+	}
+}
+
+// TestCatalogRefusalIsAnError — an unavailable catalog is returned as an error
+// rather than as an empty list. An operator would read an empty list as "the
+// service has no models" and look for the cause in the wrong place.
 func TestCatalogRefusalIsAnError(t *testing.T) {
 	p := newCatalogProvider(t, `{"type":"error"}`, http.StatusForbidden)
 
@@ -469,8 +584,9 @@ func TestCatalogRefusalIsAnError(t *testing.T) {
 	}
 }
 
-// TestCatalogEmptyListIsAnError — ответ без моделей означает, что разбор
-// разошёлся с формой ответа, и молчать об этом нельзя.
+// TestCatalogEmptyListIsAnError — a response without models means the parsing
+// drifted from the response shape, and staying silent about that is not an
+// option.
 func TestCatalogEmptyListIsAnError(t *testing.T) {
 	p := newCatalogProvider(t, `{"data":[]}`, http.StatusOK)
 
@@ -479,19 +595,19 @@ func TestCatalogEmptyListIsAnError(t *testing.T) {
 	}
 }
 
-// TestNoEmbeddedCatalog — в провайдере не осталось списка моделей.
+// TestNoEmbeddedCatalog — no model list is left inside the provider.
 //
-// Проверка нужна не ради чистоты кода: именно встроенный список и был
-// источником сбоя — модели из него выводились из оборота, а бинарник
-// продолжал их объявлять. Вернуть список сюда можно только вместе с этой
-// проверкой.
+// The check is not for the sake of code cleanliness: the embedded list was
+// precisely the source of the failure — models from it were retired while the
+// binary kept declaring them. A list can only be brought back here together
+// with this check.
 func TestNoEmbeddedCatalog(t *testing.T) {
 	p := newTestProvider(t)
 
-	// Провайдер без сети не должен уметь назвать каталог: единственный
-	// источник — сервис. Тест построен так, чтобы упасть при первом же
-	// возврате к константе в коде.
+	// A provider without the network must not be able to name a catalog: the
+	// only source is the service. The test is built so that it fails at the
+	// first return to a constant in the code.
 	if p.catalog == nil {
-		t.Fatal("нет каталога: модели берутся не у сервиса")
+		t.Fatal("no catalog: models are not taken from the service")
 	}
 }

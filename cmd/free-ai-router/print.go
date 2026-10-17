@@ -10,15 +10,16 @@ import (
 	"free-ai-router/internal/config"
 )
 
-// printEffectiveConfig печатает результат слияния трёх уровней.
+// printEffectiveConfig prints the result of merging the three levels.
 //
-// ЗАЧЕМ ЭТО НУЖНО. Когда настройка приходит из трёх источников, понять, чей
-// верх, можно только увидев источник рядом со значением. Без этого отладка
-// слияния превращается в угадывание: оператор меняет переменную, а значение не
-// двигается, потому что его перекрывает флаг.
+// WHY THIS IS NEEDED. When a setting comes from three sources, the only way to
+// understand which one wins is to see the source next to the value. Without it,
+// debugging the merge turns into guesswork: the operator changes a variable, and
+// the value does not move because a flag overrides it.
 //
-// Вывод идёт в порядке осей, а не в порядке полей структуры: строки должны
-// читаться в том же порядке, в каком о осях говорится в справке.
+// The output follows the order of the axes, not the order of the struct fields:
+// the lines should read in the same order in which the axes are described in the
+// help.
 func printEffectiveConfig(cfg *config.Config) error {
 	rows := []struct {
 		key   string
@@ -47,7 +48,7 @@ func printEffectiveConfig(cfg *config.Config) error {
 
 	if len(cfg.Providers) > 0 {
 		fmt.Println()
-		fmt.Println("провайдеры:")
+		fmt.Println("providers:")
 		ids := make([]string, 0, len(cfg.Providers))
 		for id := range cfg.Providers {
 			ids = append(ids, id)
@@ -56,76 +57,79 @@ func printEffectiveConfig(cfg *config.Config) error {
 
 		for _, id := range ids {
 			p := cfg.Providers[id]
-			state := "включён"
+			state := "enabled"
 			if !p.IsEnabled() {
-				state = "выключен"
+				state = "disabled"
 			}
-			key := "нет"
+			key := "none"
 			if p.ProviderKey() != "" {
-				key = "есть"
+				key = "present"
 			}
-			// Число моделей не показывается: каталог живёт у сервиса, и
-			// узнаётся он запросом, а не из конфигурации. Здесь, при разборе
-			// настроек, его ещё никто не спрашивал — а показывать ноль
-			// значило бы сообщать, что моделей нет.
-			fmt.Printf("  %-20s тип=%-10s %s, ключ=%s\n",
+			// The number of models is not shown: the catalog lives with the
+			// service and is learned through a request, not from the
+			// configuration. Here, while the settings are being parsed, nobody
+			// has asked for it yet — and showing zero would mean reporting that
+			// there are no models.
+			fmt.Printf("  %-20s type=%-10s %s, key=%s\n",
 				id, p.Type, state, key)
 		}
 	}
 
 	fmt.Println()
-	fmt.Printf("файл:     %s\n", cfg.Paths.ConfigFile)
-	fmt.Printf("состояние: %s\n", cfg.Paths.StateFile)
-	fmt.Printf("журнал:   %s\n", cfg.Paths.LogFile)
+	fmt.Printf("file:      %s\n", cfg.Paths.ConfigFile)
+	fmt.Printf("state:     %s\n", cfg.Paths.StateFile)
+	fmt.Printf("log:       %s\n", cfg.Paths.LogFile)
 	return nil
 }
 
-// maskSecret скрывает значение секрета, оставляя признак его наличия.
+// maskSecret hides the value of the secret while leaving the mark of its
+// presence.
 //
-// Токен не печатается: вывод попадает в терминал, в историю оболочки и в
-// переписку при отладке. Знать нужно, задан ли он, а не каков он.
+// The token is not printed: the output lands in the terminal, in the shell
+// history and in correspondence during debugging. What needs to be known is
+// whether it is set, not what it is.
 func maskSecret(v string) string {
 	if strings.TrimSpace(v) == "" {
 		return ""
 	}
-	return "задан"
+	return "set"
 }
 
-// printJSON печатает значение как JSON.
+// printJSON prints the value as JSON.
 func printJSON(v any) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
 }
 
-// usage печатает справку.
+// usage prints the help.
 func usage() {
-	fmt.Fprint(os.Stderr, `free-ai-router — шлюз-агрегатор бесплатных AI-провайдеров
+	fmt.Fprint(os.Stderr, `free-ai-router — a gateway that aggregates free AI providers
 
-Использование:
-  free-ai-router up       [флаги]     запустить демон
-  free-ai-router status   [--json]    состояние демона
-  free-ai-router stop                 остановить демон
-  free-ai-router tui                  терминальный интерфейс
-  free-ai-router models   [--json]    каталог моделей
-  free-ai-router stats    [--json]    счётчики по дням
-  free-ai-router keys     [--json]    ключи провайдеров
-  free-ai-router logs     [-n N]      журнал
-  free-ai-router data     [clear]     что лежит на диске, и очистка
-  free-ai-router config   [--print]   эффективная конфигурация
-  free-ai-router options  [--json]    доступные значения
-  free-ai-router version              версия
+Usage:
+  free-ai-router up       [flags]     start the daemon
+  free-ai-router status   [--json]    daemon state
+  free-ai-router stop                 stop the daemon
+  free-ai-router tui                  terminal interface
+  free-ai-router models   [--json]    catalog of models
+  free-ai-router stats    [--json]    counters by day
+  free-ai-router keys     [--json]    provider keys
+  free-ai-router logs     [-n N]      log
+  free-ai-router data     [clear]     what lies on disk, and clearing
+  free-ai-router config   [--print]   effective configuration
+  free-ai-router options  [--json]    available values
+  free-ai-router version              version
 
-Флаги запуска:
-  --mode        local | server        форма развёртывания
-  --listen      АДРЕС                 адрес прослушивания
-  --token       ЗНАЧЕНИЕ              токен для режима server
-  --transport   direct                транспорт
-  --upstream    АДРЕС                 адрес по умолчанию для провайдеров
-  --print-config                      показать конфигурацию и выйти
-  --detach                            запустить в фоне
+Startup flags:
+  --mode        local | server        deployment form
+  --listen      ADDRESS               listen address
+  --token       VALUE                 token for server mode
+  --transport   direct                transport
+  --upstream    ADDRESS               default address for providers
+  --print-config                      show the configuration and exit
+  --detach                            start in the background
 
-Настройка собирается из трёх уровней, старшие перекрывают младшие:
-  флаги  →  переменные окружения  →  config.json
+Settings are assembled from three levels, the higher overriding the lower:
+  flags  →  environment variables  →  config.json
 `)
 }

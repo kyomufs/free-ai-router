@@ -10,37 +10,37 @@ import (
 	"time"
 )
 
-// Журнал — единственное место, куда пишет демон.
+// The log is the single place the daemon writes to.
 //
-// ЗАЧЕМ ОДИН. Раньше записи о жизни демона и записи о запросах жили в разных
-// местах, и восстановить картину по ним было нельзя: половина контекста
-// терялась при переходе от одного файла к другому. Здесь оба вида записей
-// идут в один поток, в порядке появления, и потому читаются как рассказ.
+// WHY ONE. Previously the records about the daemon's life and the records about
+// requests lived in different places, and the picture could not be
+// reconstructed from them: half the context was lost in the jump from one file
+// to the other. Here both kinds of records go into one stream, in the order
+// they appear, and therefore read as a story.
 //
-// РОТАЦИЯ делается НА СТАРТЕ, а не на каждой записи. Это единственный момент,
-// когда файл можно переместить, не гоняя наперегонки с собственным писателем:
-// обработчики запросов пишут в журнал параллельно, и переименование под ними
-// потеряло бы строки.
+// ROTATION happens AT STARTUP, not on every write. That is the only moment
+// when the file can be moved without racing its own writer: request handlers
+// write to the log concurrently, and renaming under them would lose lines.
 
-// Ограничения журнала.
+// Log limits.
 const (
-	// rotateAt — порог, после которого журнал пролистывается.
+	// rotateAt is the threshold past which the log is rotated.
 	rotateAt = 8 << 20 // 8 MiB
-	// keepGenerations — сколько прошлых файлов хранится.
+	// keepGenerations is how many previous files are kept.
 	keepGenerations = 3
 )
 
-// Logger — журнал демона.
+// Logger is the daemon's log.
 type Logger struct {
 	mu   sync.Mutex
 	path string
 	file *os.File
 }
 
-// OpenLogger открывает журнал по указанному пути.
+// OpenLogger opens the log at the given path.
 //
-// Ротация выполняется здесь: при открытии старый файл при необходимости
-// сдвигается, и только потом появляется дескриптор для записи.
+// Rotation happens here: on open the old file is shifted if needed, and only
+// then does a descriptor for writing appear.
 func OpenLogger(path string) (*Logger, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("state: creating the log directory: %w", err)
@@ -55,10 +55,11 @@ func OpenLogger(path string) (*Logger, error) {
 	return &Logger{path: path, file: f}, nil
 }
 
-// rotate сдвигает журнал, если он дорос до порога.
+// rotate shifts the log if it has grown to the threshold.
 //
-// Имена поколений: app.log.1 — свежайшее прошлое, app.log.3 — самое старое.
-// Сдвиг идёт от старших к младшим, иначе поколения затёрли бы друг друга.
+// Generation names: app.log.1 is the most recent past, app.log.3 the oldest.
+// The shift runs from the higher numbers to the lower ones, otherwise the
+// generations would overwrite each other.
 func rotate(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -78,7 +79,7 @@ func rotate(path string) error {
 		from := fmt.Sprintf("%s.%d", path, i)
 		to := fmt.Sprintf("%s.%d", path, i+1)
 		if _, err := os.Stat(from); err != nil {
-			continue // этого поколения ещё нет
+			continue // this generation does not exist yet
 		}
 		if err := os.Rename(from, to); err != nil {
 			return fmt.Errorf("state: rotating %s: %w", from, err)
@@ -91,10 +92,10 @@ func rotate(path string) error {
 	return nil
 }
 
-// Printf пишет строку в журнал.
+// Printf writes a line to the log.
 //
-// Формат: время, уровень, сообщение. Уровень — слово, а не код: журнал читает
-// человек, и искать таблицу соответствия кодов ему незачем.
+// Format: time, level, message. The level is a word, not a code: a human reads
+// the log, and there is no reason for them to look up a code mapping table.
 func (l *Logger) Printf(level, format string, args ...any) {
 	if l == nil {
 		return
@@ -112,16 +113,16 @@ func (l *Logger) Printf(level, format string, args ...any) {
 	}
 }
 
-// Info записывает событие жизни демона.
+// Info records an event in the daemon's life.
 func (l *Logger) Info(format string, args ...any) { l.Printf("INFO", format, args...) }
 
-// Warn записывает то, что стоит внимания, но не мешает работе.
+// Warn records what deserves attention but does not get in the way of work.
 func (l *Logger) Warn(format string, args ...any) { l.Printf("WARN", format, args...) }
 
-// Error записывает отказ.
+// Error records a refusal.
 func (l *Logger) Error(format string, args ...any) { l.Printf("ERROR", format, args...) }
 
-// Close закрывает журнал.
+// Close closes the log.
 func (l *Logger) Close() error {
 	if l == nil {
 		return nil
@@ -136,7 +137,7 @@ func (l *Logger) Close() error {
 	return err
 }
 
-// Path возвращает путь журнала.
+// Path returns the log path.
 func (l *Logger) Path() string {
 	if l == nil {
 		return ""
@@ -144,11 +145,12 @@ func (l *Logger) Path() string {
 	return l.path
 }
 
-// Truncate обрезает журнал НА МЕСТЕ.
+// Truncate truncates the log IN PLACE.
 //
-// Именно на месте, а не удалением: демон держит дескриптор открытым, и
-// удаление файла оставило бы его писать в никуда, пока процесс жив. Обрезка
-// через тот же дескриптор сохраняет непрерывность записи.
+// In place, rather than by deleting: the daemon keeps the descriptor open, and
+// removing the file would leave it writing into nowhere for as long as the
+// process lives. Truncating through the same descriptor keeps the writes
+// continuous.
 func Truncate(path string) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -160,10 +162,10 @@ func Truncate(path string) error {
 	return f.Close()
 }
 
-// LogFileSize возвращает размер журнала вместе с поколениями.
+// LogFileSize returns the log size together with the generations.
 //
-// Нужен команде `data`: оператор должен видеть, сколько занимает журнал, а не
-// только текущий файл.
+// Needed by the `data` command: the operator should see how much the log takes
+// up, not just the current file.
 func LogFileSize(path string) (bytes int64, files int, err error) {
 	entries, err := os.ReadDir(filepath.Dir(path))
 	if err != nil {
@@ -191,10 +193,10 @@ func LogFileSize(path string) (bytes int64, files int, err error) {
 	return bytes, files, nil
 }
 
-// Tail возвращает последние n строк журнала.
+// Tail returns the last n lines of the log.
 //
-// Читается с конца файла блоками, а не целиком: журнал может быть в мегабайтах,
-// а нужны обычно последние строки.
+// It reads from the end of the file in blocks, not as a whole: the log can be
+// megabytes long, while it is usually the last lines that are needed.
 func Tail(path string, n int) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -242,12 +244,12 @@ func Tail(path string, n int) ([]string, error) {
 	return out, nil
 }
 
-// LogFiles возвращает поколения журнала ОТ СВЕЖЕГО К СТАРОМУ.
+// LogFiles returns the log generations FROM NEWEST TO OLDEST.
 //
-// Порядок задан явно, а не сортировкой имён: `sort.Strings` поставил бы
-// "app.log" перед "app.log.1", то есть текущий файл оказался бы раньше
-// поколений, хотя он самый свежий по смыслу. Именно так этот вывод и
-// читается — «сначала то, что произошло недавно».
+// The order is given explicitly rather than by sorting the names: `sort.Strings`
+// would put "app.log" before "app.log.1", that is the current file would come
+// before the generations, although it is the newest in meaning. And this is
+// exactly how the output is read: "first what happened recently".
 func LogFiles(path string) []string {
 	out := []string{path}
 	for i := 1; i <= keepGenerations; i++ {
