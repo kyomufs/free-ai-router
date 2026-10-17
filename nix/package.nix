@@ -30,7 +30,7 @@ buildGoModule rec {
     owner = "kyomufs";
     repo = "free-ai-router";
     rev = "v${version}";
-    hash = "sha256-0EQEe2YhEATxlmcmOuR20WxP4Ey09yz5BMlSl+7TMcU=";
+    hash = "sha256-kPKXmXoxyH8fQ/38MGMnP2ezbZbXHCmB0UgXT7twHS8=";
   };
 
   # A static binary, so the unit needs neither LD_LIBRARY_PATH nor a wrapper, and
