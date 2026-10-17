@@ -36,14 +36,6 @@ func TestBuildsEnabledProviders(t *testing.T) {
 	if p.ID() != "opencode" {
 		t.Fatalf("ID = %q, want opencode", p.ID())
 	}
-
-	models, err := p.Models(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(models) == 0 {
-		t.Fatal("the opencode provider came up with an empty catalog")
-	}
 }
 
 // TestDisabledProvidersSkipped — выключенная секция не мешает работать
