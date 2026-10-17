@@ -81,6 +81,15 @@ func build(cfg *config.Config) (*daemon, error) {
 }
 
 // buildHandler собирает поверхности в один обработчик.
+//
+// ПРОВЕРКА ТОКЕНА ОБОРАЧИВАЕТ ОБЕ ПОВЕРХНОСТИ. Это принципиально: поверхность
+// моделей тратит квоту оператора — она ходит к провайдеру от его имени, — а
+// поверхность управления умеет менять ключи. Открытая любая из двух делает
+// режим server открытым релеем, поэтому проверка стоит вокруг всего
+// маршрутизатора, а не внутри одной из поверхностей.
+//
+// Раньше проверка была только внутри управления, и поверхность моделей
+// оставалась открытой: любой, кто нашёл порт, мог расходовать квоту.
 func (d *daemon) buildHandler() http.Handler {
 	root := http.NewServeMux()
 
@@ -97,18 +106,21 @@ func (d *daemon) buildHandler() http.Handler {
 
 	// Поверхность управления.
 	ctrl := &control.Handler{
-		Providers:    d.providers,
-		KeyRotation:  d.keys,
-		State:        d.state,
-		Log:          d.log,
-		Config:       d.cfg,
-		Transports:   transportIDs(),
-		Token:        d.cfg.Token.Val,
-		RequireToken: d.cfg.IsServer(),
+		Providers:   d.providers,
+		KeyRotation: d.keys,
+		State:       d.state,
+		Log:         d.log,
+		Config:      d.cfg,
+		Transports:  transportIDs(),
 	}
 	ctrl.Routes(root)
 
-	return root
+	// Проверка доступа поверх обеих поверхностей.
+	//
+	// Управляющая поверхность получает признак «токен уже проверен», чтобы не
+	// проверять его второй раз: двойная проверка не ошибка, но она означала бы
+	// два места, где решается один вопрос.
+	return requireToken(root, d.cfg)
 }
 
 // serve запускает демон и работает до сигнала остановки.
