@@ -190,11 +190,25 @@ func TestStatusReportsProvidersAndCounters(t *testing.T) {
 	if got := byID["first"]; got.Models != 2 || got.FreeModels != 2 {
 		t.Fatalf("first = %+v, want 2 models both free", got)
 	}
-	if got := byID["first"]; got.Keys != 2 || !got.KeyRotation {
-		t.Fatalf("first keys = %+v, want 2 keys with rotation", got)
+	// The keys are on file and NOT used: the fixture runs the default
+	// configuration, whose credential is anonymous, and that mode presents no
+	// key whatever the pool holds. Rotation therefore cannot act either — there
+	// is nothing to replace — and a monitor reporting otherwise would describe
+	// the mechanism's switch rather than the wire.
+	if got := byID["first"]; got.Keys != 2 {
+		t.Fatalf("first keys = %+v, want the two keys on file", got)
 	}
-	if got := byID["second"]; got.Keys != 0 || got.KeyRotation {
-		t.Fatalf("second = %+v, want no keys", got)
+	if got := byID["first"]; got.KeyRotation {
+		t.Fatalf("first = %+v, want no rotation under the anonymous credential", got)
+	}
+	if got := byID["first"]; got.KeyUsed {
+		t.Fatalf("first = %+v, want the keys reported as unused", got)
+	}
+	if got := byID["first"]; got.Credential != config.CredentialAnonymous {
+		t.Fatalf("first credential = %q, want %q", got.Credential, config.CredentialAnonymous)
+	}
+	if got := byID["second"]; got.Keys != 0 || got.KeyRotation || got.KeyUsed {
+		t.Fatalf("second = %+v, want no keys at all", got)
 	}
 
 	if st.Totals.OK != 1 || st.Totals.Refused != 1 {

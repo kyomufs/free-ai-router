@@ -212,7 +212,7 @@ func Catalog(r Registries) []Axis {
 			Env:          config.EnvCredential,
 			ConfigKey:    "credential",
 			InConfigFile: true,
-			Description:  "what the daemon presents to the provider: anonymous sends no credential, account sends a key",
+			Description:  "what the daemon presents to the provider: anonymous presents nothing even when keys are configured, account presents a key and refuses to start without one",
 		},
 		{
 			Name:         "key_rotation",
@@ -224,7 +224,7 @@ func Catalog(r Registries) []Axis {
 			Env:          config.EnvRotation,
 			ConfigKey:    "key_rotation",
 			InConfigFile: true,
-			Description:  "whether to spend the pool on a refusal that names the key; inert under the anonymous credential",
+			Description:  "whether to spend the pool on a refusal that names the key; ignored under the anonymous credential, where no key is presented and there is nothing to replace",
 		},
 		{
 			Name:         "config",

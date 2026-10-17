@@ -792,6 +792,23 @@ func (c *Config) Validate() error {
 				return err
 			}
 		}
+		// A credential asked for must exist.
+		//
+		// Under "account" the daemon presents a key on every request, so a
+		// section without one describes a deployment that cannot work. It used to
+		// start anyway and quietly reach the service anonymously, which is the
+		// worst of both answers: the configuration says one thing, the wire says
+		// another, and nothing tells the operator which one won.
+		//
+		// Refused HERE, at load, rather than at the first request: the daemon's
+		// job is to serve, and a deployment that cannot serve should say so
+		// before it accepts a single client.
+		if p.IsEnabled() && c.CredentialFor(name) == CredentialAccount && !p.HasKeys() {
+			return fmt.Errorf(
+				"config: provider %q: credential %q requires a key, and none is configured: set api_key, api_key_env, or settings.keys — or switch the credential to %q",
+				name, CredentialAccount, CredentialAnonymous,
+			)
+		}
 	}
 	if c.FirstEventTimeout.Val <= 0 {
 		return fmt.Errorf("config: first_event_timeout must be positive")
@@ -871,4 +888,46 @@ func (p ProviderConfig) ProviderKey() string {
 		return os.Getenv(p.APIKeyEnv)
 	}
 	return ""
+}
+
+// HasKeys reports whether the section supplies at least one key.
+//
+// THREE PLACES, and all of them count: the key field, the variable named beside
+// it, and the list under `settings.keys`. The last one is not a rarity — it is
+// how a pool is declared when there are several keys — and a check that forgot
+// it would refuse to start a perfectly valid deployment.
+//
+// The variable is read from the environment rather than trusted by name: a
+// deployment that names a variable it never sets has no key, and that is exactly
+// the case the caller is asking about.
+func (p ProviderConfig) HasKeys() bool {
+	if strings.TrimSpace(p.ProviderKey()) != "" {
+		return true
+	}
+	return len(settingKeys(p.Settings)) > 0
+}
+
+// settingKeys extracts the key list from a section's settings.
+//
+// Both shapes are accepted because both arrive: a JSON file decodes the list as
+// []any, while a programmatically built configuration (a test, the NixOS drift
+// check) hands over []string. Handling one and ignoring the other would make the
+// same configuration valid or invalid depending on where it came from.
+func settingKeys(settings map[string]any) []string {
+	if settings == nil {
+		return nil
+	}
+	switch v := settings["keys"].(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }

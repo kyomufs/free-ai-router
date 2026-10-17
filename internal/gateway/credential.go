@@ -12,10 +12,18 @@ import (
 // rotation mechanism, and there is one of it for all key-based providers. All
 // that is left to the provider is the shape — the header name and the prefix.
 //
-// Rotation is wired in through the KeyRotation field. If the mechanism is
-// absent, the gateway runs anonymously: the provider gets an empty key and
-// substitutes its own anonymity marker. That is a normal mode, not a missing
-// setting.
+// THE CREDENTIAL AXIS DECIDES THE SOURCE, and the pool only supplies the value.
+// That is the whole point of the axis: "anonymous" is not a statement about
+// whether a key happens to be lying around, it is an instruction not to present
+// one. A deployment that listed keys and then switched the credential to
+// anonymous asked to reach the service without them — a pool left in the file is
+// not consent to spend it.
+//
+// This used to work the other way: the axis gated rotation only, and any key
+// present was sent regardless. The result was a mode called "anonymous" that
+// quietly presented a key, which is a lie in the log and in the monitor, and a
+// surprising bill for whoever put a key in the file and expected it to be
+// unused.
 
 // CredentialSource issues the credentials for a request.
 type CredentialSource interface {
@@ -25,21 +33,74 @@ type CredentialSource interface {
 
 // credentialFor returns the key for a request.
 //
-// If a rotation mechanism is wired in, the key comes from it. Otherwise an
-// empty string is returned: the provider will substitute the anonymity marker
-// itself, and that is the right behaviour for a deployment that did not ask to
-// spend keys.
+// The credential axis is consulted first: under "anonymous" the answer is an
+// empty string without the pool being asked at all, and the provider substitutes
+// its own anonymity marker. Under "account" the key comes from the pool, and a
+// missing pool is a configuration error rather than a silent fallback —
+// validation refuses to start such a deployment, so reaching this point without
+// a key means the pool was emptied after the start.
+//
+// An absent resolver keeps the older behaviour, which is the pool's presence.
+// That is for tests that wire a registry without a configuration; the daemon
+// always sets the resolver.
 func (h *Handler) credentialFor(p provider.Provider) string {
+	switch h.credentialKind(p) {
+	case credentialAnonymous:
+		return ""
+	case credentialAccount:
+		return h.nextKey(p)
+	}
+
+	// Not told which credential is in force: fall back to what the pool says.
+	return h.nextKey(p)
+}
+
+// The credential kinds, spelled as the configuration spells them.
+//
+// Duplicated as constants rather than imported: the gateway must not depend on
+// the configuration package, or the axis would be read in two places at once.
+// The values are part of the configuration's public surface, so a change there
+// is a change here, and the test that compares them is what keeps them together.
+const (
+	credentialAnonymous = "anonymous"
+	credentialAccount   = "account"
+)
+
+// credentialKind reports which credential is in force for the provider.
+func (h *Handler) credentialKind(p provider.Provider) string {
+	if h.Credential == nil {
+		return ""
+	}
+	return h.Credential(p.ID())
+}
+
+// nextKey takes the next key from the provider's pool.
+func (h *Handler) nextKey(p provider.Provider) string {
 	if h.KeyRotation == nil {
 		return ""
 	}
-	name := string(p.ID())
-	kr, ok := h.KeyRotation[name]
+	kr, ok := h.KeyRotation[string(p.ID())]
 	if !ok || kr == nil {
 		return ""
 	}
 	key, _ := kr.Next()
 	return key
+}
+
+// issuesCredentials reports whether requests to the provider carry a key.
+//
+// It is the question the monitor asks, and it is answered by the same function
+// that hands out the key — otherwise the two can disagree, and the monitor would
+// claim a mode the request path does not follow.
+func (h *Handler) issuesCredentials(p provider.Provider) bool {
+	if h.credentialKind(p) == credentialAnonymous {
+		return false
+	}
+	if h.KeyRotation == nil {
+		return false
+	}
+	kr, ok := h.KeyRotation[string(p.ID())]
+	return ok && kr != nil && kr.Len() > 0
 }
 
 // alternativeKey looks for another key of the same provider.
@@ -48,11 +109,22 @@ func (h *Handler) credentialFor(p provider.Provider) string {
 // precisely a different one that is needed. If there is no other, the retry is
 // pointless, and the caller must hand the refusal to the client.
 //
-// This answer also carries the rotation policy: a mechanism with rotation
+// UNDER "anonymous" THERE IS NEVER AN ALTERNATIVE. The mechanism may hold keys
+// and may have rotation switched on, but the credential in force says no key is
+// presented, so there is nothing to replace — and reporting an alternative would
+// make the retry loop reach for a key the mode forbids. This is where the axis
+// and the rotation switch meet, and they are not the same question: the axis says
+// whether a key is presented at all, the switch says whether a refused key is
+// replaced.
+//
+// The answer also carries the rotation policy: a mechanism with rotation
 // switched off never has an alternative. That is deliberate — "is there another
 // key to try" is one question, and splitting it in two would leave the retry
 // loop checking a setting the mechanism already knows about.
 func (h *Handler) alternativeKey(p provider.Provider, current string) (string, bool) {
+	if h.credentialKind(p) == credentialAnonymous {
+		return "", false
+	}
 	if h.KeyRotation == nil {
 		return "", false
 	}

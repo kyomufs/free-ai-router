@@ -435,11 +435,15 @@ func TestNewAxesPrecedence(t *testing.T) {
 // TestProviderOverridesTheGlobalAxes — a provider can be worked around
 // differently from the rest of the process.
 func TestProviderOverridesTheGlobalAxes(t *testing.T) {
+	// "picky" carries a key because it asks for the account credential, and the
+	// two cannot be separated: validation refuses the pair "account without a
+	// key" outright. This test is about the inheritance of the axes, so the key
+	// is there to let the configuration load at all.
 	paths := writeConfig(t, `{
 		"credential": "anonymous",
 		"key_rotation": "on",
 		"providers": {
-			"picky": {"type": "stub", "credential": "account", "key_rotation": "off"},
+			"picky": {"type": "stub", "credential": "account", "key_rotation": "off", "api_key": "sk-picky"},
 			"plain": {"type": "stub"}
 		}
 	}`)
@@ -673,5 +677,175 @@ func TestUncheckedLoadStillAppliesTheEnvironment(t *testing.T) {
 	}
 	if c.Credential.From != SourceEnv {
 		t.Errorf("Credential source = %q, want %q", c.Credential.From, SourceEnv)
+	}
+}
+
+// TestAccountWithoutAKeyIsRefused.
+//
+// A credential asked for must exist. Under "account" the daemon presents a key
+// on every request, so a section without one describes a deployment that cannot
+// work — and it used to start anyway and reach the service anonymously, which is
+// the worst of both answers: the file says one thing, the wire another, and
+// nothing tells the operator which one won.
+//
+// Refused at LOAD rather than at the first request: a deployment that cannot
+// serve should say so before it accepts a client.
+func TestAccountWithoutAKeyIsRefused(t *testing.T) {
+	paths := writeConfig(t, `{
+		"credential": "account",
+		"providers": {"opencode": {"type": "opencode"}}
+	}`)
+
+	_, err := LoadFrom(paths)
+	if err == nil {
+		t.Fatal("a keyless account credential was accepted")
+	}
+	// The message has to name the fix, not only the fault: the operator is
+	// holding a broken configuration and needs the way out of it.
+	for _, want := range []string{"account", "requires a key", "api_key"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q: %v", want, err)
+		}
+	}
+}
+
+// TestAccountIsSatisfiedByAnyOfTheThreeSources.
+//
+// There are three places a key can come from, and all of them count: the field,
+// the variable named beside it, and the list under settings. A check that knew
+// only the first would refuse a perfectly valid pool.
+func TestAccountIsSatisfiedByAnyOfTheThreeSources(t *testing.T) {
+	cases := []struct {
+		name    string
+		section string
+		env     bool
+	}{
+		{"the key field", `"api_key": "sk-direct"`, false},
+		{"the named variable", `"api_key_env": "TEST_ROUTER_KEY"`, true},
+		{"the settings list", `"settings": {"keys": ["sk-one", "sk-two"]}`, false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.env {
+				t.Setenv("TEST_ROUTER_KEY", "sk-from-env")
+			}
+			paths := writeConfig(t, `{
+				"credential": "account",
+				"providers": {"opencode": {"type": "opencode", `+c.section+`}}
+			}`)
+
+			if _, err := LoadFrom(paths); err != nil {
+				t.Fatalf("a key supplied through %s was not accepted: %v", c.name, err)
+			}
+		})
+	}
+}
+
+// TestANamedVariableThatIsNotSetDoesNotCount.
+//
+// A key named but never exported is not a key. Trusting the name alone would let
+// the daemon start and then reach the service without a credential, which is the
+// failure the whole check exists to prevent — and it is the likeliest one in a
+// unit file, where the variable arrives from an EnvironmentFile that may not
+// have been written yet.
+func TestANamedVariableThatIsNotSetDoesNotCount(t *testing.T) {
+	paths := writeConfig(t, `{
+		"credential": "account",
+		"providers": {"opencode": {"type": "opencode", "api_key_env": "NOT_SET_ANYWHERE"}}
+	}`)
+
+	if _, err := LoadFrom(paths); err == nil {
+		t.Fatal("a keyless provider naming an unset variable was accepted")
+	}
+}
+
+// TestAnonymousNeedsNoKeyAtAll.
+//
+// The mode the free tier runs in. A check that demanded a key here would make the
+// gateway unusable in its ordinary deployment.
+func TestAnonymousNeedsNoKeyAtAll(t *testing.T) {
+	paths := writeConfig(t, `{
+		"credential": "anonymous",
+		"providers": {"opencode": {"type": "opencode"}}
+	}`)
+
+	if _, err := LoadFrom(paths); err != nil {
+		t.Fatalf("the anonymous credential was refused for want of a key: %v", err)
+	}
+}
+
+// TestThePerProviderCredentialIsWhatIsChecked.
+//
+// The axis has a per-provider override, and the check has to follow it: a global
+// "anonymous" with one keyed section is the normal shape, and a global "account"
+// with one anonymous section is how a single service is reached without an
+// account. Reading the global value alone would refuse the first and accept the
+// second while it is broken.
+func TestThePerProviderCredentialIsWhatIsChecked(t *testing.T) {
+	t.Run("a keyed section under a global anonymous is refused without a key", func(t *testing.T) {
+		paths := writeConfig(t, `{
+			"credential": "anonymous",
+			"providers": {"picky": {"type": "opencode", "credential": "account"}}
+		}`)
+		if _, err := LoadFrom(paths); err == nil {
+			t.Fatal("a section asking for account without a key was accepted")
+		}
+	})
+
+	t.Run("an anonymous section under a global account needs no key", func(t *testing.T) {
+		paths := writeConfig(t, `{
+			"credential": "account",
+			"providers": {
+				"keyed":  {"type": "opencode", "api_key": "sk-x"},
+				"public": {"type": "opencode", "credential": "anonymous"}
+			}
+		}`)
+		if _, err := LoadFrom(paths); err != nil {
+			t.Fatalf("an explicitly anonymous section was refused: %v", err)
+		}
+	})
+}
+
+// TestADisabledSectionIsNotChecked.
+//
+// A parked provider is not going to serve, so its missing key is not a fault —
+// and refusing it would make the section impossible to park and repair, since the
+// way back is to fix it and switch it on. This is the same reasoning that keeps
+// the file-editing commands off the validating loader.
+func TestADisabledSectionIsNotChecked(t *testing.T) {
+	paths := writeConfig(t, `{
+		"credential": "account",
+		"providers": {
+			"live":    {"type": "opencode", "api_key": "sk-x"},
+			"parked":  {"type": "opencode", "enabled": false}
+		}
+	}`)
+
+	if _, err := LoadFrom(paths); err != nil {
+		t.Fatalf("a disabled section without a key was refused: %v", err)
+	}
+}
+
+// TestTheFileEditingLoaderDoesNotApplyTheKeyCheck.
+//
+// The commands that change one key at a time run on the UNCHECKED loader, and
+// they have to: a configuration is allowed to be incomplete while it is being
+// assembled. Refusing it there would seal it shut against the very command that
+// can reopen it — set the credential, then add the key, and the first step would
+// fail.
+func TestTheFileEditingLoaderDoesNotApplyTheKeyCheck(t *testing.T) {
+	paths := writeConfig(t, `{
+		"credential": "account",
+		"providers": {"opencode": {"type": "opencode"}}
+	}`)
+
+	if _, err := LoadUnchecked(paths); err != nil {
+		t.Fatalf("the unchecked loader applied the key check and left the file unrepairable: %v", err)
+	}
+	// The validating loader, over the same file, must refuse: the two differ
+	// exactly here.
+	if _, err := LoadFrom(paths); err == nil {
+		t.Fatal("the validating loader accepted the same file")
 	}
 }

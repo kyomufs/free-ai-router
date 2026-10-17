@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"sort"
 
+	"free-ai-router/internal/config"
 	"free-ai-router/internal/egress"
 	"free-ai-router/internal/provider"
 	"free-ai-router/internal/state"
@@ -48,10 +49,20 @@ type ProviderStatus struct {
 	Models int `json:"models"`
 	// FreeModels — how many of them are free.
 	FreeModels int `json:"free_models"`
-	// Keys — how many keys are in use. Zero means anonymous operation.
+	// Keys — how many keys the provider has on file. Zero means none are
+	// configured.
+	//
+	// The count is not the same as "in use": under the anonymous credential a
+	// configured pool is deliberately not presented, which is what KeyUsed
+	// reports.
 	Keys int `json:"keys"`
-	// KeyRotation — whether the key-rotation mechanism is wired up.
+	// KeyRotation — whether a refused key is replaced. False under the anonymous
+	// credential, whatever the switch says, because there is nothing to replace.
 	KeyRotation bool `json:"key_rotation"`
+	// Credential — which credential is in force: "anonymous" or "account".
+	Credential string `json:"credential,omitempty"`
+	// KeyUsed — whether requests to this provider carry a key.
+	KeyUsed bool `json:"key_used"`
 }
 
 // handleStatus answers with a snapshot of the state.
@@ -91,8 +102,17 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 			if h.KeyRotation != nil {
 				keys := h.KeyRotation.Keys(p.ID())
 				ps.Keys = len(keys)
-				ps.KeyRotation = h.KeyRotation.HasRotation(p.ID())
 			}
+			// The axes are reported from the configuration, which is what the
+			// request path follows; the mechanism's own switch is not evidence
+			// of what happens on the wire.
+			//
+			// An unknown credential (no configuration) falls back to the pool's
+			// presence, which is the only thing left to go on.
+			credential, rotates := h.credentialOf(p.ID())
+			ps.Credential = credential
+			ps.KeyRotation = rotates
+			ps.KeyUsed = ps.Keys > 0 && (rotates || credential != config.CredentialAnonymous)
 			st.Providers = append(st.Providers, ps)
 		}
 	}
@@ -165,7 +185,21 @@ type KeysResponse struct {
 type ProviderKeys struct {
 	Provider string   `json:"provider"`
 	Keys     []string `json:"keys"`
-	Rotation bool     `json:"rotation"`
+	// Rotation — whether a refused key is replaced.
+	//
+	// FALSE UNDER THE ANONYMOUS CREDENTIAL, whatever the switch says: no key is
+	// presented there, so there is nothing to replace. Reporting the switch
+	// alone would let the monitor claim a mechanism that cannot act, which is
+	// worse than saying nothing — the operator would then look for the reason a
+	// rotation never happens in the wrong place.
+	Rotation bool `json:"rotation"`
+	// Credential — which credential is in force for this provider.
+	Credential string `json:"credential"`
+	// Used — whether requests to this provider carry a key.
+	//
+	// A pool can be configured and deliberately unsent, so this is a different
+	// question from whether the key list is empty.
+	Used bool `json:"key_used"`
 }
 
 // handleKeys answers with the list of keys.
@@ -185,17 +219,34 @@ func (h *Handler) keysResponse() KeysResponse {
 		return resp
 	}
 	for _, id := range h.Providers.IDs() {
-		fingerprints := h.KeyRotation.KeyFingerprints(id)
+		credential, rotates := h.credentialOf(id)
 		resp.Providers = append(resp.Providers, ProviderKeys{
-			Provider: string(id),
-			Keys:     fingerprints,
-			Rotation: h.KeyRotation.HasRotation(id),
+			Provider:   string(id),
+			Keys:       h.KeyRotation.KeyFingerprints(id),
+			Rotation:   rotates,
+			Credential: credential,
+			Used:       rotates || (credential == config.CredentialAccount && h.KeyRotation.HasRotation(id)),
 		})
 	}
 	if resp.Providers == nil {
 		resp.Providers = []ProviderKeys{}
 	}
 	return resp
+}
+
+// credentialOf reports the credential in force and whether rotation can act.
+//
+// The answer comes from the configuration rather than from the mechanism's own
+// switch, because the two disagree under the anonymous credential: the mechanism
+// keeps its setting while the mode makes it unusable.
+func (h *Handler) credentialOf(id provider.ID) (string, bool) {
+	if h.Config == nil {
+		// Without a configuration the axis is unknown, and the mechanism's own
+		// switch is the only evidence there is.
+		return "", h.KeyRotation.HasRotation(id)
+	}
+	credential := h.Config.CredentialFor(string(id))
+	return credential, h.Config.RotatesFor(string(id))
 }
 
 // keyRequest — the body of a request to add or remove a key.

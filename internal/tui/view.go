@@ -367,6 +367,14 @@ func (m Model) keyLines() []string {
 			out = append(out, m.pal.dim.Render("  no keys — "+why))
 			continue
 		}
+
+		// A pool under the anonymous credential is configured and deliberately
+		// not sent. Listing the keys without that word would let the block read
+		// as "these are in use", which is the one thing the mode rules out.
+		if p.Credential == "anonymous" {
+			out = append(out, m.pal.dim.Render(
+				"  keys present but unused — credential is anonymous, so none is sent"))
+		}
 		for _, k := range p.Keys {
 			out = append(out, m.keyRow(k, k.Fingerprint == p.Active))
 		}

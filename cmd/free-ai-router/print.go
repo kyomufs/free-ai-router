@@ -64,10 +64,6 @@ func printEffectiveConfig(cfg *config.Config) error {
 			if !p.IsEnabled() {
 				state = "disabled"
 			}
-			key := "none"
-			if p.ProviderKey() != "" {
-				key = "present"
-			}
 			// The effective axes are shown next to the declared ones: an
 			// inherited value is invisible otherwise, and the question asked of
 			// this output is what is in force, not what was written down.
@@ -75,9 +71,32 @@ func printEffectiveConfig(cfg *config.Config) error {
 			if p.Credential != "" {
 				cred += "*"
 			}
+
+			// KEY IS ABOUT USE, NOT ABOUT PRESENCE.
+			//
+			// A key in the file under credential "anonymous" is not sent, so
+			// reporting it as "present" would describe a deployment that does
+			// not exist. The word is chosen so that the two questions stay
+			// apart: "used" means a key goes on the wire, "unused" means one is
+			// configured and deliberately not sent, "none" means there is none.
+			key := "none"
+			switch {
+			case !p.HasKeys():
+				key = "none"
+			case cfg.CredentialFor(id) == config.CredentialAccount:
+				key = "used"
+			default:
+				key = "unused"
+			}
+
 			rotation := cfg.RotationFor(id)
 			if cfg.RotatesFor(id) {
 				rotation += " (active)"
+			} else if cfg.CredentialFor(id) == config.CredentialAnonymous {
+				// Rotation is not merely off here, it cannot apply: there is no
+				// key to replace. Saying "off" would suggest a switch that could
+				// be turned on, and there is none.
+				rotation = "n/a (anonymous)"
 			}
 			// The number of models is not shown: the catalog lives with the
 			// service and is learned through a request, not from the

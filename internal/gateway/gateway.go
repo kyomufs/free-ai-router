@@ -76,6 +76,20 @@ type Handler struct {
 	// marker, and that is a normal mode, not a missing setting.
 	KeyRotation map[string]*capability.KeyRotation
 
+	// Credential reports which credential is in force for a provider:
+	// "anonymous" or "account".
+	//
+	// The gateway does not read the configuration itself: the axis has a
+	// per-provider override, and resolving it belongs to the package that owns
+	// the axis. A function rather than a map, so that the answer is computed
+	// from one place instead of being copied into a second one that can drift.
+	//
+	// nil means "not told", and then the credential is taken from the pool's
+	// presence, which is the old behaviour: a provider with a mechanism gets a
+	// key, one without gets the anonymity marker. That keeps the gateway usable
+	// from a test that wires only a registry.
+	Credential func(provider.ID) string
+
 	// Retry stores the retry policies by provider.
 	//
 	// A provider absent from here does not repeat its refusals, which is the

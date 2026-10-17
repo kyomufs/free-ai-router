@@ -124,6 +124,15 @@ func (d *daemon) buildHandler() http.Handler {
 		KeyRotation:     d.keys.rotationMap(),
 		Retry:           retryPolicies(d.cfg, d.providers),
 		DefaultProvider: d.keys.firstProvider(),
+		// The credential axis reaches the request path here. Without it the
+		// gateway would fall back to the pool's presence, and a pool configured
+		// under "anonymous" would be spent — the very thing the axis exists to
+		// prevent.
+		//
+		// The adapter converts the provider identifier: the configuration speaks
+		// in plain strings, while the gateway identifies providers by their own
+		// type, and neither package should have to learn the other's spelling.
+		Credential: func(id provider.ID) string { return d.cfg.CredentialFor(string(id)) },
 	}
 	gw.AllRoutes(root)
 

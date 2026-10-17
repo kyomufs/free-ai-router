@@ -175,12 +175,41 @@ free-ai-router axes --json     # machine-readable
 
 ```sh
 # Adopt a value: writes config.json, survives a restart.
-free-ai-router cred account
+free-ai-router cred anonymous
 free-ai-router rotate off
 free-ai-router family v4
 
 # Try a value: writes nothing, applies to this run.
-free-ai-router up --credential account --rotate off --family v4
+free-ai-router up --rotate off --family v4
+```
+
+The one-axis commands write the value even when the result could not run, and
+that is deliberate: a configuration is allowed to be incomplete while it is being
+assembled, and a command that refused would seal the file shut against the very
+step that can repair it. `credential account` on a keyless configuration is the
+case to know about — it is accepted, it is written, and the **daemon refuses to
+start** until a key appears:
+
+```sh
+$ free-ai-router cred account && free-ai-router up
+credential: account
+written to ~/.config/free-ai-router/config.json
+error: config: provider "opencode": credential "account" requires a key, and none
+is configured: set api_key, api_key_env, or settings.keys — or switch the
+credential to "anonymous"
+```
+
+Add the key — through the control surface, which is the only way in while the
+daemon runs — or put it in the section and start again:
+
+```sh
+# While a daemon is up (local mode needs no token):
+curl -X POST http://127.0.0.1:8787/_control/keys/add \
+  -H 'content-type: application/json' \
+  -d '{"provider":"opencode","key":"sk-..."}'
+
+# Or in the file, which survives a restart:
+#   "providers": { "opencode": { "type": "opencode", "api_key": "sk-..." } }
 ```
 
 Without a value, an axis command reports what is in force **and where it came
@@ -188,7 +217,7 @@ from** — the question worth asking while debugging a merge:
 
 ```sh
 $ free-ai-router credential
-credential: account (config.json)
+credential: anonymous (config.json)
 allowed: anonymous | account
 ```
 
@@ -197,17 +226,47 @@ allowed: anonymous | account
 | Axis | Values | What it decides |
 |---|---|---|
 | `mode` | `local` \| `server` | loopback with no token check, or a reachable listener where the token is mandatory |
-| `credential` | `anonymous` \| `account` | whether requests go out with nothing (counted against your address) or with a key (counted against your account) |
+| `credential` | `anonymous` \| `account` | whether a key is presented at all (counted against your address) or one is taken from the pool (counted against your account) |
 | `key_rotation` | `on` \| `off` | whether a refusal that names the key spends the next key from the pool |
 | `family` | `auto` \| `v4` \| `v6` | the address family the traffic leaves from |
 | `transport` | `direct` | how requests leave the machine |
 
-`credential` and `key_rotation` are **independent**, and that is deliberate. The
-common case is one without the other: an anonymous credential is rotated
-precisely because there is nothing to rotate, and a real key is often kept in
-place because a refusal on it is information, not an obstacle. Under
-`credential = "anonymous"`, `key_rotation` is inert — it is kept, and it changes
-nothing, rather than pretending to work.
+### How `credential` decides
+
+`credential` chooses the **source** of the credential; the pool only supplies the
+value. The mode is a statement about what goes on the wire, not about what
+happens to be lying in the configuration file:
+
+| | `credential: "anonymous"` | `credential: "account"` |
+|---|---|---|
+| a key is present in the section | **not sent** — the service's own anonymity marker goes out instead | sent |
+| there is no key | fine; the marker goes out | **the daemon refuses to start** |
+| `key_rotation: on` | ignored — there is no key to replace | the pool is spent on a refusal that names the key |
+| `key_rotation: off` | ignored | the current key is kept and the refusal reaches the client |
+
+Two of those deserve a word.
+
+A key on file under `anonymous` is **not consent to spend it**. The common case is
+an operator who keeps a key configured while testing anonymously, and a pool that
+leaked into the request would make the mode a label rather than a behaviour —
+with the traffic attributed to an account that was meant to stay untouched.
+
+`account` without a key is refused **at startup**, not at the first request. The
+daemon's job is to serve, and a deployment that cannot serve should say so before
+it accepts a single client. The refusal names all three places a key can come
+from:
+
+```
+error: config: provider "opencode": credential "account" requires a key, and none
+is configured: set api_key, api_key_env, or settings.keys — or switch the
+credential to "anonymous"
+```
+
+`api_key_env` counts only when the variable is actually **set**: a name without a
+value is not a key, and trusting the name alone would let the daemon start and
+then reach the service without a credential — the likeliest shape of the bug in a
+unit file, where the variable arrives from an `EnvironmentFile` that may not have
+been written yet.
 
 `family` exists because of how free tiers are counted: **per source address**.
 Pinned to one family, the daemon spends one address's allowance and the per-IP
@@ -293,9 +352,13 @@ mkdir -p ~/far-debug
 # 1. Write a config for the experiment. It has to name at least one provider:
 #    a gateway with an empty providers section refuses to start, which is the
 #    right answer — it would have nothing to serve.
+#
+#    The credential is anonymous, so no key is needed. Asking for "account"
+#    here would be refused at startup unless a key is configured — see the
+#    table above.
 cat > ~/far-debug/config.json <<'JSON'
 {
-  "credential": "account",
+  "credential": "anonymous",
   "key_rotation": "off",
   "family": "v4",
   "providers": { "opencode": { "type": "opencode" } }
@@ -341,10 +404,10 @@ every axis and where its value came from — and exits without starting anything
 writing a file:
 
 ```sh
-$ free-ai-router up --credential account --family v4 --print-config
-credential              account                      (flag)
+$ free-ai-router up --rotate off --family v4 --print-config
 family                  v4                           (flag)
-key_rotation            on                           (default)
+key_rotation            off                          (flag)
+credential              anonymous                    (default)
 ...
 file:      /home/you/.config/free-ai-router/config.json
 state:     /home/you/.local/state/free-ai-router/state.json

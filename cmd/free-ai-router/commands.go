@@ -268,21 +268,29 @@ func cmdKeys(args []string) error {
 // The effective axes are included next to the declared ones: a consumer asking
 // which credential a provider uses needs the answer in force, not the raw entry,
 // and computing the inheritance is the daemon's job rather than the caller's.
+//
+// A provider is described twice over, and the two are different questions:
+// `has_key` says whether the section supplies one, `key_used` says whether it is
+// presented. Under credential "anonymous" a configured pool stays unused on
+// purpose, and a consumer reading only the first field would report a mode the
+// requests do not follow.
 func providersDetail(cfg *config.Config) []map[string]any {
 	ids := providerNames(cfg)
 	out := make([]map[string]any, 0, len(ids))
 	for _, id := range ids {
 		p := cfg.Providers[id]
+		credential := cfg.CredentialFor(id)
 		out = append(out, map[string]any{
 			"id":                   id,
 			"type":                 p.Type,
 			"credential":           p.Credential,
-			"credential_effective": cfg.CredentialFor(id),
+			"credential_effective": credential,
 			"key_rotation":         p.KeyRotation,
 			"rotation_effective":   cfg.RotationFor(id),
 			"rotates":              cfg.RotatesFor(id),
 			"base_url":             p.BaseURL,
-			"has_key":              p.ProviderKey() != "",
+			"has_key":              p.HasKeys(),
+			"key_used":             p.HasKeys() && credential == config.CredentialAccount,
 		})
 	}
 	return out
