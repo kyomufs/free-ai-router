@@ -29,14 +29,30 @@ CGO_ENABLED=0 go vet ./...
 CGO_ENABLED=0 go test ./... -count=1
 
 # 3. Сборка
-CGO_ENABLED=0 go build ./...
-CGO_ENABLED=0 go build -o /tmp/free-ai-router ./cmd/free-ai-router
 
-# 4. Публикация
+# Сборка бинаря с версией: `version` печатает её, а без неё — «неизвестно».
+# Версия берётся из последнего коммита, поэтому воспроизводима.
+CGO_ENABLED=0 go build \
+  -ldflags "-X main.buildVersion=$(git rev-parse --short HEAD)" \
+  -o ~/.local/bin/free-ai-router ./cmd/free-ai-router
+
+# 4. Живая проверка — «собралось» не доказательство
+/tmp/free-ai-router up --listen 127.0.0.1:8795 &
+sleep 1
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8795/v1/models   # 200
+curl -s http://127.0.0.1:8795/_control/status | head -c 120
+
+# 5. Публикация
 git add -A
 git status --short               # осмотреть, что попадает в коммит
 git diff --cached --stat
 ```
+
+### Где лежит установленный бинарь
+
+`~/.local/bin/free-ai-router` — и он на `PATH`. После каждой сборки его надо
+обновлять: иначе CLI останется прежним, а запущенный демон — новым, и это
+запутает при первой же отладке.
 
 Коммит и пуш:
 
