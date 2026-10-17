@@ -6,7 +6,7 @@
 #
 # UPDATING. `version`, `hash` and `vendorHash` move together:
 #
-#   version = "1.2.0";
+#   version = "1.3.0";
 #   # then:
 #   nix-prefetch-url --unpack \
 #     https://github.com/kyomufs/free-ai-router/archive/refs/tags/v1.2.0.tar.gz
@@ -24,13 +24,13 @@
 
 buildGoModule rec {
   pname = "free-ai-router";
-  version = "1.2.0";
+  version = "1.3.0";
 
   src = fetchFromGitHub {
     owner = "kyomufs";
     repo = "free-ai-router";
     rev = "v${version}";
-    hash = "sha256-RrYy8vL9NtSmwNlYjewuT6Gza4bLEkJ6ZkEkMZmYPxk=";
+    hash = "sha256-0EQEe2YhEATxlmcmOuR20WxP4Ey09yz5BMlSl+7TMcU=";
   };
 
   # A static binary, so the unit needs neither LD_LIBRARY_PATH nor a wrapper, and
