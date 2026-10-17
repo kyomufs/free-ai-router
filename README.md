@@ -26,47 +26,93 @@ client ──▶ free-ai-router ──▶ provider
 
 ## Install on NixOS
 
-The module owns the binary, the configuration and the unit. It is the only path
-where the configuration is a declaration rather than a file you edit, and that is
-the point: the daemon's settings live in your host's git history.
+The module owns the binary, the configuration and the service. It needs nothing
+beyond nixpkgs: no flakes of its own, no secret-management integration, no host
+abstraction. Settings live in the declaration, so they end up in your
+configuration's git history — and, for the same reason, the daemon's
+`config.json` is rewritten from the options on every activation.
 
-The module is `services.free-ai-router` in the
-[nixos-config](https://github.com/kyomufs/nixos-config) tree
-(`modules/services/free-ai-router.nix`). A minimal host gate:
+The module is `nix/module.nix` in this repository. A complete setup is two files.
+
+### `flake.nix`
 
 ```nix
-# hosts/<host>/default.nix
-services.free-ai-router = {
-  enable = true;
-  listen = "127.0.0.1:8787";
-  credential = "anonymous";
-  keyRotation = "on";
+{
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-  providers.opencode = {
-    type = "opencode";
+  outputs = { self, nixpkgs, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        ./configuration.nix
+        # The module is fetched as a flake input of its own repository, so a
+        # `nix flake update` moves it together with nixpkgs.
+        ./free-ai-router.nix
+      ];
+    };
   };
-};
+}
 ```
 
-Then the usual:
+If you would rather not vendor the file, import it straight from the flake and
+add that flake as an input:
+
+```nix
+{
+  inputs.free-ai-router.url = "github:kyomufs/free-ai-router";
+  # ...
+  modules = [
+    "${inputs.free-ai-router}/nix/module.nix"
+    # ...
+  ];
+}
+```
+
+### `configuration.nix` — the minimal setup
+
+```nix
+{ ... }:
+
+{
+  services.free-ai-router = {
+    enable = true;
+    # Everything below is a default, shown so that you know what is in force.
+    # It is a complete configuration as it stands.
+    providers.opencode.type = "opencode";
+  };
+}
+```
 
 ```sh
-sudo nixos-rebuild switch --flake .#<host>
+sudo nixos-rebuild switch --flake .#myhost
 ```
 
-What the module actually sets up, so you are not surprised:
+That gives you a gateway on `127.0.0.1:8787`, reachable only from this machine,
+presenting no credential to the provider and therefore spending the free tier's
+allowance against your address:
+
+```sh
+curl http://127.0.0.1:8787/v1/models
+```
+
+### What the module sets up
 
 | Piece | What it does |
 |---|---|
-| `environment.systemPackages` | puts the binary on PATH. No wrapper, no extra packages — the TUI is inside the binary |
-| `home.activation.free-ai-router-config-seed` | **writes** `~/.config/free-ai-router/config.json` from your options on every activation |
+| `environment.systemPackages` | puts the binary on PATH. No wrapper and no extra packages — the monitor is inside the binary |
+| `system.activationScripts.free-ai-router-config` | writes `~/.config/free-ai-router/config.json` from your options on every activation |
 | `systemd.user.services.free-ai-router` | a **user** unit, `Restart=on-failure`, XDG roots pointed at your home |
-| `sops.secrets.<tokenSecret>` | declares the token secret, and only when `mode = "server"` |
 
-`config.json` is an ordinary file, not a symlink into `/nix/store`, and the daemon
-writes to it too. A symlink would break on the first write from the CLI.
+Two details are worth knowing before they surprise you.
 
-The unit is a **user** unit, so:
+`config.json` is an ordinary file, not a symlink into `/nix/store`. The CLI and
+the daemon **write** to it — `free-ai-router cred account` rewrites it — and a
+symlink into the read-only store would break on the first write. Editing it by
+hand is still pointless on a machine that uses this module: the next `switch`
+overwrites the edit. To change a setting, change the declaration; to try one
+without a rebuild, see [Debugging](#debugging-without-a-rebuild).
+
+The unit is a **user** unit, so it runs with your session:
 
 ```sh
 systemctl --user status free-ai-router
@@ -74,29 +120,102 @@ systemctl --user restart free-ai-router
 journalctl --user -u free-ai-router -f
 ```
 
-### The token, on NixOS
+It starts when you log in. To have it up before that, enable lingering for the
+service user:
 
-In `mode = "server"` a token is mandatory and the daemon refuses to start
-without one. Never put it in `token` — that value is rendered into
-`/nix/store`, which is world-readable. Use the secret instead:
-
-```sh
-# once, from the repo that owns the secrets
-sops edit secrets/secrets.yaml     # add: free-ai-router-token: <your token>
+```nix
+users.users.myuser.linger = true;
 ```
+
+### Reaching it from other machines
+
+`local` mode is loopback-only and checks no token. To serve other clients,
+switch to `server` — which makes the token **mandatory**, because a tokenless
+listener on a reachable address spends your quota on behalf of anyone who finds
+the port:
 
 ```nix
 services.free-ai-router = {
   mode = "server";
-  tokenSecret = "free-ai-router-token";   # the key name, not the value
+  listen = "0.0.0.0:8787";
+  tokenFile = "/run/secrets/free-ai-router-token";
+  providers.opencode.type = "opencode";
 };
 ```
 
-The module declares the secret with `owner = <first user>` and `mode = "0400"`,
-and passes it to the unit through `EnvironmentFile` — sops-nix writes the
-decrypted file at start time, not at build time. `token` and `tokenSecret` are
-different things: the first is the value, the second is the name of the key
-holding it. Setting `tokenSecret = ""` disables substitution entirely.
+The file named by `tokenFile` must exist when the service starts and contain:
+
+```
+FREE_AI_ROUTER_TOKEN=<your token>
+```
+
+It is read through systemd's `EnvironmentFile` and outranks the `token` option,
+so the secret never lands in `/nix/store`. A missing file makes systemd refuse the
+start rather than run the gateway without a token.
+
+Do not put a real token in the `token` option: that value is rendered into the
+world-readable store. It is fine for a throwaway token on a test machine.
+
+If you already manage secrets with sops-nix, point `tokenFile` at the decrypted
+path and declare the secret in the usual way:
+
+```nix
+sops.secrets.free-ai-router-token = {
+  sopsFile = ./secrets.yaml;
+  owner = "myuser";
+  mode = "0400";
+};
+
+services.free-ai-router.tokenFile =
+  config.sops.secrets.free-ai-router-token.path;
+```
+
+The module does not depend on sops-nix in any way; this is only where the two
+meet.
+
+### Using a key or a pool of keys
+
+`credential` decides **whether** a key is presented, and the provider section
+supplies it:
+
+```nix
+services.free-ai-router = {
+  enable = true;
+  credential = "account";           # a key is presented on every request
+
+  providers.opencode = {
+    type = "opencode";
+    # A variable NAME is safer than the key itself: apiKey is rendered into
+    # /nix/store, which is world-readable.
+    apiKeyEnv = "OPENCODE_API_KEY";
+    # or several, for rotation:
+    # settings.keys = [ "sk-one" "sk-two" ];
+  };
+};
+```
+
+`account` without a key is refused — at startup, not at the first request, and
+the message names the fix. The variable in `apiKeyEnv` counts only when it is
+actually set in the service's environment.
+
+`keyRotation` decides what happens on a refusal that names the key: `on` takes
+another key from the pool, `off` passes the refusal to the client. Under
+`credential = "anonymous"` it is ignored — no key is presented there, so there is
+nothing to replace. See [How `credential` decides](#how-credential-decides) for
+the full table.
+
+### Checking the deployment
+
+```sh
+systemctl --user status free-ai-router     # the unit
+free-ai-router config                      # what is in force, and from where
+free-ai-router status                      # providers, addresses, counters
+curl http://127.0.0.1:8787/_control/status # the same, for the monitor
+```
+
+`free-ai-router config` is the quickest sanity check after a switch: it prints
+every axis with its source, so a value that reached the daemon and one that did
+not are told apart immediately.
 
 ## Install on any other distribution
 
@@ -425,6 +544,20 @@ CGO_ENABLED=0 go build -trimpath -o /tmp/far ./cmd/free-ai-router
 
 `CGO_ENABLED=0` is required in this environment (no C compiler) and is the target
 mode anyway.
+
+On NixOS there is a second way, and it is the one to use when the build has to be
+the build the *service* runs: point the module at your package.
+
+```nix
+services.free-ai-router.package =
+  pkgs.callPackage /path/to/free-ai-router/nix/package.nix { };
+# or any derivation of your own, as long as it has bin/free-ai-router
+```
+
+The unit, the configuration and the state stay exactly as they are and only the
+binary changes, so a single `switch` tests your build in place — which is what
+the second-daemon route cannot do, since that one runs beside the service rather
+than as it.
 
 ### Which one to reach for
 
