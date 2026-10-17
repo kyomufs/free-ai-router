@@ -30,6 +30,14 @@ import (
 type settable struct {
 	// command — the subcommand name.
 	command string
+	// aliases — other accepted spellings of the same subcommand.
+	//
+	// The axis has one name, and it is the one the flag, the environment
+	// variable and the configuration key all use. The short command is a
+	// convenience, not a second name: an operator who has just read
+	// "--credential" in the axes table types "credential" the next second, and
+	// a refusal there teaches nothing except that the tool is inconsistent.
+	aliases []string
 	// key — the key in the configuration file.
 	key string
 	// values — the allowed set, the same one validation ranges over.
@@ -42,18 +50,26 @@ type settable struct {
 // that this command and the validation can never disagree.
 func settableAxes() []settable {
 	return []settable{
-		{"mode", "mode", config.ModeValues()},
-		{"cred", "credential", config.CredentialValues()},
-		{"rotate", "key_rotation", config.RotationValues()},
-		{"family", "family", config.FamilyValues()},
+		{command: "mode", key: "mode", values: config.ModeValues()},
+		{command: "cred", aliases: []string{"credential"}, key: "credential", values: config.CredentialValues()},
+		{command: "rotate", aliases: []string{"key_rotation"}, key: "key_rotation", values: config.RotationValues()},
+		{command: "family", key: "family", values: config.FamilyValues()},
 	}
 }
 
 // findSettable returns the writable axis for a subcommand name.
+//
+// The long spelling is derived from the axis name rather than typed out: a
+// second literal would be one more place to forget when an axis is renamed.
 func findSettable(command string) (settable, bool) {
 	for _, s := range settableAxes() {
 		if s.command == command {
 			return s, true
+		}
+		for _, alias := range s.aliases {
+			if alias == command {
+				return s, true
+			}
 		}
 	}
 	return settable{}, false

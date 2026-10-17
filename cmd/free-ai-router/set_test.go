@@ -186,6 +186,34 @@ func TestEverySettableAxisIsInTheDictionary(t *testing.T) {
 	}
 }
 
+// TestTheAxisNameIsAcceptedAsACommand.
+//
+// The axis has ONE name, and it is the one the flag, the environment variable
+// and the configuration key all carry. The short subcommand is a convenience
+// beside it, not a replacement: an operator who has just read "--credential" in
+// the axes table types "credential" a second later, and a refusal there teaches
+// nothing except that the tool disagrees with itself.
+//
+// The check is written against settableAxes rather than a list of literals, so
+// a new axis is covered the moment it is declared.
+func TestTheAxisNameIsAcceptedAsACommand(t *testing.T) {
+	for _, s := range settableAxes() {
+		found, ok := findSettable(s.key)
+		if !ok {
+			t.Errorf("%s: the axis name is not accepted as a subcommand", s.key)
+			continue
+		}
+		if found.command != s.command {
+			t.Errorf("%s resolved to the subcommand %q, want %q", s.key, found.command, s.command)
+		}
+		// Both spellings must reach the same axis, or one of them writes a
+		// different key than it reports.
+		if found.key != s.key {
+			t.Errorf("%s writes %q, want %q", s.key, found.key, s.key)
+		}
+	}
+}
+
 // TestFlagsMoveThePathsBeforeTheFileIsRead is requirement 2 as a test.
 //
 // The override decides WHICH file is read, so it cannot be layered on afterwards:

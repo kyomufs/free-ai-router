@@ -136,11 +136,11 @@ Usage:
   free-ai-router version              version
 
 One axis at a time, kept in the file:
-  free-ai-router mode      [local|server]      deployment form
-  free-ai-router cred      [anonymous|account] what is presented to the provider
-  free-ai-router rotate    [on|off]            spend the pool on a refusal
-  free-ai-router family    [auto|v4|v6]        address family the traffic leaves from
-  free-ai-router <axis>                        without a value: what is in force, and from where
+  free-ai-router mode                     [local|server]      deployment form
+  free-ai-router cred | credential        [anonymous|account] what is presented to the provider
+  free-ai-router rotate | key_rotation    [on|off]            spend the pool on a refusal
+  free-ai-router family                   [auto|v4|v6]        address family the traffic leaves from
+  free-ai-router <axis>                                       without a value: what is in force, and from where
 
 Startup flags:
   --mode                  local | server      deployment form
