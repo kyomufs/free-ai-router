@@ -60,8 +60,24 @@ const DefaultBaseURL = "https://opencode.ai/inference/v1"
 
 // Config is the provider settings, parsed from the gateway configuration.
 type Config struct {
+	// ID is the route name of this section.
+	//
+	// Taken from the configuration rather than fixed here: the same type can
+	// serve several sections — two accounts, two endpoints — and a hard-coded
+	// name would make the second one unreachable, because the client addresses a
+	// provider by the name its section has. Empty falls back to ID, which is what
+	// a caller with nothing to say means.
+	ID provider.ID
 	// BaseURL overrides the provider address.
 	BaseURL string
+	// MetaURL overrides the address of the property catalog.
+	//
+	// The properties of a model — limits, reasoning, price — are published
+	// separately from the list of models, and both addresses belong to the
+	// service. Overridable for the same reason the address is: a deployment that
+	// mirrors the catalog, and a check that must not reach the network, both need
+	// to say where to read it. Empty means the published address.
+	MetaURL string
 	// APIKey is the credentials. An empty string means anonymous access: the
 	// provider sends the anonymity marker rather than a Bearer with a key.
 	APIKey string
@@ -90,6 +106,7 @@ type Config struct {
 type Provider struct {
 	cfg Config
 
+	id           provider.ID
 	baseURL      string
 	anonymousKey string
 	userAgent    string
@@ -104,6 +121,10 @@ type Provider struct {
 func New(cfg Config) (*Provider, error) {
 	p := &Provider{cfg: cfg}
 
+	p.id = cfg.ID
+	if p.id == "" {
+		p.id = ID
+	}
 	p.baseURL = strings.TrimRight(cfg.BaseURL, "/")
 	if p.baseURL == "" {
 		p.baseURL = DefaultBaseURL
@@ -143,13 +164,13 @@ func New(cfg Config) (*Provider, error) {
 	}
 	p.catalog = modelcat.New(
 		p.baseURL, liveModelsPath, httpClient, p.applyHeaders,
-		&metaSource{http: httpClient},
+		&metaSource{http: httpClient, url: cfg.MetaURL},
 	).WithEligibility(isFree)
 	return p, nil
 }
 
 // ID implements provider.Provider.
-func (p *Provider) ID() provider.ID { return ID }
+func (p *Provider) ID() provider.ID { return p.id }
 
 // Models implements provider.Provider.
 //
@@ -210,10 +231,16 @@ func (p *Provider) buildBody(req provider.Request) (map[string]any, error) {
 	}
 
 	body := map[string]any{
-		"model":          req.Model.ID,
-		"messages":       messages,
-		"stream":         true,
-		"stream_options": map[string]any{"include_usage": true},
+		"model":    req.Model.ID,
+		"messages": messages,
+		"stream":   req.Stream,
+	}
+
+	// stream_options asks for the usage counters in a final chunk, and that
+	// only means anything inside a stream. Sent next to stream: false it is at
+	// best ignored and at worst rejected, so it follows the flag.
+	if req.Stream {
+		body["stream_options"] = map[string]any{"include_usage": true}
 	}
 
 	if req.MaxTokens > 0 {

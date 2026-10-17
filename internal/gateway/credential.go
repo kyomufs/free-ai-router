@@ -47,6 +47,11 @@ func (h *Handler) credentialFor(p provider.Provider) string {
 // It is needed on a retry: the current key has been rejected, and it is
 // precisely a different one that is needed. If there is no other, the retry is
 // pointless, and the caller must hand the refusal to the client.
+//
+// This answer also carries the rotation policy: a mechanism with rotation
+// switched off never has an alternative. That is deliberate — "is there another
+// key to try" is one question, and splitting it in two would leave the retry
+// loop checking a setting the mechanism already knows about.
 func (h *Handler) alternativeKey(p provider.Provider, current string) (string, bool) {
 	if h.KeyRotation == nil {
 		return "", false
@@ -58,43 +63,19 @@ func (h *Handler) alternativeKey(p provider.Provider, current string) (string, b
 	return kr.Take(current)
 }
 
-// hasKeyRotation reports whether the mechanism is wired in for the provider.
+// retryFor returns the provider's retry policy, or nil when it has none.
 //
-// A separate method, because the question "are there keys" is asked twice: when
-// issuing and when deciding on a retry.
-func (h *Handler) hasKeyRotation(p provider.Provider) bool {
-	if h.KeyRotation == nil {
-		return false
-	}
-	kr, ok := h.KeyRotation[string(p.ID())]
-	return ok && kr != nil && kr.HasAlternatives()
-}
-
-// keyRotationRegistry is the store of rotation mechanisms by provider.
-//
-// The key is the provider identifier: each has its own keys, and they must not
-// be mixed. The mechanism is shared in implementation but separate in state:
-// otherwise the keys of one service would end up in requests to another.
-type keyRotationRegistry map[string]*capability.KeyRotation
-
-// NewKeyRotationRegistry creates an empty store.
-func NewKeyRotationRegistry() keyRotationRegistry { return keyRotationRegistry{} }
-
-// Add registers a mechanism for a provider.
-func (r keyRotationRegistry) Add(id provider.ID, kr *capability.KeyRotation) {
-	if kr == nil {
-		return
-	}
-	r[string(id)] = kr
-}
-
-// Keys returns the provider's keys for reference and for interfaces.
-func (r keyRotationRegistry) Keys(id provider.ID) []string {
-	kr, ok := r[string(id)]
-	if !ok || kr == nil {
+// nil is not an error state. It says the provider did not ask for its refusals to
+// be repeated, and the refusal then goes to the client as it arrived.
+func (h *Handler) retryFor(p provider.Provider) *capability.Retry {
+	if h.Retry == nil {
 		return nil
 	}
-	return kr.KeysSnapshot()
+	policy, ok := h.Retry[string(p.ID())]
+	if !ok {
+		return nil
+	}
+	return policy
 }
 
 // KeyRotationRegistry is the management of rotation mechanisms.

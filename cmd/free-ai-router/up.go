@@ -15,6 +15,7 @@ import (
 	"free-ai-router/internal/catalog"
 	"free-ai-router/internal/config"
 	"free-ai-router/internal/control"
+	"free-ai-router/internal/egress"
 	"free-ai-router/internal/gateway"
 	"free-ai-router/internal/provider"
 	"free-ai-router/internal/state"
@@ -29,7 +30,11 @@ type daemon struct {
 	keys      *keyRegistry
 	state     *state.Store
 	log       *state.Logger
-	handler   http.Handler
+	// egress observes the address this host's traffic leaves from. It may be
+	// nil, which means the daemon does not know its address and the counters are
+	// kept without one.
+	egress  *egress.Resolver
+	handler http.Handler
 }
 
 // build assembles the daemon from the configuration.
@@ -71,7 +76,7 @@ func build(cfg *config.Config) (*daemon, error) {
 	d.providers = providers
 
 	// The transport.
-	tr, err := transport.NewRegistryWithDefaults().Build(transport.ID(cfg.Transport.Val), cfg.TransportConfig)
+	tr, err := transport.NewRegistryWithDefaults().Build(transport.ID(cfg.Transport.Val), transportSettings(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("transport: %w", err)
 	}
@@ -79,6 +84,18 @@ func build(cfg *config.Config) (*daemon, error) {
 
 	// The key rotation mechanisms.
 	d.keys = newKeyRegistry(cfg, d.providers)
+
+	// The egress address.
+	//
+	// The resolver is handed a way to make a transport of its own for a given
+	// family: the observation has to travel the same path as the requests, or it
+	// describes a different path. A failure to observe is not fatal — the
+	// counters are then kept without an address.
+	d.egress = egress.New(egress.Config{
+		Families:  egress.FamiliesFor(cfg.Family.Val),
+		Transport: func(family string) (http.RoundTripper, error) { return transport.Pinned(family), nil },
+		Log:       d.log,
+	})
 
 	d.handler = d.buildHandler()
 	return d, nil
@@ -103,7 +120,9 @@ func (d *daemon) buildHandler() http.Handler {
 		Transport:       d.transport,
 		State:           d.state,
 		Log:             d.log,
+		Addresses:       d.egress,
 		KeyRotation:     d.keys.rotationMap(),
+		Retry:           retryPolicies(d.cfg, d.providers),
 		DefaultProvider: d.keys.firstProvider(),
 	}
 	gw.AllRoutes(root)
@@ -116,6 +135,7 @@ func (d *daemon) buildHandler() http.Handler {
 		Log:         d.log,
 		Config:      d.cfg,
 		Transports:  transportIDs(),
+		Egress:      d.egress,
 	}
 	ctrl.Routes(root)
 
@@ -133,6 +153,16 @@ func (d *daemon) serve(ctx context.Context) error {
 		return fmt.Errorf("starting the transport: %w", err)
 	}
 	defer d.transport.Stop()
+
+	// The egress observation starts before the listener, on purpose: the first
+	// request must be attributable to an address, and an observation started
+	// later would leave the first request of the session uncounted by address.
+	// It cannot fail in a way that matters — an address that could not be learned
+	// leaves the counters without one.
+	if err := d.egress.Start(ctx); err != nil && d.log != nil {
+		d.log.Warn("egress: %v", err)
+	}
+	defer d.egress.Stop()
 
 	srv := &http.Server{
 		Addr:              d.cfg.Listen.Val,
@@ -198,11 +228,10 @@ func cmdUp(args []string) error {
 		return nil
 	}
 
-	cfg, err := config.Load()
+	cfg, err := loadConfigFor(f)
 	if err != nil {
 		return err
 	}
-	f.applyToConfig(cfg)
 
 	// Printing the effective configuration is useful in itself, and also as a
 	// way to check the merging of the levels without starting anything.
@@ -263,6 +292,25 @@ func version() string {
 		}
 	}
 	return "unknown"
+}
+
+// transportSettings returns the transport's settings with the addressing axis
+// folded in.
+//
+// The family is a first-class axis, while the transport also carries a bag of
+// keys of its own. Folding rather than replacing keeps whatever a particular
+// transport needs; the family key belongs to the axis, so the axis wins — two
+// places holding one value is how the value ends up disagreeing with itself.
+//
+// This is the whole of the plumbing: the transport has pinned the address family
+// all along, and the axis was simply never reaching it.
+func transportSettings(cfg *config.Config) map[string]any {
+	settings := make(map[string]any, len(cfg.TransportConfig)+1)
+	for k, v := range cfg.TransportConfig {
+		settings[k] = v
+	}
+	settings["family"] = cfg.Family.Val
+	return settings
 }
 
 // transportIDs returns the available transports as strings.

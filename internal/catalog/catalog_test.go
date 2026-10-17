@@ -1,8 +1,10 @@
 package catalog
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -102,18 +104,15 @@ func TestMissingTypeIsAnError(t *testing.T) {
 	}
 }
 
-// TestOpenAICompatibleProviderBuilds — the extension point: a new service is
-// hooked up by a section, without code.
-func TestOpenAICompatibleProviderBuilds(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"id":"free-model"}]}`))
-	}))
-	defer srv.Close()
-
+// TestStubProviderBuilds — the second type, and the only one that needs no
+// service.
+//
+// It exists so that the whole path can be exercised without a key and without a
+// network: a section naming it builds, and its catalog is the one the section
+// declares, because there is no service to ask.
+func TestStubProviderBuilds(t *testing.T) {
 	c := cfgWith(t, "zenmux", config.ProviderConfig{
-		Type:    "openai",
-		BaseURL: srv.URL,
+		Type: "stub",
 	})
 
 	reg, err := Build(c)
@@ -132,16 +131,35 @@ func TestOpenAICompatibleProviderBuilds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(models) != 1 || models[0].ID != "free-model" {
-		t.Fatalf("Models = %+v", models)
+	if len(models) != 1 || models[0].ID != "stub-echo" {
+		t.Fatalf("Models = %+v, want the stub's own default", models)
 	}
-	// The `Free` flag is NOT asserted here. It is not this package's decision:
-	// a provider decides what belongs in its catalog, and the openai-compatible
-	// provider applies no eligibility filter at all, so its models carry
-	// whatever the source said — which for a live list with no properties is
-	// nothing. Asserting it here would pin one provider's filtering policy
-	// inside the shared assembly code, and the filter itself is covered where
-	// it lives, in the provider's own checks.
+}
+
+// TestStubCatalogIsDeclaredInSettings — the deliberate exception to "the catalog
+// comes from the service".
+//
+// The exception is safe precisely because there is no service: a declared list
+// can only go stale against something that exists, and this type has nothing to
+// go stale against.
+func TestStubCatalogIsDeclaredInSettings(t *testing.T) {
+	c := cfgWith(t, "mine", config.ProviderConfig{
+		Type:     "stub",
+		Settings: map[string]any{"models": []any{"alpha", "beta"}},
+	})
+
+	reg, err := Build(c)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	p, _ := reg.Get("mine")
+	models, err := p.Models(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 || models[0].ID != "alpha" || models[1].ID != "beta" {
+		t.Fatalf("Models = %+v, want the two the section declared", models)
+	}
 }
 
 // TestProviderIDMatchesSectionName — the route name comes from the section. If
@@ -149,8 +167,8 @@ func TestOpenAICompatibleProviderBuilds(t *testing.T) {
 func TestProviderIDMatchesSectionName(t *testing.T) {
 	c := config.Default()
 	c.Providers = map[string]config.ProviderConfig{
-		"first":  {Type: "openai", BaseURL: "https://a.example/v1"},
-		"second": {Type: "openai", BaseURL: "https://b.example/v1"},
+		"first":  {Type: "stub", BaseURL: "https://a.example/v1"},
+		"second": {Type: "stub", BaseURL: "https://b.example/v1"},
 	}
 
 	reg, err := Build(c)
@@ -168,15 +186,24 @@ func TestProviderIDMatchesSectionName(t *testing.T) {
 	}
 }
 
-// TestOpenAIRequiresBaseURL — a service on the shared protocol has no default
-// address: each one has its own.
-func TestOpenAIRequiresBaseURL(t *testing.T) {
-	c := config.Default()
-	c.Upstream.Val = ""
-	c.Providers = map[string]config.ProviderConfig{"mine": {Type: "openai"}}
-
-	if _, err := Build(c); err == nil {
-		t.Fatal("an openai-compatible provider without a base_url must fail")
+// TestEveryRegisteredTypeBuilds — every name in the type list is one the
+// assembly can actually serve.
+//
+// The list is what the error message and the axes dictionary show the operator,
+// so a name in it that no builder handles is worse than a missing type: it is
+// advice that leads to a failure.
+func TestEveryRegisteredTypeBuilds(t *testing.T) {
+	for _, name := range KnownTypes() {
+		t.Run(name, func(t *testing.T) {
+			c := cfgWith(t, "mine", config.ProviderConfig{Type: name})
+			reg, err := Build(c)
+			if err != nil {
+				t.Fatalf("the listed type %q does not build: %v", name, err)
+			}
+			if _, err := reg.Get("mine"); err != nil {
+				t.Fatalf("the listed type %q built nothing: %v", name, err)
+			}
+		})
 	}
 }
 
@@ -203,13 +230,17 @@ func TestOpenCodeDefaultsToItsKnownURL(t *testing.T) {
 }
 
 // TestSettingsForwardedToProvider — the section's settings reach the provider.
+//
+// The settings map is the extension point for everything a type understands
+// beyond the fields every type shares, and it is passed through untranslated. The
+// check is made on the provider's BEHAVIOUR rather than on a field, because a
+// field would only show that the value was stored, not that anything read it.
 func TestSettingsForwardedToProvider(t *testing.T) {
 	c := cfgWith(t, "mine", config.ProviderConfig{
-		Type:    "openai",
-		BaseURL: "https://example.test/v1",
+		Type: "stub",
 		Settings: map[string]any{
-			"chat_path":  "/custom/chat",
-			"user_agent": "my-agent/1.0",
+			"reply":  "from the settings",
+			"models": []any{"only"},
 		},
 	})
 
@@ -218,52 +249,82 @@ func TestSettingsForwardedToProvider(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	p, _ := reg.Get("mine")
-	prep, err := p.Build(provider.Request{Model: provider.Model{ID: "x"}})
+
+	models, err := p.Models(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(prep.URL, "/custom/chat") {
-		t.Fatalf("URL = %q, want the configured chat path", prep.URL)
+	if len(models) != 1 || models[0].ID != "only" {
+		t.Fatalf("Models = %+v, want the one the section named", models)
 	}
-	if got := prep.Headers.Get("user-agent"); got != "my-agent/1.0" {
-		t.Fatalf("user-agent = %q", got)
+
+	answer, err := p.(provider.Local).RoundTripper().RoundTrip(
+		&http.Request{Method: http.MethodPost, Header: make(http.Header)})
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	defer func() { _ = answer.Body.Close() }()
+	body, err := io.ReadAll(answer.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "from the settings") {
+		t.Fatalf("the reply setting did not reach the provider: %s", body)
 	}
 }
 
 // TestBuildDoesNotMutateConfiguration — assembly must not change the
 // configuration: other consumers read it too.
 func TestBuildDoesNotMutateConfiguration(t *testing.T) {
-	settings := map[string]any{"chat_path": "/original"}
+	models := []any{"only"}
+	settings := map[string]any{"models": models}
 	c := cfgWith(t, "mine", config.ProviderConfig{
-		Type:     "openai",
-		BaseURL:  "https://example.test/v1",
+		Type:     "stub",
 		Settings: settings,
 	})
 
 	if _, err := Build(c); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if settings["chat_path"] != "/original" {
-		t.Fatal("Build mutated the caller's settings map")
+	if len(settings) != 1 {
+		t.Fatalf("Build added keys to the caller's settings map: %v", settings)
+	}
+	if got, ok := settings["models"].([]any); !ok || len(got) != 1 || got[0] != "only" {
+		t.Fatalf("Build rewrote the caller's settings: %v", settings["models"])
+	}
+	if !reflect.DeepEqual(c.Providers["mine"].Settings, settings) {
+		t.Fatalf("Build replaced the settings map on the configuration: %v",
+			c.Providers["mine"].Settings)
 	}
 }
 
-// TestModelsComeFromTheService — the catalog is taken from the service, not
-// from the configuration. That is the main property: a list in the code would
-// drift away from the service, and the client would pick something that no
-// longer exists.
-func TestModelsComeFromTheService(t *testing.T) {
+// TestSectionAddressesReachTheProvider — the section says where to ask, and the
+// provider asks there.
+//
+// Both addresses are asserted at once, because both are the same decision: the
+// list of models and the properties of those models come from the service, and
+// neither belongs in the configuration. The check is made through the catalog
+// request rather than by reading a field, since a field only shows that the value
+// was stored.
+func TestSectionAddressesReachTheProvider(t *testing.T) {
 	var asked []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		asked = append(asked, r.URL.Path)
 		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"id":"live-model"},{"id":"second"}]}`))
+		if r.URL.Path == "/props.json" {
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"live-model-free"},{"id":"second-free"}]}`))
 	}))
 	defer srv.Close()
 
 	c := cfgWith(t, "own", config.ProviderConfig{
-		Type:    "openai",
+		Type:    "opencode",
 		BaseURL: srv.URL,
+		Settings: map[string]any{
+			"meta_url": srv.URL + "/props.json",
+		},
 	})
 
 	reg, err := Build(c)
@@ -276,11 +337,11 @@ func TestModelsComeFromTheService(t *testing.T) {
 		t.Fatalf("Models: %v", err)
 	}
 
-	if len(models) != 2 || models[0].ID != "live-model" {
+	if len(models) != 2 || models[0].ID != "live-model-free" {
 		t.Fatalf("Models = %+v, want the two the service declared", models)
 	}
-	if len(asked) != 1 || asked[0] != "/models" {
-		t.Fatalf("service was asked %v, want GET /models", asked)
+	if len(asked) != 2 || asked[0] != "/models" || asked[1] != "/props.json" {
+		t.Fatalf("the service was asked %v, want the list and then the properties", asked)
 	}
 	// A model without properties is described by defaults rather than rejected:
 	// the service declared it before the property catalog learned about it.
@@ -299,8 +360,11 @@ func TestCatalogFailureIsReported(t *testing.T) {
 	defer srv.Close()
 
 	c := cfgWith(t, "own", config.ProviderConfig{
-		Type:    "openai",
+		Type:    "opencode",
 		BaseURL: srv.URL,
+		Settings: map[string]any{
+			"meta_url": srv.URL + "/props.json",
+		},
 	})
 
 	reg, err := Build(c)
@@ -324,9 +388,9 @@ func TestCatalogFailureIsReported(t *testing.T) {
 func TestRegistryOrderIsStable(t *testing.T) {
 	c := config.Default()
 	c.Providers = map[string]config.ProviderConfig{
-		"c": {Type: "openai", BaseURL: "https://v.test/v1"},
-		"a": {Type: "openai", BaseURL: "https://a.test/v1"},
-		"b": {Type: "openai", BaseURL: "https://b.test/v1"},
+		"c": {Type: "stub", BaseURL: "https://v.test/v1"},
+		"a": {Type: "stub", BaseURL: "https://a.test/v1"},
+		"b": {Type: "stub", BaseURL: "https://b.test/v1"},
 	}
 
 	reg, err := Build(c)

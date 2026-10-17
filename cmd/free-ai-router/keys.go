@@ -1,10 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"strings"
-
 	"free-ai-router/internal/capability"
 	"free-ai-router/internal/config"
 	"free-ai-router/internal/gateway"
@@ -49,7 +45,13 @@ func newKeyRegistry(cfg *config.Config, providers *provider.Registry) *keyRegist
 			continue
 		}
 
-		built, err := capability.NewKeyRotation(map[string]any{"keys": keys})
+		built, err := capability.NewKeyRotation(map[string]any{
+			"keys": keys,
+			// The rotation axis reaches the mechanism here, and only here: the
+			// mechanism is where the answer is used, so this is the one place
+			// that has to know it.
+			"rotate": cfg.RotatesFor(string(id)),
+		})
 		if err != nil {
 			continue // the settings shape has already been checked by the catalog
 		}
@@ -166,11 +168,11 @@ func (r *keyRegistry) RemoveFingerprint(id provider.ID, fp string) bool {
 
 // fingerprint returns a short fingerprint of the key.
 //
-// The length is chosen so that an accidental collision would be improbable while
-// the value stays convenient for the eye and for copying.
+// It delegates to the capability package: the fingerprint printed here has to be
+// the same string the counters and the monitor use, or an operator could not tell
+// which key a refusal belongs to.
 func fingerprint(key string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(key)))
-	return hex.EncodeToString(sum[:4])
+	return capability.Fingerprint(key)
 }
 
 // Build-time check: the registry is obliged to satisfy the interface the control

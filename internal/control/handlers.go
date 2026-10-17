@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"sort"
 
+	"free-ai-router/internal/egress"
 	"free-ai-router/internal/provider"
 	"free-ai-router/internal/state"
 )
@@ -22,8 +23,21 @@ type Status struct {
 	UptimeSeconds int64 `json:"uptime_seconds"`
 	// Providers — the providers with their model and key counts.
 	Providers []ProviderStatus `json:"providers"`
+	// Addresses — the observed egress addresses by family. Empty when the daemon
+	// could not learn them, which is a normal state rather than a failure: the
+	// counters are then kept without an address.
+	Addresses []egress.Address `json:"addresses,omitempty"`
 	// Totals — the aggregate counters for today.
 	Totals state.DaySnapshot `json:"totals_today"`
+}
+
+// EgressStatus is what the control surface needs from the address observer.
+//
+// An interface rather than the concrete resolver: the control surface reads one
+// list, and the package that produced it is the entry point's business. It also
+// keeps the surface testable without a network round trip.
+type EgressStatus interface {
+	Addresses() []egress.Address
 }
 
 // ProviderStatus — the state of a single provider.
@@ -57,6 +71,10 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		if len(snap.Days) > 0 {
 			st.Totals = snap.Days[0]
 		}
+	}
+
+	if h.Egress != nil {
+		st.Addresses = h.Egress.Addresses()
 	}
 
 	if h.Providers != nil {

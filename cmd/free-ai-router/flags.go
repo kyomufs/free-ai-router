@@ -14,12 +14,34 @@ import (
 // The defaults are empty strings, not values from the configuration. An empty
 // string means "flag not set", and that matters: otherwise a run without flags
 // would overwrite the configuration with defaults.
+//
+// EVERY SETTING THE FILE HAS CAN BE SET HERE. That is not convenience: on NixOS
+// the configuration is owned by a module, and testing another value would mean
+// rebuilding. The flags give the same daemon with an unfamiliar setting while
+// touching neither the file nor the module.
 type flags struct {
 	mode      string
 	listen    string
 	token     string
 	transport string
 	upstream  string
+
+	// The mechanism and addressing axes.
+	credential string
+	rotation   string
+	family     string
+
+	// The timeouts, as written on the command line. They are parsed by the
+	// configuration, which is where the duration format is known.
+	firstEventTimeout    string
+	idleTimeout          string
+	reasoningIdleTimeout string
+
+	// configPath and statePath move the two files the daemon reads and writes.
+	// They are resolved before the file is opened, so they are not part of
+	// config.FlagValues.
+	configPath string
+	statePath  string
 
 	// json enables machine-readable output.
 	json bool
@@ -49,6 +71,14 @@ func parseFlags(args []string) (*flags, error) {
 	fs.StringVar(&f.token, "token", "", "access token for server mode")
 	fs.StringVar(&f.transport, "transport", "", "transport: direct")
 	fs.StringVar(&f.upstream, "upstream", "", "default address for providers")
+	fs.StringVar(&f.credential, "credential", "", "what to present: anonymous | account")
+	fs.StringVar(&f.rotation, "rotate", "", "rotate the key on a refusal: on | off")
+	fs.StringVar(&f.family, "family", "", "address family: auto | v4 | v6")
+	fs.StringVar(&f.firstEventTimeout, "first-event-timeout", "", "wait for the first event")
+	fs.StringVar(&f.idleTimeout, "idle-timeout", "", "allowed silence between events")
+	fs.StringVar(&f.reasoningIdleTimeout, "reasoning-idle-timeout", "", "silence allowed while reasoning")
+	fs.StringVar(&f.configPath, "config", "", "configuration file to read instead of the default one")
+	fs.StringVar(&f.statePath, "state", "", "state file to write instead of the default one")
 	fs.BoolVar(&f.json, "json", false, "machine-readable output")
 	fs.BoolVar(&f.printConfig, "print-config", false, "show the effective configuration and exit")
 	fs.BoolVar(&f.detach, "detach", false, "start the daemon in the background")
@@ -63,11 +93,29 @@ func parseFlags(args []string) (*flags, error) {
 	return f, nil
 }
 
-// applyToFlags applies the parsed flags to the configuration.
-func (f *flags) applyToConfig(c interface {
-	ApplyFlags(mode, listen, token, transport, upstream string)
-}) {
-	c.ApplyFlags(f.mode, f.listen, f.token, f.transport, f.upstream)
+// values gathers the value flags in the shape the configuration expects.
+//
+// The path flags are deliberately absent: they are applied to the paths before
+// the file is read, so they never travel with the ordinary values.
+func (f *flags) values() config.FlagValues {
+	return config.FlagValues{
+		Mode:                 f.mode,
+		Listen:               f.listen,
+		Token:                f.token,
+		Transport:            f.transport,
+		Upstream:             f.upstream,
+		Credential:           f.credential,
+		Rotation:             f.rotation,
+		Family:               f.family,
+		FirstEventTimeout:    f.firstEventTimeout,
+		IdleTimeout:          f.idleTimeout,
+		ReasoningIdleTimeout: f.reasoningIdleTimeout,
+	}
+}
+
+// pathOverrides reports the path overrides the flags ask for.
+func (f *flags) pathOverrides() config.PathOverrides {
+	return config.PathOverrides{ConfigFile: f.configPath, StateFile: f.statePath}
 }
 
 // joinArgs assembles a description of the remaining arguments for an error

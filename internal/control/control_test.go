@@ -164,8 +164,8 @@ func TestLocalModeNeedsNoToken(t *testing.T) {
 // and today's counters.
 func TestStatusReportsProvidersAndCounters(t *testing.T) {
 	h, mux := newTestControl(t)
-	h.State.RecordSuccess("m1", "")
-	h.State.RecordRefusal("m2", "")
+	h.State.RecordSuccess(state.Outcome{Model: "m1", Address: "213.14.43.234"})
+	h.State.RecordRefusal(state.Outcome{Model: "m2", Address: "213.14.43.234"})
 
 	rec := get(t, mux, Prefix+"status", nil)
 	if rec.Code != http.StatusOK {
@@ -200,12 +200,29 @@ func TestStatusReportsProvidersAndCounters(t *testing.T) {
 	if st.Totals.OK != 1 || st.Totals.Refused != 1 {
 		t.Fatalf("totals = ok %d refused %d, want 1 and 1", st.Totals.OK, st.Totals.Refused)
 	}
+	if st.Totals.Aborted != 0 {
+		t.Fatalf("totals aborted = %d, want 0", st.Totals.Aborted)
+	}
+
+	// The per-address breakdown travels with the status: it is what the monitor
+	// draws the model matrix from, and a monitor is useless if its data source
+	// drops the dimension.
+	if len(st.Totals.ByAddress) != 1 {
+		t.Fatalf("totals by_address = %+v, want one row", st.Totals.ByAddress)
+	}
+	row := st.Totals.ByAddress[0]
+	if row.Address != "213.14.43.234" || row.Family != "v4" {
+		t.Fatalf("the address row lost its identity: %+v", row)
+	}
+	if row.OK != 1 || row.Refused != 1 {
+		t.Fatalf("the address row lost its counters: %+v", row)
+	}
 }
 
 // TestStatsReportsDays — the counters are handed out by day.
 func TestStatsReportsDays(t *testing.T) {
 	h, mux := newTestControl(t)
-	h.State.RecordSuccess("m1", "")
+	h.State.RecordSuccess(state.Outcome{Model: "m1"})
 
 	rec := get(t, mux, Prefix+"stats", nil)
 	if rec.Code != http.StatusOK {

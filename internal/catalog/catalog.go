@@ -9,7 +9,7 @@
 // enough.
 //
 // TYPE REGISTRATION. A provider type is the name of the code that serves it
-// ("opencode", "openai"). The mapping "type → constructor" is given by the table
+// ("opencode", "stub"). The mapping "type → constructor" is given by the table
 // below. A new type is registered with a single line.
 package catalog
 
@@ -18,11 +18,12 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"free-ai-router/internal/config"
 	"free-ai-router/internal/provider"
-	"free-ai-router/internal/provider/openai"
 	"free-ai-router/internal/provider/opencode"
+	"free-ai-router/internal/provider/stub"
 )
 
 // Builder creates a provider from the configuration settings.
@@ -56,10 +57,11 @@ var builders = map[string]Builder{
 	// A full-fledged provider with a contract of its own.
 	"opencode": buildOpenCode,
 
-	// A template for any OpenAI-compatible service. Named neutrally: both
-	// ZenMux and Freebuff work under it, and so does anything speaking the same
-	// protocol.
-	"openai": buildOpenAI,
+	// A provider that answers from inside the gateway, with no network at all.
+	// It exists so that the whole path — request, refusal, rotation, retry,
+	// counters, monitor — can be exercised without a key and without depending
+	// on someone else's uptime.
+	"stub": buildStub,
 }
 
 // Build assembles the provider registry from the configuration.
@@ -134,7 +136,9 @@ func buildOpenCode(id string, pc config.ProviderConfig, defaults Defaults) (prov
 
 	settings := copySettings(pc.Settings)
 	return opencode.New(opencode.Config{
+		ID:           provider.ID(id),
 		BaseURL:      baseURL,
+		MetaURL:      stringSetting(settings, "meta_url"),
 		APIKey:       pc.ProviderKey(),
 		AnonymousKey: stringSetting(settings, "anonymous_key"),
 		UserAgent:    stringSetting(settings, "user_agent"),
@@ -145,37 +149,100 @@ func buildOpenCode(id string, pc config.ProviderConfig, defaults Defaults) (prov
 	})
 }
 
-// buildOpenAI assembles a provider on the OpenAI-compatible protocol.
+// buildStub assembles the stub provider.
 //
-// This is where the extension point lives: to hook up a new service (ZenMux,
-// Freebuff and the like), a section in the configuration with the type "openai"
-// is enough. No code needs to be written.
-func buildOpenAI(id string, pc config.ProviderConfig, defaults Defaults) (provider.Provider, error) {
-	baseURL := pc.BaseURL
-	if baseURL == "" {
-		// The shared default address is good only as a hint: every service has
-		// its own. But if the operator set upstream globally, taking it is more
-		// reasonable than refusing.
-		baseURL = defaults.Upstream
+// It reads its catalog from the settings rather than asking anyone, because there
+// is no one to ask: the stub IS the service. Nothing else about it is special —
+// once built, it is an ordinary provider, and the gateway takes no special path
+// for it beyond the transport it offers.
+func buildStub(id string, pc config.ProviderConfig, defaults Defaults) (provider.Provider, error) {
+	settings := copySettings(pc.Settings)
+
+	cfg := stub.DefaultConfig()
+	if models := modelListSetting(settings, "models"); len(models) > 0 {
+		cfg.Models = models
 	}
-	if strings.TrimSpace(baseURL) == "" {
-		return nil, fmt.Errorf("base_url is required for an openai-compatible provider")
+	cfg.Fail = intSetting(settings, "fail", 0)
+	cfg.FailStatus = intSetting(settings, "fail_status", 0)
+	cfg.FailText = stringSetting(settings, "fail_text")
+	cfg.Reply = stringSetting(settings, "reply")
+	cfg.NoStream = boolSetting(settings, "no_stream", false)
+	cfg.Delay = durationSetting(settings, "delay_ms", time.Millisecond)
+	cfg.RetryAfter = durationSetting(settings, "retry_after_s", time.Second)
+
+	return stub.NewProvider(provider.ID(id), pc.BaseURL, cfg), nil
+}
+
+// modelListSetting reads a catalog written into the settings.
+//
+// The entries may be bare identifiers or objects, because a hand-written
+// configuration should not have to spell out fields that have defaults.
+func modelListSetting(settings map[string]any, key string) []provider.Model {
+	raw, ok := settings[key]
+	if !ok {
+		return nil
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil
 	}
 
-	settings := copySettings(pc.Settings)
-	return openai.New(openai.Config{
-		ID:             provider.ID(id),
-		BaseURL:        baseURL,
-		APIKey:         pc.ProviderKey(),
-		AnonymousKey:   stringSetting(settings, "anonymous_key"),
-		AuthHeader:     stringSetting(settings, "auth_header"),
-		AuthPrefix:     stringSetting(settings, "auth_prefix"),
-		UserAgent:      stringSetting(settings, "user_agent"),
-		ReasoningField: stringSetting(settings, "reasoning_field"),
-		ChatPath:       stringSetting(settings, "chat_path"),
-		ExtraHeaders:   stringMapSetting(settings, "headers"),
-		HTTP:           defaults.HTTP,
-	})
+	out := make([]provider.Model, 0, len(list))
+	for _, entry := range list {
+		switch v := entry.(type) {
+		case string:
+			out = append(out, provider.Model{ID: v, Name: v, Free: true})
+		case map[string]any:
+			m := provider.Model{
+				ID:     stringSetting(v, "id"),
+				Name:   stringSetting(v, "name"),
+				Free:   boolSetting(v, "free", true),
+				Vision: boolSetting(v, "vision", false),
+			}
+			m.Context = intSetting(v, "context", 0)
+			m.MaxOutput = intSetting(v, "max_output", 0)
+			if m.ID == "" {
+				continue
+			}
+			if m.Name == "" {
+				m.Name = m.ID
+			}
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// intSetting reads an integer setting.
+func intSetting(settings map[string]any, key string, fallback int) int {
+	switch v := settings[key].(type) {
+	case int:
+		return v
+	case float64:
+		return int(v)
+	default:
+		return fallback
+	}
+}
+
+// boolSetting reads a boolean setting.
+func boolSetting(settings map[string]any, key string, fallback bool) bool {
+	if v, ok := settings[key].(bool); ok {
+		return v
+	}
+	return fallback
+}
+
+// durationSetting reads a number of units as a duration.
+//
+// The unit is in the setting's name (delay_ms, retry_after_s), and that is
+// deliberate: a bare number with no unit is a mistake waiting to be made.
+func durationSetting(settings map[string]any, key string, unit time.Duration) time.Duration {
+	n := intSetting(settings, key, 0)
+	if n <= 0 {
+		return 0
+	}
+	return time.Duration(n) * unit
 }
 
 // copySettings copies the settings so that the constructor cannot change the

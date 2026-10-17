@@ -31,6 +31,9 @@ func printEffectiveConfig(cfg *config.Config) error {
 		{"token", maskSecret(cfg.Token.Val), cfg.Token.From},
 		{"transport", cfg.Transport.Val, cfg.Transport.From},
 		{"upstream", cfg.Upstream.Val, cfg.Upstream.From},
+		{"family", cfg.Family.Val, cfg.Family.From},
+		{"credential", cfg.Credential.Val, cfg.Credential.From},
+		{"key_rotation", cfg.KeyRotation.Val, cfg.KeyRotation.From},
 		{"first_event_timeout", cfg.FirstEventTimeout.Val.String(), cfg.FirstEventTimeout.From},
 		{"idle_timeout", cfg.IdleTimeout.Val.String(), cfg.IdleTimeout.From},
 		{"reasoning_idle_timeout", cfg.ReasoningIdleTimeout.Val.String(), cfg.ReasoningIdleTimeout.From},
@@ -65,13 +68,24 @@ func printEffectiveConfig(cfg *config.Config) error {
 			if p.ProviderKey() != "" {
 				key = "present"
 			}
+			// The effective axes are shown next to the declared ones: an
+			// inherited value is invisible otherwise, and the question asked of
+			// this output is what is in force, not what was written down.
+			cred := cfg.CredentialFor(id)
+			if p.Credential != "" {
+				cred += "*"
+			}
+			rotation := cfg.RotationFor(id)
+			if cfg.RotatesFor(id) {
+				rotation += " (active)"
+			}
 			// The number of models is not shown: the catalog lives with the
 			// service and is learned through a request, not from the
 			// configuration. Here, while the settings are being parsed, nobody
 			// has asked for it yet — and showing zero would mean reporting that
 			// there are no models.
-			fmt.Printf("  %-20s type=%-10s %s, key=%s\n",
-				id, p.Type, state, key)
+			fmt.Printf("  %-20s type=%-10s %s, key=%s, credential=%s, rotation=%s\n",
+				id, p.Type, state, key, cred, rotation)
 		}
 	}
 
@@ -116,20 +130,42 @@ Usage:
   free-ai-router keys     [--json]    provider keys
   free-ai-router logs     [-n N]      log
   free-ai-router data     [clear]     what lies on disk, and clearing
-  free-ai-router config   [--print]   effective configuration
-  free-ai-router options  [--json]    available values
+  free-ai-router config   [--json]    effective configuration
+  free-ai-router axes     [--json]    every setting, its values and its defaults
+  free-ai-router systemd  [--install] the systemd user unit, printed or written
   free-ai-router version              version
 
+One axis at a time, kept in the file:
+  free-ai-router mode      [local|server]      deployment form
+  free-ai-router cred      [anonymous|account] what is presented to the provider
+  free-ai-router rotate    [on|off]            spend the pool on a refusal
+  free-ai-router family    [auto|v4|v6]        address family the traffic leaves from
+  free-ai-router <axis>                        without a value: what is in force, and from where
+
 Startup flags:
-  --mode        local | server        deployment form
-  --listen      ADDRESS               listen address
-  --token       VALUE                 token for server mode
-  --transport   direct                transport
-  --upstream    ADDRESS               default address for providers
-  --print-config                      show the configuration and exit
-  --detach                            start in the background
+  --mode                  local | server      deployment form
+  --listen                ADDRESS             listen address
+  --token                 VALUE               token for server mode
+  --transport             direct              transport
+  --upstream              ADDRESS             default address for providers
+  --family                auto | v4 | v6      address family
+  --credential            anonymous | account  what is presented to the provider
+  --rotate                on | off            spend the pool on a refusal naming the key
+  --first-event-timeout   DURATION            wait for the first event
+  --idle-timeout          DURATION            allowed silence between events
+  --reasoning-idle-timeout DURATION           silence allowed while reasoning
+  --config                PATH                configuration file to read
+  --state                 PATH                state file to write
+  --print-config                              show the configuration and exit
+  --detach                                    start in the background
+  --json                                      machine-readable output
 
 Settings are assembled from three levels, the higher overriding the lower:
   flags  →  environment variables  →  config.json
+
+Every setting also has an environment variable, printed by `+"`axes`"+`.
+The one-axis commands write config.json and survive a restart; on NixOS that file
+belongs to the module and is rewritten on every activation, so a change made that
+way lasts until the next switch — pass a flag instead.
 `)
 }

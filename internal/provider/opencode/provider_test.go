@@ -406,6 +406,9 @@ func contains(list []string, want string) bool {
 
 // --- catalog ---
 
+// metaPath is where the catalog checks serve the property document from.
+const metaPath = "/meta.json"
+
 // newCatalogProvider brings up a provider pointing at a stub service.
 //
 // The network is not allowed in catalog checks: it would make the result depend
@@ -420,12 +423,22 @@ func newCatalogProvider(t *testing.T, listBody string, listStatus int) *Provider
 			return
 		}
 		w.Header().Set("content-type", "application/json")
+
+		// The property catalog is served too, and empty. Leaving it to the
+		// published address would put the network back into a check that exists
+		// precisely to keep it out, and the model list usually settles before the
+		// property request times out, so the violation would be invisible.
+		if r.URL.Path == metaPath {
+			_, _ = w.Write([]byte(`{"` + string(ID) + `":{"models":{}}}`))
+			return
+		}
 		_, _ = w.Write([]byte(listBody))
 	}))
 	t.Cleanup(srv.Close)
 
 	p, err := New(Config{
 		BaseURL:   srv.URL,
+		MetaURL:   srv.URL + metaPath,
 		OSName:    "Linux",
 		ShellName: "bash",
 		HTTP:      srv.Client(),
@@ -454,7 +467,7 @@ func newCatalogProviderWithMeta(t *testing.T, listBody string, meta map[string]s
 
 		// The property catalog is one document holding every service; the
 		// gateway reads its own section out of it.
-		if r.URL.Path == "/meta.json" {
+		if r.URL.Path == metaPath {
 			models := make(map[string]any, len(meta))
 			for id, raw := range meta {
 				var parsed map[string]any
@@ -489,7 +502,7 @@ func newCatalogProviderWithMeta(t *testing.T, listBody string, meta map[string]s
 	}
 	p.catalog = modelcat.New(
 		srv.URL, liveModelsPath, srv.Client(), p.applyHeaders,
-		&metaSource{http: srv.Client(), url: srv.URL + "/meta.json"},
+		&metaSource{http: srv.Client(), url: srv.URL + metaPath},
 	).WithEligibility(isFree)
 	return p
 }

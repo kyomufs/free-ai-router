@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -86,6 +88,200 @@ func newTestHandler(t *testing.T, upstream *httptest.Server) (*Handler, *stubPro
 type fixedTransport struct{ rt http.RoundTripper }
 
 func (f fixedTransport) RoundTripper() (http.RoundTripper, error) { return f.rt, nil }
+
+// fixedAddress is an address resolver that always reports the same address.
+type fixedAddress string
+
+func (f fixedAddress) Address() string { return string(f) }
+
+// TestUnreachableUpstreamIsAbortedNotRefused — an unreachable upstream is not
+// the provider refusing anything.
+//
+// The two used to share one counter. The error column of the monitor is read as
+// the provider's fault, so a transport failure counted there blames the
+// provider for a broken path.
+func TestUnreachableUpstreamIsAbortedNotRefused(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer upstream.Close()
+
+	h, p, st := newTestHandler(t, upstream)
+
+	// Point the provider at an address nothing listens on.
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+
+	p.build = func(provider.Request) (provider.Prepared, error) {
+		return provider.Prepared{
+			URL:     deadURL + "/chat/completions",
+			Headers: http.Header{"content-type": []string{"application/json"}},
+			Body:    []byte(`{"model":"model"}`),
+		}, nil
+	}
+
+	rec := postChat(t, h, `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+
+	day := st.Snapshot().Days[0]
+	if day.Aborted != 1 {
+		t.Fatalf("Aborted = %d, want 1", day.Aborted)
+	}
+	if day.Refused != 0 {
+		t.Fatalf("Refused = %d, want 0: an unreachable upstream is not a refusal", day.Refused)
+	}
+}
+
+// TestClientCancellationIsAbortedNotRefused — a client that gives up is not the
+// provider refusing anything.
+//
+// The live log contains lines like
+// `provider "opencode": connection: Post "...": context canceled`, and those
+// landed in the refusal counter before.
+func TestClientCancellationIsAbortedNotRefused(t *testing.T) {
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Hold the request open until the client cancels it.
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer upstream.Close()
+	defer close(release)
+
+	h, _, st := newTestHandler(t, upstream)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`)).WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		h.handleChat(rec, req)
+		close(done)
+	}()
+	cancel()
+	<-done
+
+	day := st.Snapshot().Days[0]
+	if day.Aborted != 1 {
+		t.Fatalf("Aborted = %d, want 1", day.Aborted)
+	}
+	if day.Refused != 0 {
+		t.Fatalf("Refused = %d, want 0: a cancellation is not a provider refusal", day.Refused)
+	}
+}
+
+// TestAnonymousRefusalDoesNotBlameTheKey — with no credential configured there
+// is nothing to rotate, so the provider's verdict on the key is discarded.
+//
+// A provider answers 401/403 for a bare, keyless request as well, and in
+// anonymous mode the gateway substitutes an anonymity marker. Reporting that as
+// a rejected key is a lie in the log, and once a key pool exists it would burn
+// the whole pool on an address-level refusal.
+func TestAnonymousRefusalDoesNotBlameTheKey(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"type":"Forbidden","message":"no"}}`)
+	}))
+	defer upstream.Close()
+
+	h, p, st := newTestHandler(t, upstream)
+
+	// The provider blames the key, the way a real one does on any 401/403.
+	p.classif = func(resp *http.Response, body []byte) provider.Failure {
+		return provider.Failure{
+			Status:      resp.StatusCode,
+			Body:        body,
+			Headers:     resp.Header,
+			KeyRejected: true,
+		}
+	}
+
+	logPath := t.TempDir() + "/app.log"
+	logger, err := state.OpenLogger(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Log = logger
+
+	postChat(t, h, `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`)
+
+	// It is still a refusal: the provider did refuse this request.
+	if day := st.Snapshot().Days[0]; day.Refused != 1 {
+		t.Fatalf("Refused = %d, want 1", day.Refused)
+	}
+
+	// But the log must not claim the key was rejected: none was sent.
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "key rejected: false") {
+		t.Fatalf("the log claims a key was rejected in anonymous mode:\n%s", raw)
+	}
+}
+
+// TestEgressAddressReachesTheCounters — the per-address matrix is drawn from the
+// counters, so the address a request left from must be recorded with it.
+//
+// Behind NAT the local interfaces name an address the provider never sees, so
+// the address is asked of the outside and handed to the gateway.
+func TestEgressAddressReachesTheCounters(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\n")
+	}))
+	defer upstream.Close()
+
+	h, _, st := newTestHandler(t, upstream)
+	h.Addresses = fixedAddress("213.14.43.234")
+
+	postChat(t, h, `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`)
+
+	day := st.Snapshot().Days[0]
+	if len(day.ByAddress) != 1 {
+		t.Fatalf("ByAddress = %+v, want one row", day.ByAddress)
+	}
+	if got := day.ByAddress[0].Address; got != "213.14.43.234" {
+		t.Fatalf("Address = %q", got)
+	}
+	if day.ByAddress[0].OK != 1 {
+		t.Fatalf("the address row did not record the success: %+v", day.ByAddress[0])
+	}
+}
+
+// TestUnknownAddressStillCounts — the address is a property of the network.
+//
+// When it cannot be determined the counters must keep working, and no invented
+// row may appear in the matrix: the operator would read it as a real address the
+// provider limits.
+func TestUnknownAddressStillCounts(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\n")
+	}))
+	defer upstream.Close()
+
+	h, _, st := newTestHandler(t, upstream)
+	// h.Addresses stays nil: the address is unknown.
+
+	postChat(t, h, `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`)
+
+	day := st.Snapshot().Days[0]
+	if day.OK != 1 {
+		t.Fatalf("OK = %d, want 1: an unknown address must not stop the counters", day.OK)
+	}
+	if len(day.ByAddress) != 0 {
+		t.Fatalf("ByAddress = %+v, want no row for an unknown address", day.ByAddress)
+	}
+}
 
 // postChat sends a request to the handler and returns the response.
 func postChat(t *testing.T, h *Handler, body string) *httptest.ResponseRecorder {
@@ -257,5 +453,104 @@ func TestAdmissibleHeaderValuesSurvive(t *testing.T) {
 	}
 	if ids.Message != "msg_13b2d53f2001ia66lVkDLegkmV" {
 		t.Errorf("Message = %q, want the caller value preserved", ids.Message)
+	}
+}
+
+// TestModelCapacitiesAreReported — the catalog describes what the models can do.
+//
+// The numbers exist in the daemon and nowhere else: a provider's catalog is
+// fetched here, and a client asking /v1/models is exactly the party that must
+// not guess. Withholding them pushed the guess onto the client, where a
+// hardcoded window is wrong in both directions — too large and the client
+// overruns the context and sees a refusal it cannot explain, too small and it
+// truncates a conversation that would have fit.
+func TestModelCapacitiesAreReported(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer upstream.Close()
+
+	h, _, _ := newTestHandler(t, upstream)
+	// Two models, one of which declares nothing: the difference between "not
+	// declared" and "declared as zero" has to survive into the answer.
+	h.Providers.Register(&stubProvider{
+		id: "bare",
+		models: []provider.Model{
+			{
+				ID: "vision", Name: "Vision", Context: 200000, MaxOutput: 64000,
+				Vision: true, Reasoning: true, Free: true,
+				ReasoningOptions: []provider.ReasoningOption{
+					// A toggle and a ladder of words, in the provider's own
+					// spelling: "off" comes from the switch, the words from the
+					// ladder, and the duplicate proves deduplication.
+					{Kind: provider.ReasoningToggle},
+					{Kind: provider.ReasoningEffort, Values: []string{"low", "high"}},
+					{Kind: provider.ReasoningEffort, Values: []string{"high", "max"}},
+				},
+			},
+			{ID: "bare"},
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	h.handleModels(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/models → %d, want 200", rec.Code)
+	}
+
+	var body struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("the answer is not JSON: %v", err)
+	}
+
+	byID := map[string]map[string]any{}
+	for _, entry := range body.Data {
+		if id, ok := entry["id"].(string); ok {
+			byID[id] = entry
+		}
+	}
+
+	full, ok := byID["bare/vision"]
+	if !ok {
+		t.Fatalf("bare/vision is missing from the catalog: %v", rec.Body.String())
+	}
+	if got := full["context_length"]; got != float64(200000) {
+		t.Errorf("context_length = %v, want 200000", got)
+	}
+	if got := full["max_completion_tokens"]; got != float64(64000) {
+		t.Errorf("max_completion_tokens = %v, want 64000", got)
+	}
+	if got := full["name"]; got != "Vision" {
+		t.Errorf("name = %v, want Vision", got)
+	}
+	if got := full["reasoning"]; got != true {
+		t.Errorf("reasoning = %v, want true", got)
+	}
+	if got := full["free"]; got != true {
+		t.Errorf("free = %v, want true", got)
+	}
+	if got, want := full["input_modalities"], []any{"text", "image"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("input_modalities = %v, want %v", got, want)
+	}
+	// The ladder reaches the client in the provider's spelling, ordered and
+	// deduplicated: offering a word the provider never declared is a request it
+	// will ignore or refuse.
+	if got, want := full["reasoning_efforts"], []any{"off", "low", "high", "max"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("reasoning_efforts = %v, want %v", got, want)
+	}
+
+	// A model that declared nothing must say nothing, not zero: a client
+	// reading 0 would treat the model as unusable instead of unknown.
+	bare := byID["bare/bare"]
+	if bare == nil {
+		t.Fatal("bare/bare is missing from the catalog")
+	}
+	for _, key := range []string{"context_length", "max_completion_tokens", "reasoning", "reasoning_efforts", "free"} {
+		if _, present := bare[key]; present {
+			t.Errorf("%s is present on a model that declared nothing: %v", key, bare[key])
+		}
+	}
+	if got, want := bare["input_modalities"], []any{"text"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("input_modalities = %v, want %v", got, want)
 	}
 }

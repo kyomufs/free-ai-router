@@ -6,7 +6,8 @@
 // history of providers, nor records of rotations. What remains is exactly what
 // answers the operator's questions:
 //
-//	how many requests went through and how many were refused, by day and by model;
+//	how many requests went through, were refused and were aborted, by day, by
+//	  egress address and by model;
 //	what the daemon did, in a single log.
 //
 // THERE ARE EXACTLY TWO FILES: state and log. This is a deliberate limitation —
@@ -17,16 +18,23 @@ package state
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
 // The state schema. The version is needed so that a future change of shape can
 // tell an old file from a new one instead of parsing it at random.
-const schemaVersion = 1
+//
+// Version 2 added the third outcome ("aborted") and the address dimension. A
+// version 1 file carries neither, and needs no migration branch: the absent
+// counters read as zero, and an empty address breakdown is exactly what such a
+// file means.
+const schemaVersion = 2
 
 // The retention window. It is trimmed on write, so "the file is never deleted"
 // does not mean "it grows without bound".
@@ -44,14 +52,37 @@ type Store struct {
 	days map[string]*DayCounters
 }
 
+// Outcome is one recorded request outcome: which model was used, from which
+// egress address, and with which credential.
+//
+// The three fields are separate so that a call site reads as one sentence
+// instead of a row of positional arguments. An empty model, address or key is
+// legal and means the caller did not know it: it still counts towards the
+// totals, and it creates no entry of its own.
+type Outcome struct {
+	Model   string
+	Address string
+	Key     string
+}
+
 // DayCounters are the counters of a single day.
 type DayCounters struct {
 	// OK is the number of successful requests.
 	OK int64 `json:"ok"`
 	// Refused is the number of refusals received from the provider.
 	Refused int64 `json:"refused"`
+	// Aborted is the number of requests that ended without an answer from the
+	// provider: an unreachable upstream or a cancellation by the client. It is
+	// kept apart from Refused because a client giving up is not the provider
+	// refusing, and the error column of the monitor measures the provider.
+	Aborted int64 `json:"aborted"`
 	// ByModel is the breakdown by model.
 	ByModel map[string]*ModelCounters `json:"by_model,omitempty"`
+	// ByAddress is the breakdown by the egress address the request left from.
+	// Empty when the daemon does not know its address: the provider's anonymous
+	// limiter buckets quota by that address, and the IPv4 and IPv6 buckets are
+	// independent.
+	ByAddress map[string]*AddressCounters `json:"by_address,omitempty"`
 	// Keys is the breakdown by key fingerprints. Empty when running anonymously.
 	Keys map[string]*KeyCounters `json:"keys,omitempty"`
 }
@@ -60,14 +91,37 @@ type DayCounters struct {
 type ModelCounters struct {
 	OK      int64 `json:"ok"`
 	Refused int64 `json:"refused"`
+	Aborted int64 `json:"aborted"`
 	// LastSeen is the moment of the last request to the model.
 	LastSeen int64 `json:"last_seen,omitempty"`
+}
+
+// AddressCounters are the counters of a single egress address.
+type AddressCounters struct {
+	// Family is "v4" or "v6", derived from the address. Empty when the address
+	// cannot be parsed: better an empty cell than a guess. The family is a label
+	// for the operator, not a bucket — the limiter buckets by the address string.
+	Family  string `json:"family,omitempty"`
+	OK      int64  `json:"ok"`
+	Refused int64  `json:"refused"`
+	Aborted int64  `json:"aborted"`
+	// ByModel is the breakdown by model within this address.
+	ByModel map[string]*ModelCounters `json:"by_model,omitempty"`
 }
 
 // KeyCounters are the counters of a single key.
 type KeyCounters struct {
 	OK      int64 `json:"ok"`
 	Refused int64 `json:"refused"`
+	Aborted int64 `json:"aborted"`
+	// LastSeen is the moment the key was last used, whatever the outcome.
+	//
+	// It is separate from LastRefusalAt because the two answer different
+	// questions: this one is "which key is in use right now", and a key that is
+	// working is exactly the one that never appears in the refusal mark. Without
+	// it the monitor could show which keys exist but not which one is spending
+	// the quota.
+	LastSeen int64 `json:"last_seen,omitempty"`
 	// LastRefusalAt is the moment of the last refusal for this key.
 	LastRefusalAt int64 `json:"last_refusal_at,omitempty"`
 }
@@ -105,6 +159,11 @@ func Open(path string) (*Store, error) {
 		return s, fmt.Errorf("state: %s is unreadable, starting empty: %w", path, err)
 	}
 
+	// A version 1 file needs no migration branch. It has neither "aborted" nor
+	// "by_address", so encoding/json leaves both at their zero value, and zero
+	// is what the absence means: no aborts recorded, no address known. The
+	// counters that ARE there are kept as they are — they are the operator's
+	// data — and the next write stamps the file as version 2.
 	if shape.Days != nil {
 		s.days = shape.Days
 	}
@@ -122,24 +181,7 @@ func Open(path string) (*Store, error) {
 //
 // The cost of the write is small: the file is small, and the gateway does not
 // serve many requests. That is cheaper than losing the counters.
-func (s *Store) RecordSuccess(model, keyFingerprint string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	now := time.Now()
-	day := s.dayLocked(now)
-	day.OK++
-	if model != "" {
-		m := s.modelLocked(day, model)
-		m.OK++
-		m.LastSeen = now.UnixMilli()
-	}
-	if keyFingerprint != "" {
-		k := s.keyLocked(day, keyFingerprint)
-		k.OK++
-	}
-	_ = s.saveLocked()
-}
+func (s *Store) RecordSuccess(o Outcome) { s.record(o, outcomeOK) }
 
 // RecordRefusal records a provider refusal.
 //
@@ -147,24 +189,83 @@ func (s *Store) RecordSuccess(model, keyFingerprint string) {
 // counters would not answer the question "what has been spent". And it is saved
 // to disk straight away, for the same reason as a success: a counter that did
 // not survive a restart is useless.
-func (s *Store) RecordRefusal(model, keyFingerprint string) {
+func (s *Store) RecordRefusal(o Outcome) { s.record(o, outcomeRefused) }
+
+// RecordAbort records a request that ended without an answer from the provider:
+// an unreachable upstream or a cancellation by the client.
+//
+// This is deliberately NOT folded into a refusal. A client that gave up is not
+// the provider refusing anything, and the error column of the monitor is read
+// as the provider's fault — counting aborts there would blame it for the
+// client's own timeout.
+func (s *Store) RecordAbort(o Outcome) { s.record(o, outcomeAborted) }
+
+// record applies one outcome at every level of the schema.
+//
+// One body for the three entry points on purpose: every outcome increments the
+// day, the address, the model and the key the same way, and three copies of
+// that would be three places to keep in step.
+func (s *Store) record(o Outcome, kind outcomeKind) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now()
 	day := s.dayLocked(now)
-	day.Refused++
-	if model != "" {
-		m := s.modelLocked(day, model)
-		m.Refused++
+	kind.bump(&day.OK, &day.Refused, &day.Aborted)
+
+	if o.Model != "" {
+		m := s.modelLocked(day, o.Model)
+		kind.bump(&m.OK, &m.Refused, &m.Aborted)
 		m.LastSeen = now.UnixMilli()
 	}
-	if keyFingerprint != "" {
-		k := s.keyLocked(day, keyFingerprint)
-		k.Refused++
-		k.LastRefusalAt = now.UnixMilli()
+
+	// An empty address creates NO entry. The daemon does not always know its
+	// egress address, and a row named "unknown" would be an invented bucket in
+	// the matrix — worse than a missing one. The totals still move.
+	if o.Address != "" {
+		a := s.addressLocked(day, o.Address)
+		kind.bump(&a.OK, &a.Refused, &a.Aborted)
+		if o.Model != "" {
+			am := s.addressModelLocked(a, o.Model)
+			kind.bump(&am.OK, &am.Refused, &am.Aborted)
+			am.LastSeen = now.UnixMilli()
+		}
 	}
+
+	if o.Key != "" {
+		k := s.keyLocked(day, o.Key)
+		kind.bump(&k.OK, &k.Refused, &k.Aborted)
+		// Every outcome moves the mark: the key was used, which is the question
+		// this field answers. Only a refusal moves the refusal mark: an abort is
+		// not a refusal.
+		k.LastSeen = now.UnixMilli()
+		if kind == outcomeRefused {
+			k.LastRefusalAt = now.UnixMilli()
+		}
+	}
+
 	_ = s.saveLocked()
+}
+
+// outcomeKind is which of the three counters an outcome increments.
+type outcomeKind int
+
+const (
+	outcomeOK outcomeKind = iota
+	outcomeRefused
+	outcomeAborted
+)
+
+// bump increments the counter named by the kind.
+func (kind outcomeKind) bump(ok, refused, aborted *int64) {
+	switch kind {
+	case outcomeOK:
+		*ok++
+	case outcomeRefused:
+		*refused++
+	case outcomeAborted:
+		*aborted++
+	}
 }
 
 // dayLocked returns the counters of the day, creating them if necessary.
@@ -177,7 +278,11 @@ func (s *Store) dayLocked(t time.Time) *DayCounters {
 func (s *Store) dayForLocked(key string) *DayCounters {
 	d, ok := s.days[key]
 	if !ok {
-		d = &DayCounters{ByModel: make(map[string]*ModelCounters), Keys: make(map[string]*KeyCounters)}
+		d = &DayCounters{
+			ByModel:   make(map[string]*ModelCounters),
+			ByAddress: make(map[string]*AddressCounters),
+			Keys:      make(map[string]*KeyCounters),
+		}
 		s.days[key] = d
 	}
 	return d
@@ -192,6 +297,35 @@ func (s *Store) modelLocked(day *DayCounters, model string) *ModelCounters {
 	if !ok {
 		m = &ModelCounters{}
 		day.ByModel[model] = m
+	}
+	return m
+}
+
+// addressLocked returns the counters of an egress address within a day.
+//
+// The caller must pass a non-empty address: record checks that before calling.
+// An empty one would be the invented row the schema forbids.
+func (s *Store) addressLocked(day *DayCounters, address string) *AddressCounters {
+	if day.ByAddress == nil {
+		day.ByAddress = make(map[string]*AddressCounters)
+	}
+	a, ok := day.ByAddress[address]
+	if !ok {
+		a = &AddressCounters{Family: addressFamily(address)}
+		day.ByAddress[address] = a
+	}
+	return a
+}
+
+// addressModelLocked returns the counters of a model within an address.
+func (s *Store) addressModelLocked(a *AddressCounters, model string) *ModelCounters {
+	if a.ByModel == nil {
+		a.ByModel = make(map[string]*ModelCounters)
+	}
+	m, ok := a.ByModel[model]
+	if !ok {
+		m = &ModelCounters{}
+		a.ByModel[model] = m
 	}
 	return m
 }
@@ -292,12 +426,14 @@ type Snapshot struct {
 
 // DaySnapshot are the counters of a single day, for reading.
 type DaySnapshot struct {
-	Day      string          `json:"day"`
-	OK       int64           `json:"ok"`
-	Refused  int64           `json:"refused"`
-	ByModel  []ModelSnapshot `json:"by_model,omitempty"`
-	KeyCount int             `json:"key_count,omitempty"`
-	Keys     []KeySnapshot   `json:"keys,omitempty"`
+	Day       string            `json:"day"`
+	OK        int64             `json:"ok"`
+	Refused   int64             `json:"refused"`
+	Aborted   int64             `json:"aborted"`
+	ByModel   []ModelSnapshot   `json:"by_model,omitempty"`
+	ByAddress []AddressSnapshot `json:"by_address,omitempty"`
+	KeyCount  int               `json:"key_count,omitempty"`
+	Keys      []KeySnapshot     `json:"keys,omitempty"`
 }
 
 // ModelSnapshot are the counters of a single model.
@@ -305,22 +441,41 @@ type ModelSnapshot struct {
 	Model    string `json:"model"`
 	OK       int64  `json:"ok"`
 	Refused  int64  `json:"refused"`
+	Aborted  int64  `json:"aborted"`
 	LastSeen int64  `json:"last_seen,omitempty"`
+}
+
+// AddressSnapshot are the counters of a single egress address.
+//
+// It carries its own totals and its own per-model breakdown: that pair is what
+// the terminal matrix draws, and a caller must not have to reassemble it from
+// JSON himself.
+type AddressSnapshot struct {
+	Address string          `json:"address"`
+	Family  string          `json:"family,omitempty"`
+	OK      int64           `json:"ok"`
+	Refused int64           `json:"refused"`
+	Aborted int64           `json:"aborted"`
+	ByModel []ModelSnapshot `json:"by_model,omitempty"`
 }
 
 // KeySnapshot are the counters of a single key.
 type KeySnapshot struct {
-	Fingerprint   string `json:"fingerprint"`
-	OK            int64  `json:"ok"`
-	Refused       int64  `json:"refused"`
-	LastRefusalAt int64  `json:"last_refusal_at,omitempty"`
+	Fingerprint string `json:"fingerprint"`
+	OK          int64  `json:"ok"`
+	Refused     int64  `json:"refused"`
+	Aborted     int64  `json:"aborted"`
+	// LastSeen is the moment the key was last used. Zero means it never was.
+	LastSeen int64 `json:"last_seen,omitempty"`
+	// LastRefusalAt is the moment of the last refusal for this key.
+	LastRefusalAt int64 `json:"last_refusal_at,omitempty"`
 }
 
 // Snapshot returns a snapshot for reading.
 //
-// The order is given explicitly: days from the newest to the oldest, models and
-// keys alphabetically. Without that the output would change between calls, and
-// comparing two snapshots would be impossible.
+// The order is given explicitly: days from the newest to the oldest, models,
+// addresses and keys alphabetically. Without that the output would change
+// between calls, and comparing two snapshots would be impossible.
 func (s *Store) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -340,17 +495,24 @@ func (s *Store) Snapshot() Snapshot {
 
 	for _, key := range keys {
 		d := s.days[key]
-		day := DaySnapshot{Day: key, OK: d.OK, Refused: d.Refused}
+		day := DaySnapshot{Day: key, OK: d.OK, Refused: d.Refused, Aborted: d.Aborted}
 
-		models := make([]string, 0, len(d.ByModel))
-		for name := range d.ByModel {
-			models = append(models, name)
+		day.ByModel = modelSnapshots(d.ByModel)
+
+		addresses := make([]string, 0, len(d.ByAddress))
+		for address := range d.ByAddress {
+			addresses = append(addresses, address)
 		}
-		sort.Strings(models)
-		for _, name := range models {
-			m := d.ByModel[name]
-			day.ByModel = append(day.ByModel, ModelSnapshot{
-				Model: name, OK: m.OK, Refused: m.Refused, LastSeen: m.LastSeen,
+		sort.Strings(addresses)
+		for _, address := range addresses {
+			a := d.ByAddress[address]
+			day.ByAddress = append(day.ByAddress, AddressSnapshot{
+				Address: address,
+				Family:  a.Family,
+				OK:      a.OK,
+				Refused: a.Refused,
+				Aborted: a.Aborted,
+				ByModel: modelSnapshots(a.ByModel),
 			})
 		}
 
@@ -363,11 +525,33 @@ func (s *Store) Snapshot() Snapshot {
 		for _, fp := range fingerprints {
 			k := d.Keys[fp]
 			day.Keys = append(day.Keys, KeySnapshot{
-				Fingerprint: fp, OK: k.OK, Refused: k.Refused, LastRefusalAt: k.LastRefusalAt,
+				Fingerprint: fp, OK: k.OK, Refused: k.Refused, Aborted: k.Aborted,
+				LastSeen: k.LastSeen, LastRefusalAt: k.LastRefusalAt,
 			})
 		}
 
 		out.Days = append(out.Days, day)
+	}
+	return out
+}
+
+// modelSnapshots converts a by-model map into an alphabetically ordered list.
+//
+// The order is given explicitly: without it the output would change between
+// calls, and comparing two snapshots would be impossible.
+func modelSnapshots(byModel map[string]*ModelCounters) []ModelSnapshot {
+	models := make([]string, 0, len(byModel))
+	for name := range byModel {
+		models = append(models, name)
+	}
+	sort.Strings(models)
+
+	out := make([]ModelSnapshot, 0, len(models))
+	for _, name := range models {
+		m := byModel[name]
+		out = append(out, ModelSnapshot{
+			Model: name, OK: m.OK, Refused: m.Refused, Aborted: m.Aborted, LastSeen: m.LastSeen,
+		})
 	}
 	return out
 }
@@ -377,3 +561,26 @@ func (s *Store) Snapshot() Snapshot {
 // The date is taken in UTC: providers reset their daily limits by UTC, and a
 // local date would diverge from their day boundary.
 func dayKey(t time.Time) string { return t.UTC().Format("2006-01-02") }
+
+// addressFamily derives the family of an egress address.
+//
+// The family is read off the literal, not off net.IP.To4: a v4-mapped IPv6
+// literal ("::ffff:1.2.3.4") is an IPv6 string, and the provider's limiter
+// buckets by the string, so folding it in with plain v4 addresses would hide
+// one of the buckets the operator is up against.
+//
+// An address that does not parse yields no family at all. An empty cell is
+// honest; a guessed "v6" is not.
+func addressFamily(address string) string {
+	ip := net.ParseIP(address)
+	if ip == nil {
+		return ""
+	}
+	if strings.IndexByte(address, ':') >= 0 {
+		return "v6"
+	}
+	if ip.To4() != nil {
+		return "v4"
+	}
+	return ""
+}

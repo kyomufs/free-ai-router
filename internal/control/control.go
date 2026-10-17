@@ -53,6 +53,11 @@ type Handler struct {
 	// copied into the interfaces.
 	Transports []string
 
+	// Egress — the observed egress addresses. May be nil, which means the daemon
+	// does not know its address; the status then carries no address block rather
+	// than an empty one.
+	Egress EgressStatus
+
 	// Token and RequireToken — the access check.
 	Token        string
 	RequireToken bool

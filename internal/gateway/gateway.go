@@ -10,18 +10,23 @@
 //     decides about a retry from them. Any repackaging would deprive it of
 //     those signals.
 //
-//  2. THE GATEWAY DOES NOT REPEAT REQUESTS. The client has its own retry
+//  2. THE GATEWAY DOES NOT INVENT RETRIES. The client has its own retry
 //     policy, worked out in detail: an exponent with a ceiling, up to ten
 //     times, with a limit on timeouts. A second policy on top of it would give
-//     thirty requests where the client counted on ten. The only exception is a
-//     key switch: the client has no keys, the gateway does, and from the
-//     client's side it is one request.
+//     thirty requests where the client counted on ten.
+//
+//     There are exactly two exceptions, and both are DECLARED rather than
+//     assumed. A key switch: the client has no keys, the gateway does, and from
+//     the client's side it is still one request. And a repeat that the
+//     provider's own strategy asks for, bounded by that strategy and by the
+//     delay the provider named — a provider without one is never repeated. Both
+//     happen inside one client request, both are recorded as they happen, and
+//     neither changes the policy the client already has.
 package gateway
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,6 +56,17 @@ type Handler struct {
 	// Log is the log.
 	Log *state.Logger
 
+	// Addresses reports the egress address the traffic leaves from.
+	//
+	// The address is not read off the local interfaces: behind NAT they name an
+	// address the provider never sees. It is asked of the outside instead.
+	//
+	// nil means unknown, and that is a legitimate state rather than a missing
+	// setting: the address is a property of the network, and the daemon has to
+	// keep working when it cannot be established. Unknown records no address
+	// row, so the matrix stays honest instead of showing an invented one.
+	Addresses AddressResolver
+
 	// DefaultProvider is the provider used when the client did not name one.
 	// Empty means the first in the registry.
 	DefaultProvider provider.ID
@@ -59,6 +75,13 @@ type Handler struct {
 	// anonymous operation: the provider will substitute its own anonymity
 	// marker, and that is a normal mode, not a missing setting.
 	KeyRotation map[string]*capability.KeyRotation
+
+	// Retry stores the retry policies by provider.
+	//
+	// A provider absent from here does not repeat its refusals, which is the
+	// safe default: a repeat the provider did not ask for spends the client's
+	// time on an answer that will not change.
+	Retry map[string]*capability.Retry
 
 	// Client is the HTTP client. It is set by a field rather than created per
 	// request: the client holds a connection pool, and losing it is not
@@ -215,12 +238,40 @@ func (h *Handler) handleModelsFor(w http.ResponseWriter, r *http.Request, id pro
 // "provider/model", otherwise two models with the same name at different
 // providers would be indistinguishable, and the client could not pick the one
 // it needs.
+//
+// CAPACITIES ARE REPORTED, NOT WITHHELD. An entry carries what the provider
+// declared about the model: the context window, the output ceiling, the
+// modalities, whether it reasons. The daemon is the only party that knows these
+// numbers, and a client that cannot read them has to invent them — and a
+// hardcoded window is wrong in both directions: too large and the client
+// overruns the context, gets a refusal it cannot explain, and has nothing to
+// compact against; too small and it truncates a conversation that would have
+// fit. A capacity the provider did not declare is omitted rather than zeroed,
+// so a client can tell "not declared" from "declared as nothing".
 func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request, only provider.ID) {
 	type modelEntry struct {
 		ID      string `json:"id"`
 		Object  string `json:"object"`
 		Created int64  `json:"created"`
 		OwnedBy string `json:"owned_by"`
+		Name    string `json:"name,omitempty"`
+		// ContextLength is the combined request and response window in tokens.
+		ContextLength int `json:"context_length,omitempty"`
+		// MaxCompletionTokens is the response ceiling in tokens.
+		MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
+		// InputModalities lists what the model accepts ("text", "image").
+		InputModalities []string `json:"input_modalities,omitempty"`
+		// Reasoning reports whether the model reasons.
+		Reasoning bool `json:"reasoning,omitempty"`
+		// ReasoningEfforts lists the effort words the model accepts, in the
+		// provider's own spelling. A client that cannot read them has to offer
+		// a ladder of its own, and a word the provider does not know is either
+		// silently ignored or refused as a bad request.
+		ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
+		// Free repeats the provider's own statement that the model is free. It
+		// is informational: what the gateway sends is decided by the provider
+		// section, not by this field.
+		Free bool `json:"free,omitempty"`
 	}
 
 	var entries []modelEntry
@@ -234,12 +285,27 @@ func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request, only provi
 			continue
 		}
 		for _, m := range models {
-			entries = append(entries, modelEntry{
-				ID:      string(p.ID()) + "/" + m.ID,
-				Object:  "model",
-				Created: modelsCreatedAt,
-				OwnedBy: string(p.ID()),
-			})
+			entry := modelEntry{
+				ID:                  string(p.ID()) + "/" + m.ID,
+				Object:              "model",
+				Created:             modelsCreatedAt,
+				OwnedBy:             string(p.ID()),
+				Name:                m.Name,
+				ContextLength:       m.Context,
+				MaxCompletionTokens: m.MaxOutput,
+				Reasoning:           m.Reasoning,
+				ReasoningEfforts:    reasoningEfforts(m.ReasoningOptions),
+				Free:                m.Free,
+			}
+			// Modalities are always reported, because the gateway itself has to
+			// answer the question "may I attach an image here": a model that
+			// did not declare vision takes text, and saying so is not a guess.
+			if m.Vision {
+				entry.InputModalities = []string{"text", "image"}
+			} else {
+				entry.InputModalities = []string{"text"}
+			}
+			entries = append(entries, entry)
 		}
 	}
 
@@ -255,6 +321,39 @@ func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request, only provi
 // modelsCreatedAt is a constant creation marker for the model list. The list is
 // static, so inventing a new time every time would be dishonest.
 const modelsCreatedAt int64 = 1759718400
+
+// reasoningEfforts reduces the declared forms of effort control to the words a
+// client can pass back in "reasoning_effort".
+//
+// Only two forms name values: an effort ladder contributes its own words, a
+// toggle contributes "off" and nothing else. The second half deserves a word:
+// switching thinking on is not the same as asking for a specific amount of it,
+// so a client that offers "high" where the model only has a switch is guessing
+// at a name the provider may not accept. Order is preserved and duplicates are
+// dropped, because the ladder is shown to a human in the order the provider
+// declared it.
+func reasoningEfforts(options []provider.ReasoningOption) []string {
+	var out []string
+	seen := make(map[string]bool)
+	add := func(values ...string) {
+		for _, v := range values {
+			if v == "" || seen[v] {
+				continue
+			}
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	for _, option := range options {
+		switch option.Kind {
+		case provider.ReasoningToggle:
+			add("off")
+		case provider.ReasoningEffort:
+			add(option.Values...)
+		}
+	}
+	return out
+}
 
 // handleChat handles a request to a model.
 func (h *Handler) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -343,9 +442,15 @@ func (h *Handler) buildRequest(r *http.Request, body map[string]any, p provider.
 		Messages: messages,
 		System:   systemFrom(body),
 		Tools:    tools,
-		// Stream is always true: the upstream is obliged to stream, because
-		// passing the stream to the client rests on it.
-		Stream:  true,
+		// The client's own answer: the shape of the response belongs to the
+		// client that asked for it, and the gateway reproduces the direct call.
+		//
+		// Asking for a stream unconditionally would hand a client that sent
+		// stream: false a body of event-stream chunks under a content type it
+		// never requested — and every non-streaming parser in existence fails on
+		// it. The absent field means the protocol's default, which is a single
+		// response.
+		Stream:  streamRequested(body),
 		Session: ids,
 	}
 
@@ -367,75 +472,172 @@ func (h *Handler) buildRequest(r *http.Request, body map[string]any, p provider.
 
 // forward sends the request to the provider and passes the response to the
 // client.
+//
+// THE ROTATION LOOP lives here. A refusal caused by the key is not the client's
+// answer: another key is taken and the request is repeated, and the client only
+// hears about it when there is nothing left to try. Everything the client could
+// observe happens on the LAST attempt, so the retries stay invisible to it
+// except by the extra latency.
+//
+// ONE OUTCOME PER ATTEMPT is recorded, not one per client request. A refusal
+// that was answered by another key is still a refusal the provider issued, and it
+// is precisely the volume of those that tells the operator which key and which
+// address are burnt. Counting only the client's final answer would hide the
+// failures this mechanism exists to absorb.
 func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Provider, req provider.Request, model provider.Model) {
+	// The egress address is read once per request: it is the address THIS
+	// request left from, and the answer can change between requests.
+	address := h.address()
+
 	prepared, err := p.Build(req)
 	if err != nil {
 		h.warn("provider %q: assembling the request: %v", p.ID(), err)
 		writeError(w, http.StatusInternalServerError, "gateway error", err.Error())
-		h.recordRefusal(model.ID, "")
+		h.recordAbort(model.ID, address, "")
 		return
 	}
 
 	// The gateway substitutes the credentials: the client has no keys.
 	key := h.credentialFor(p)
-	h.applyCredential(p, prepared, key)
 
-	upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost, prepared.URL, bytes.NewReader(prepared.Body))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "gateway error", err.Error())
-		return
-	}
-	upstream.Header = prepared.Headers
+	// The keys already refused in this request. The mechanism knows only the key
+	// it handed out and the current one, so a cycle back to a key already tried
+	// is possible and has to be stopped here — otherwise a two-key pool under a
+	// blanket refusal would ping-pong for as long as the client waits.
+	tried := make(map[string]bool)
 
-	resp, err := h.do(upstream, p)
-	if err != nil {
-		// The upstream is unreachable. This is NOT a provider refusal, and
-		// presenting it as one is not allowed: the client must see a transport
-		// failure.
-		h.warn("provider %q: connection: %v", p.ID(), err)
-		writeError(w, http.StatusBadGateway, "transport", "the provider is unreachable: "+err.Error())
-		h.recordRefusal(model.ID, h.fingerprint(key))
-		return
-	}
-	defer resp.Body.Close()
+	// The number of the attempt being made, counting from one. It belongs to this
+	// request and to this loop: the retry policy's budget is per request, so it
+	// cannot live inside the mechanism.
+	attempt := 1
 
-	if resp.StatusCode >= 400 {
-		h.passThroughError(w, r, p, resp, model, key)
-		return
-	}
+	for {
+		h.applyCredential(p, prepared, key)
 
-	h.passThroughStream(w, resp)
-	h.recordSuccess(model.ID, h.fingerprint(key))
-}
-
-// do performs the request through the gateway's transport.
-func (h *Handler) do(req *http.Request, p provider.Provider) (*http.Response, error) {
-	client := *h.resolveClient()
-	if h.Transport != nil {
-		if rt, err := h.Transport.RoundTripper(); err == nil && rt != nil {
-			client.Transport = rt
+		upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost, prepared.URL, bytes.NewReader(prepared.Body))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "gateway error", err.Error())
+			return
 		}
+		upstream.Header = prepared.Headers
+
+		resp, err := h.do(upstream, p)
+		if err != nil {
+			// The upstream is unreachable. This is NOT a provider refusal, and
+			// presenting it as one is not allowed: the client must see a
+			// transport failure. The same applies to the counters — a broken
+			// path is not the provider refusing.
+			h.warn("provider %q: connection: %v", p.ID(), err)
+			writeError(w, http.StatusBadGateway, "transport", "the provider is unreachable: "+err.Error())
+			h.recordAbort(model.ID, address, h.fingerprint(key))
+			return
+		}
+
+		if resp.StatusCode < 400 {
+			h.passThroughStream(w, resp)
+			resp.Body.Close()
+			h.recordSuccess(model.ID, address, h.fingerprint(key))
+			return
+		}
+
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		resp.Body.Close()
+		if readErr != nil {
+			// The provider refused, but the refusal itself did not arrive
+			// intact. The client gets a transport failure, and the outcome is
+			// recorded as an abort: no refusal reached anyone.
+			h.warn("provider %q: reading the refusal: %v", p.ID(), readErr)
+			writeError(w, http.StatusBadGateway, "transport", "reading the response: "+readErr.Error())
+			h.recordAbort(model.ID, address, h.fingerprint(key))
+			return
+		}
+
+		failure := p.Classify(resp, body)
+
+		// A verdict on the key is only meaningful when a key was sent.
+		//
+		// In anonymous mode the gateway substitutes an anonymity marker rather
+		// than a credential, and a provider answers 401/403 to a bare request as
+		// well. Reporting that as a rejected key is a lie in the log — and it
+		// would spend the whole pool on a refusal that has nothing to do with
+		// any credential.
+		if key == "" {
+			failure.KeyRejected = false
+		}
+
+		if failure.KeyRejected {
+			tried[key] = true
+			if next, ok := h.alternativeKey(p, key); ok && !tried[next] {
+				h.warn("provider %q: key %s refused (%d), trying key %s",
+					p.ID(), h.fingerprint(key), failure.Status, h.fingerprint(next))
+				// The refusal is recorded before the retry: an attempt happened,
+				// and the counters are about attempts.
+				h.recordRefusal(model.ID, address, h.fingerprint(key))
+				key = next
+				continue
+			}
+		}
+
+		// The second family of strategies, and it answers a different question.
+		// Rotation had its chance above and either there is no other key or the
+		// key was not the cause; a refusal that says "not now" is answered by
+		// sending the same request again after the delay the provider named.
+		//
+		// The order of the two is not arbitrary. Switching a key costs nothing and
+		// takes effect at once, while waiting costs the client time — so a refusal
+		// that names the key is never waited out, and one that names only the
+		// moment is never answered with a different key.
+		if failure.Retryable && !failure.KeyRejected {
+			if policy := h.retryFor(p); policy != nil && attempt < policy.Attempts() {
+				delay := policy.Delay(failure.RetryAfter)
+				h.warn("provider %q: %d, repeat %d/%d in %s",
+					p.ID(), failure.Status, attempt, policy.Attempts(), delay)
+				h.recordRefusal(model.ID, address, h.fingerprint(key))
+				attempt++
+
+				// The wait is the client's wait, so it has to end when the client
+				// goes away. Sleeping regardless would keep a connection open —
+				// and a goroutine alive — for a caller that stopped listening.
+				if !h.wait(r.Context(), delay) {
+					h.recordAbort(model.ID, address, h.fingerprint(key))
+					return
+				}
+				continue
+			}
+		}
+
+		h.writeRefusal(w, resp, body, failure, p, model, address, key)
+		return
 	}
-	return client.Do(req)
 }
 
-// passThroughError passes the refusal to the client VERBATIM.
+// wait pauses for a delay, and reports whether it reached the end.
+//
+// false means the caller went away, and the caller of wait must then stop rather
+// than send the request again: nobody is waiting for the answer.
+func (h *Handler) wait(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// writeRefusal passes the refusal to the client VERBATIM.
 //
 // This is where the package's central rule lives. Neither the status, nor the
 // body, nor the headers change. The client looks in the body for the signals it
-// decides by: `error.type`, `error.code`, nested codes, the upstream code
-// marker in a rewritten message. Repackaging would deprive it of those signals,
-// and the decision would diverge from the one the client would have made on a
-// direct call.
-func (h *Handler) passThroughError(w http.ResponseWriter, r *http.Request, p provider.Provider, resp *http.Response, model provider.Model, key string) {
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	if readErr != nil {
-		writeError(w, http.StatusBadGateway, "transport", "reading the response: "+readErr.Error())
-		return
-	}
-
-	failure := p.Classify(resp, body)
-
+// decides by: `error.type`, `error.code`, nested codes, the upstream code marker
+// in a rewritten message. Repackaging would deprive it of those signals, and the
+// decision would diverge from the one the client would have made on a direct
+// call.
+func (h *Handler) writeRefusal(w http.ResponseWriter, resp *http.Response, body []byte, failure provider.Failure, p provider.Provider, model provider.Model, address, key string) {
 	// The headers that influence the client's decision are forwarded as they
 	// are. retry-after and retry-after-ms the client reads itself.
 	for _, name := range []string{"retry-after", "retry-after-ms", "content-type"} {
@@ -450,8 +652,31 @@ func (h *Handler) passThroughError(w http.ResponseWriter, r *http.Request, p pro
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
 
-	h.recordRefusal(model.ID, h.fingerprint(key))
+	h.recordRefusal(model.ID, address, h.fingerprint(key))
 	h.warn("provider %q: refusal %d, key rejected: %t", p.ID(), failure.Status, failure.KeyRejected)
+}
+
+// do performs the request through the gateway's transport.
+func (h *Handler) do(req *http.Request, p provider.Provider) (*http.Response, error) {
+	client := *h.resolveClient()
+
+	// A provider that offers its own transport is answered by it. The order
+	// matters: the provider's transport is more specific than the global one, and
+	// asking the global transport to reach a stub's address would only produce a
+	// name-resolution failure.
+	if local, ok := p.(provider.Local); ok {
+		if rt := local.RoundTripper(); rt != nil {
+			client.Transport = rt
+			return client.Do(req)
+		}
+	}
+
+	if h.Transport != nil {
+		if rt, err := h.Transport.RoundTripper(); err == nil && rt != nil {
+			client.Transport = rt
+		}
+	}
+	return client.Do(req)
 }
 
 // passThroughStream passes the stream to the client.
@@ -482,6 +707,16 @@ func (h *Handler) passThroughStream(w http.ResponseWriter, resp *http.Response) 
 			return
 		}
 	}
+}
+
+// streamRequested reports whether the client asked for an event stream.
+//
+// Only a real boolean counts. Anything else — absent, null, a string — is the
+// protocol's default, and the default is a single response: guessing at a truthy
+// value here would send a client an answer whose shape it did not ask for.
+func streamRequested(body map[string]any) bool {
+	v, ok := body["stream"].(bool)
+	return ok && v
 }
 
 // applyCredential substitutes the credentials into the assembled request.
@@ -537,17 +772,49 @@ func (h *Handler) warn(format string, args ...any) {
 	}
 }
 
+// AddressResolver reports the address the daemon's traffic leaves from.
+//
+// An interface rather than a string field because resolving it costs a network
+// round trip and the answer changes: the implementation caches it and refreshes
+// it in the background.
+type AddressResolver interface {
+	// Address returns the egress address, or an empty string when it is not
+	// known.
+	Address() string
+}
+
+// address returns the egress address, or an empty string when unknowable.
+func (h *Handler) address() string {
+	if h.Addresses == nil {
+		return ""
+	}
+	return h.Addresses.Address()
+}
+
 // recordSuccess records a successful request.
-func (h *Handler) recordSuccess(model, key string) {
+func (h *Handler) recordSuccess(model, address, key string) {
 	if h.State != nil {
-		h.State.RecordSuccess(model, key)
+		h.State.RecordSuccess(state.Outcome{Model: model, Address: address, Key: key})
 	}
 }
 
-// recordRefusal records a refusal.
-func (h *Handler) recordRefusal(model, key string) {
+// recordRefusal records a refusal received from the provider.
+func (h *Handler) recordRefusal(model, address, key string) {
 	if h.State != nil {
-		h.State.RecordRefusal(model, key)
+		h.State.RecordRefusal(state.Outcome{Model: model, Address: address, Key: key})
+	}
+}
+
+// recordAbort records a request that ended without an answer from the provider.
+//
+// Kept apart from a refusal on purpose. A client that gave up, an unreachable
+// upstream or a failure inside the gateway are not the provider refusing
+// anything, and the error column of the monitor is read as the provider's
+// fault. Mixing them in would make the counters the client decides by — which
+// are exactly the retry signals — report someone else's failure.
+func (h *Handler) recordAbort(model, address, key string) {
+	if h.State != nil {
+		h.State.RecordAbort(state.Outcome{Model: model, Address: address, Key: key})
 	}
 }
 
@@ -562,7 +829,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 //
 // The envelope is used ONLY for the gateway's own errors: an invalid request,
 // an unreachable upstream, an unknown model. Provider refusals do not GO
-// through it — they are passed on verbatim (see passThroughError).
+// through it — they are passed on verbatim (see writeRefusal).
 //
 // type and code carry the same string: the client has one vocabulary to branch
 // on, and a second, different one would force it to keep a mapping between
@@ -592,10 +859,11 @@ func Timeout(prepared provider.Prepared, fallback time.Duration) time.Duration {
 //
 // The key itself never reaches the state: it is a secret, and a short
 // fingerprint is enough to answer the question "what has been spent".
+// fingerprint names a credential without writing it.
+//
+// It delegates to the capability package because the counters in the state file
+// and the monitor that reads them compare these strings: two implementations
+// that disagreed by a trimmed space would silently split one key into two.
 func (h *Handler) fingerprint(key string) string {
-	if key == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:4])
+	return capability.Fingerprint(key)
 }

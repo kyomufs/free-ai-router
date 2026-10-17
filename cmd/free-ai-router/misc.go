@@ -24,7 +24,7 @@ func cmdStop(args []string) error {
 		return err
 	}
 
-	pid, pidErr := findDaemonPID()
+	pid, pidErr := findDaemonPID(cfg.Paths.PIDFile)
 	if pidErr != nil || pid == 0 {
 		return fmt.Errorf("daemon not found: there is nothing to stop")
 	}
@@ -230,12 +230,7 @@ func removePIDFile(path string) {
 // holds may belong to an unrelated process that the system happened to assign
 // it to. Signalling that process would be worse than reporting nothing, so a
 // dead identifier is treated exactly like an absent file.
-func findDaemonPID() (int, error) {
-	cfg, err := config.Load()
-	if err != nil {
-		return 0, err
-	}
-	path := cfg.Paths.PIDFile
+func findDaemonPID(path string) (int, error) {
 	if path == "" {
 		return 0, nil
 	}

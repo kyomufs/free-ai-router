@@ -114,6 +114,27 @@ func (p *Provider) Classify(resp *http.Response, body []byte) provider.Failure {
 		f.KeyRejected = true
 	}
 
+	// Is a repeat worth it?
+	//
+	// This is a DIFFERENT question from the key one, and the two must not be
+	// collapsed. A rate limit that names no quota is a momentary burst limit: the
+	// same credentials and the same request sent again after the delay in
+	// retry-after will go through. A quota is not — waiting does not restore an
+	// exhausted key, and repeating would only spend time.
+	//
+	// It also cannot be read off the status alone: 429 carries both meanings here,
+	// and telling them apart is exactly what this provider knows and the caller
+	// does not.
+	switch {
+	case f.KeyRejected:
+		// The key is the cause, so rotation is the answer, not waiting.
+		f.Retryable = false
+	case resp.StatusCode == http.StatusTooManyRequests,
+		resp.StatusCode == http.StatusRequestTimeout,
+		resp.StatusCode >= 500:
+		f.Retryable = true
+	}
+
 	return f
 }
 

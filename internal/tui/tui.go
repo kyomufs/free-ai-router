@@ -1,139 +1,277 @@
-// Package tui is the built-in terminal interface.
+// Package tui is the built-in terminal monitor.
 //
-// WHY BUILT IN, AND NOT A SCRIPT. An external wrapper cannot be part of the
-// contract: it may be absent, require other people's programs, diverge from the
-// binary in its knowledge of the catalogs, and is not tested as project code.
-// An interface inside the binary has none of these properties by construction.
+// WHAT IT IS. A monitor, and deliberately nothing more. It reads; it never
+// writes. The reason is not caution, it is the project's rule about where
+// settings live: every value is declared once, in the binary's own axes, and is
+// set through the flags on any distribution or through the configuration on a
+// managed host. An interface that also edited settings would be a second place
+// where they can be changed, and the two would drift — a value changed in the
+// monitor would look permanent and be gone at the next activation, because the
+// configuration file belongs to the host's manager.
 //
-// WHAT THE INTERFACE DOES NOT DO:
+// So the monitor answers four questions, in four blocks:
 //
-//   - It does NOT take over the terminal. Full-screen mode is not entered: the
-//     interface coexists with the terminal, and the output stays fit for
-//     copying.
-//   - It does NOT hold state. Every screen reads the data afresh, and changes
-//     go through the same code as the commands: settings have one place where
-//     they are applied.
-//   - It requires nothing beyond the binary.
+//   - WHICH KEY IS IN USE, and whether key rotation is on.
+//   - HOW MUCH EACH ADDRESS HAS SPENT, per model — the matrix. This is the block
+//     that exists: the provider's anonymous tier is limited per address rather
+//     than per key, so a single total cannot tell a spent address from a spent
+//     key, and the address is the only row key that can.
+//   - WHAT HAPPENED — the journal, scrollable, filterable, wrap togglable.
+//   - WHAT THE DAEMON IS — the axes in effect and where each value came from.
+//
+// WHY IT IS BUILT IN rather than a script: an external wrapper may be absent,
+// may need other people's programs, and may disagree with the binary about the
+// catalogs. An interface inside the binary has none of those properties.
+//
+// WHY NOT FULL SCREEN. Alt-screen is not entered. The output of the monitor
+// stays in the terminal's scrollback, where it can be selected and copied — a
+// diagnostic that erases itself on exit cannot be quoted in a bug report.
 package tui
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
 )
 
-// Screen is a section of the interface.
-//
-// The screens are split by the question they answer: what is happening now,
-// what it costs, and what can be changed. Three questions — three screens, and
-// no nested menus.
-type Screen int
+// Block is one of the monitor's panels.
+type Block int
 
 const (
-	// ScreenStatus is the daemon state, the axes, the counters.
-	ScreenStatus Screen = iota
-	// ScreenKeys are the provider keys.
-	ScreenKeys
-	// ScreenControl are the mutable settings.
-	ScreenControl
+	// BlockKeys is the key block: the pool, the active key, the rotation state.
+	BlockKeys Block = iota
+	// BlockMatrix is the per-address, per-model matrix.
+	BlockMatrix
+	// BlockLogs is the journal.
+	BlockLogs
 )
 
-// String returns the screen name.
-func (s Screen) String() string {
-	switch s {
-	case ScreenStatus:
-		return "status"
-	case ScreenKeys:
+// String returns the block name.
+func (b Block) String() string {
+	switch b {
+	case BlockKeys:
 		return "keys"
-	case ScreenControl:
-		return "settings"
+	case BlockMatrix:
+		return "addresses"
+	case BlockLogs:
+		return "log"
 	default:
 		return "unknown"
 	}
 }
 
-// DataSource supplies the data for the screens.
+// blockCount is how many blocks the monitor has.
+const blockCount = 3
+
+// DataSource supplies a reading of the daemon's state.
 //
-// An interface rather than a concrete type: the interface must not know where
-// the data comes from — from the daemon or from the configuration. That makes
-// it testable without starting the daemon.
+// One method rather than one per block: the blocks describe one moment, and
+// three separate calls could return three moments — a key counted in the key
+// block and not in the matrix, with no way for the reader to tell which is
+// current.
 type DataSource interface {
-	// Status returns the rows for the status screen.
-	Status() ([]Section, error)
-	// Keys returns the rows for the keys screen.
-	Keys() ([]Section, error)
-	// Options returns the rows for the settings screen.
-	Options() ([]Section, error)
+	// Observe returns one reading.
+	Observe() (Observation, error)
 }
 
-// Section is a screen section with a heading and rows.
-type Section struct {
-	// Title is the section heading.
-	Title string
-	// Rows are the rows in the form "name — value".
-	Rows []Row
+// Observation is a single reading of everything the monitor shows.
+type Observation struct {
+	// At is the moment of the reading.
+	At time.Time
+	// Daemon describes the deployment: the axes in effect, with their sources.
+	Daemon []Row
+	// Providers are the providers, their credentials and their key pools.
+	Providers []ProviderState
+	// Addresses are the matrix rows: one per egress address.
+	Addresses []AddressRow
+	// Totals are the counters for the current day.
+	Totals Totals
+	// Logs are the tail of the journal, oldest line first.
+	Logs []string
+	// LogPath is where the journal lives, so that a reader can find it.
+	LogPath string
+	// Notes are facts the reader should not have to infer: an unreachable
+	// daemon, a missing journal, a provider whose catalog was not asked for.
+	Notes []string
 }
 
-// Row is a single row of a section.
+// Row is a name and a value, with the origin of the value.
 type Row struct {
-	// Name is the name of the setting or field.
+	// Name is the axis name.
 	Name string
-	// Value is the value.
+	// Value is the value in effect.
 	Value string
-	// Note is an explanation. It is shown where the value needs explaining —
-	// for instance when the setting is not in effect.
-	Note string
+	// Source is where the value came from: a flag, the environment, the file, or
+	// a built-in default.
+	Source string
 }
 
-// Model is the interface state.
-type Model struct {
-	// Source supplies the data.
-	Source DataSource
-	// Screen is the current screen.
-	Screen Screen
-	// Cursor is the selected row on the settings screen.
-	Cursor int
-	// sections is the data of the current screen.
-	sections []Section
-	// err is the data-reading error.
+// ProviderState is one provider as the monitor shows it.
+type ProviderState struct {
+	// ID is the provider's identifier.
+	ID string
+	// Type is the constructor used for it.
+	Type string
+	// Credential is the axis value: "anonymous" or "account".
+	Credential string
+	// RotationOn is the key-rotation axis: whether the key may be swapped on a
+	// refusal. It is shown even when there is nothing to swap, because "off" and
+	// "nothing to rotate" are different facts and only one of them is a decision.
+	RotationOn bool
+	// Keys is the pool, in rotation order.
+	Keys []KeyState
+	// Active is the fingerprint of the key in use, empty when unknown.
+	//
+	// It is inferred from the counters rather than read from the daemon: the
+	// monitor is a separate process, and the rotating pointer lives in the
+	// daemon's memory. The inferring is sound for a key that was used at least
+	// once, and the block says so instead of pretending otherwise.
+	Active string
+}
+
+// KeyState is one key of the pool.
+type KeyState struct {
+	// Fingerprint identifies the key without printing it.
+	Fingerprint string
+	// OK, Refused and Aborted are its counters.
+	OK, Refused, Aborted int64
+	// LastSeen is when it was last used. Zero means never.
+	LastSeen time.Time
+	// LastRefusal is when it was last refused. Zero means never.
+	LastRefusal time.Time
+}
+
+// AddressRow is one row of the matrix: one egress address.
+type AddressRow struct {
+	// Address is the egress address as the provider sees it.
+	Address string
+	// Family is "v4" or "v6".
+	Family string
+	// OK is the number of requests the provider answered.
+	OK int64
+	// Error is the number of requests the provider refused.
+	//
+	// "Refused" in the counters and "ERROR" in the column: the column name is the
+	// one the operator reads, the field name is the one the counter has.
+	Error int64
+	// Aborted is the number of requests that ended inside the gateway or were
+	// cancelled by the client. It is kept apart from Error on purpose: an abort
+	// is not a signal from the provider, and adding it to the refusals would make
+	// a spent address and a broken client look alike.
+	Aborted int64
+	// Models are the per-model counters of this address.
+	Models []ModelRow
+	// LastSeen is when the address was last used.
+	LastSeen time.Time
+}
+
+// ModelRow is one model's counters under one address.
+type ModelRow struct {
+	// Model is the model identifier.
+	Model string
+	// OK is the number of answers.
+	OK int64
+	// Error is the number of refusals.
+	Error int64
+	// Aborted is the number of aborts.
+	Aborted int64
+}
+
+// Totals are the counters of the day.
+type Totals struct {
+	// Day is the date the counters belong to.
+	Day string
+	// OK, Refused and Aborted are the totals.
+	OK, Refused, Aborted int64
+}
+
+// readMsg carries a completed reading.
+type readMsg struct {
+	obs Observation
 	err error
+}
+
+// Model is the monitor's state.
+type Model struct {
+	// Source supplies the readings.
+	Source DataSource
+
+	// obs is the current reading.
+	obs Observation
+	// err is the last reading failure, if any.
+	err error
+	// loaded is whether a reading has arrived.
+	loaded bool
+
+	// Focus is the block that receives the movement keys.
+	Focus Block
+	// Scroll is the line offset of each block.
+	Scroll [blockCount]int
+	// Follow pins the log block to its end while new lines arrive.
+	Follow bool
+	// Wrap is whether the log block wraps long lines.
+	Wrap bool
+	// filter is the current log filter.
+	filter string
+	// editing is whether the filter is being typed.
+	editing bool
+	// filterDraft is the filter being typed.
+	filterDraft string
+	// filterBefore is the filter that was in force when the editor opened, kept
+	// so that a cancelled edit can be undone.
+	filterBefore string
+	// filtered holds the log lines after the filter is applied.
+	filtered []logLine
+
+	// pal is the style set, rebuilt when the terminal reports its background.
+	pal palette
+
 	// width and height are the terminal size.
 	width, height int
 	// quitting marks that an exit has been requested.
 	quitting bool
 }
 
-// New creates the interface.
-func New(source DataSource) Model {
-	return Model{Source: source}
+// logLine is a filtered log line with its position in the source list.
+type logLine struct {
+	// text is the line.
+	text string
+	// index is its position in the unfiltered log.
+	index int
 }
 
-// Init implements tea.Model.
-func (m Model) Init() tea.Cmd { return m.load() }
-
-// load reads the data of the current screen.
-func (m Model) load() tea.Cmd {
-	source, screen := m.Source, m.Screen
-	return func() tea.Msg {
-		if source == nil {
-			return loadedMsg{}
-		}
-		var (
-			sections []Section
-			err      error
-		)
-		switch screen {
-		case ScreenKeys:
-			sections, err = source.Keys()
-		case ScreenControl:
-			sections, err = source.Options()
-		default:
-			sections, err = source.Status()
-		}
-		return loadedMsg{sections: sections, err: err}
+// New creates the monitor.
+func New(source DataSource) Model {
+	return Model{
+		Source: source,
+		Follow: true,
+		Wrap:   true,
+		// The dark palette until the terminal says otherwise: that is what a
+		// terminal normally is, and the answer arrives in the first exchange.
+		pal: newPalette(true),
 	}
 }
 
-// loadedMsg is the result of reading the data.
-type loadedMsg struct {
-	sections []Section
-	err      error
+// Init implements tea.Model.
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(m.read(), tea.RequestBackgroundColor)
 }
+
+// read returns the command that performs a reading.
+func (m Model) read() tea.Cmd {
+	source := m.Source
+	return func() tea.Msg {
+		if source == nil {
+			return readMsg{}
+		}
+		obs, err := source.Observe()
+		return readMsg{obs: obs, err: err}
+	}
+}
+
+// tailLimit is how many journal lines are read.
+//
+// A few hundred rather than the whole file: the journal is rotated by size, and
+// the reader is looking at what just happened. The filter runs over what was
+// read, and it is named in the block so that the bound is never a silent one.
+const tailLimit = 500

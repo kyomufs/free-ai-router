@@ -1,199 +1,237 @@
 package main
 
 import (
-	"fmt"
+	"strings"
+	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
-	"free-ai-router/internal/catalog"
 	"free-ai-router/internal/config"
-	"free-ai-router/internal/provider"
 	"free-ai-router/internal/state"
 	"free-ai-router/internal/tui"
 )
 
-// cmdTUI starts the terminal interface.
+// cmdTUI starts the terminal monitor.
 //
-// The interface reads data with the same code as the read commands: each screen
-// has one source, and a divergence between what the interface shows and what the
-// command prints is impossible by construction.
+// The monitor reads; it never writes. Every value it displays is declared once,
+// in the binary's axes, and set through flags or through the host's
+// configuration — so there is no path from this command to a setting, and the
+// help text says as much.
 func cmdTUI(args []string) error {
 	cfg, err := loadConfigSimple(args)
 	if err != nil || cfg == nil {
 		return err
 	}
 
-	source, err := newTUISource(cfg)
-	if err != nil {
-		return err
-	}
-
-	model := tui.New(source)
-	// Full-screen mode is NOT enabled: the interface coexists with the terminal,
-	// and the output stays fit for copying.
+	model := tui.New(newTUISource(cfg))
+	// Full-screen mode is NOT enabled: the monitor coexists with the terminal,
+	// and what it printed stays in the scrollback where it can be copied.
 	program := tea.NewProgram(model)
 	_, err = program.Run()
 	return err
 }
 
-// tuiSource serves data to the interface screens.
+// tuiSource serves readings to the monitor.
 type tuiSource struct {
-	cfg       *config.Config
-	providers *provider.Registry
+	cfg *config.Config
 }
 
 // newTUISource assembles the data source.
-func newTUISource(cfg *config.Config) (*tuiSource, error) {
-	providers, err := catalog.Build(cfg)
-	if err != nil {
-		// The providers may not be configured — the interface must still
-		// open: the operator needs to see the configuration and the counters
-		// to understand what exactly is not configured.
-		return &tuiSource{cfg: cfg}, nil
-	}
-	return &tuiSource{cfg: cfg, providers: providers}, nil
-}
-
-// Status implements tui.DataSource.
-func (s *tuiSource) Status() ([]tui.Section, error) {
-	sections := []tui.Section{
-		{
-			Title: "daemon",
-			Rows: []tui.Row{
-				{Name: "mode", Value: s.cfg.Mode.Val, Note: "source: " + string(s.cfg.Mode.From)},
-				{Name: "address", Value: s.cfg.Listen.Val},
-				{Name: "transport", Value: s.cfg.Transport.Val},
-			},
-		},
-	}
-
-	// Providers.
-	var providerRows []tui.Row
-	for _, id := range providerNames(s.cfg) {
-		pc := s.cfg.Providers[id]
-		keys := "none"
-		if pc.ProviderKey() != "" {
-			keys = "present"
-		}
-		providerRows = append(providerRows, tui.Row{
-			Name: id,
-			// The number of models is not shown in the overview row: the
-			// catalog lives with the service and is learned through a request.
-			// A request to render the list would be a network call, and the
-			// settings overview is obliged to answer instantly.
-			Value: fmt.Sprintf("type %s, key %s", pc.Type, keys),
-		})
-	}
-	if len(providerRows) == 0 {
-		providerRows = append(providerRows, tui.Row{
-			Name:  "none",
-			Value: "no providers configured",
-			Note:  "add a providers section to the configuration",
-		})
-	}
-	sections = append(sections, tui.Section{Title: "providers", Rows: providerRows})
-
-	// Counters.
-	st, err := state.Open(s.cfg.Paths.StateFile)
-	if err != nil && st == nil {
-		return sections, err
-	}
-	if st != nil {
-		snap := st.Snapshot()
-		var rows []tui.Row
-		if len(snap.Days) == 0 {
-			rows = append(rows, tui.Row{Name: "no data", Value: "there have been no requests yet"})
-		}
-		for i, d := range snap.Days {
-			if i >= 7 {
-				break // we show a week: more does not fit and is not needed
-			}
-			rows = append(rows, tui.Row{
-				Name:  d.Day,
-				Value: fmt.Sprintf("ok %d, refused %d", d.OK, d.Refused),
-			})
-		}
-		sections = append(sections, tui.Section{Title: "counters", Rows: rows})
-	}
-
-	return sections, nil
-}
-
-// Keys implements tui.DataSource.
-func (s *tuiSource) Keys() ([]tui.Section, error) {
-	var rows []tui.Row
-	for _, id := range providerNames(s.cfg) {
-		pc := s.cfg.Providers[id]
-		keys := keysFromConfig(pc)
-		if len(keys) == 0 {
-			rows = append(rows, tui.Row{
-				Name:  id,
-				Value: "no keys",
-				Note:  "works anonymously",
-			})
-			continue
-		}
-		for _, k := range keys {
-			fp := ""
-			if str, ok := k.(string); ok {
-				fp = fingerprint(str)
-			}
-			rows = append(rows, tui.Row{Name: id, Value: fp})
-		}
-	}
-	if len(rows) == 0 {
-		rows = append(rows, tui.Row{Name: "none", Value: "no providers configured"})
-	}
-	return []tui.Section{
-		{
-			Title: "provider keys",
-			Rows:  rows,
-		},
-		{
-			Title: "explanation",
-			Rows: []tui.Row{
-				{Name: "", Value: "fingerprints are shown, not keys"},
-				{Name: "", Value: "a fingerprint is enough to tell keys apart"},
-			},
-		},
-	}, nil
-}
-
-// Options implements tui.DataSource.
 //
-// The row about key rotation is always shown, but when there are no keys it
-// carries an explanation rather than a value: a setting that toggles nothing
-// reads as broken.
-func (s *tuiSource) Options() ([]tui.Section, error) {
-	var rows []tui.Row
-	for _, id := range providerNames(s.cfg) {
-		pc := s.cfg.Providers[id]
-		if len(keysFromConfig(pc)) == 0 {
-			rows = append(rows, tui.Row{
-				Name:  "key rotation: " + id,
-				Value: "unavailable",
-				Note:  "the provider has no keys",
-			})
-			continue
-		}
-		rows = append(rows, tui.Row{
-			Name:  "key rotation: " + id,
-			Value: "enabled",
-			Note:  "key change on refusal",
-		})
-	}
-	if len(rows) == 0 {
-		rows = append(rows, tui.Row{Name: "none", Value: "no providers configured"})
+// It never fails. The monitor has to open even when the configuration does not
+// build — an operator looking at a broken deployment needs to see WHICH value is
+// wrong, and a command that refused to start would tell them nothing.
+func newTUISource(cfg *config.Config) *tuiSource {
+	return &tuiSource{cfg: cfg}
+}
+
+// Observe implements tui.DataSource.
+func (s *tuiSource) Observe() (tui.Observation, error) {
+	obs := tui.Observation{At: time.Now()}
+	cfg := s.cfg
+
+	obs.Daemon = []tui.Row{
+		{Name: "mode", Value: cfg.Mode.Val, Source: string(cfg.Mode.From)},
+		{Name: "listen", Value: cfg.Listen.Val, Source: string(cfg.Listen.From)},
+		{Name: "transport", Value: cfg.Transport.Val, Source: string(cfg.Transport.From)},
+		{Name: "upstream", Value: cfg.Upstream.Val, Source: string(cfg.Upstream.From)},
+		{Name: "credential", Value: cfg.Credential.Val, Source: string(cfg.Credential.From)},
+		{Name: "key_rotation", Value: cfg.KeyRotation.Val, Source: string(cfg.KeyRotation.From)},
+		{Name: "family", Value: cfg.Family.Val, Source: string(cfg.Family.From)},
 	}
 
-	return []tui.Section{
-		{Title: "settings", Rows: rows},
-		{
-			Title: "what changes",
-			Rows: []tui.Row{
-				{Name: "", Value: "the set of keys and their enabled state"},
-				{Name: "", Value: "the rest — from the configuration, at startup"},
-			},
-		},
-	}, nil
+	obs.LogPath = cfg.Paths.LogFile
+
+	// The counters. A state file that cannot be opened is a note rather than a
+	// failure: the monitor still has the configuration and the journal to show,
+	// and refusing to start would hide them.
+	snap, err := readSnapshot(cfg.Paths.StateFile)
+	if err != nil {
+		obs.Notes = append(obs.Notes, "state file: "+err.Error())
+	}
+
+	obs.Providers = s.providers(snap)
+	obs.Addresses, obs.Totals = matrix(snap)
+
+	lines, err := state.Tail(cfg.Paths.LogFile, tailLines)
+	if err != nil && !isMissing(err) {
+		obs.Notes = append(obs.Notes, "journal: "+err.Error())
+	}
+	obs.Logs = lines
+
+	if len(lines) == 0 && err == nil {
+		obs.Notes = append(obs.Notes, "the journal is empty; the daemon writes to "+cfg.Paths.LogFile)
+	}
+
+	return obs, nil
+}
+
+// tailLines is how many journal lines a reading keeps.
+//
+// The monitor's own bound, deliberately smaller than what a command would read:
+// a reading happens every couple of seconds, and a longer tail would be redrawn
+// over and over for no one's benefit.
+const tailLines = 500
+
+// readSnapshot reads the counters.
+func readSnapshot(path string) (*state.Snapshot, error) {
+	st, err := state.Open(path)
+	if err != nil && st == nil {
+		return nil, err
+	}
+	snap := st.Snapshot()
+	return &snap, nil
+}
+
+// providers turns the configuration and the counters into the key block.
+func (s *tuiSource) providers(snap *state.Snapshot) []tui.ProviderState {
+	// The counters are read from the day the state file calls "today" rather
+	// than from today's date: the two agree except across midnight, and the file
+	// is the one that knows which bucket the daemon was writing into.
+	counters := map[string]state.KeySnapshot{}
+	if snap != nil {
+		for _, day := range snap.Days {
+			if day.Day != snap.Today {
+				continue
+			}
+			for _, k := range day.Keys {
+				counters[k.Fingerprint] = k
+			}
+		}
+	}
+
+	rotate := s.cfg.KeyRotation.Val == "on"
+
+	var out []tui.ProviderState
+	for _, id := range providerNames(s.cfg) {
+		pc := s.cfg.Providers[id]
+		p := tui.ProviderState{
+			ID:         id,
+			Type:       pc.Type,
+			Credential: s.cfg.Credential.Val,
+			RotationOn: rotate,
+		}
+
+		var newest time.Time
+		for _, raw := range keysFromConfig(pc) {
+			str, ok := raw.(string)
+			if !ok {
+				continue
+			}
+			fp := fingerprint(str)
+			if fp == "" {
+				continue
+			}
+			k := tui.KeyState{Fingerprint: fp}
+			if c, ok := counters[fp]; ok {
+				k.OK, k.Refused, k.Aborted = c.OK, c.Refused, c.Aborted
+				k.LastSeen = millis(c.LastSeen)
+				k.LastRefusal = millis(c.LastRefusalAt)
+			}
+			// The key in use is the one used most recently. The daemon holds the
+			// rotating pointer in memory and the monitor is a separate process,
+			// so the pointer is inferred, not read — and the block says so.
+			if !k.LastSeen.IsZero() && k.LastSeen.After(newest) {
+				newest, p.Active = k.LastSeen, fp
+			}
+			p.Keys = append(p.Keys, k)
+		}
+		out = append(out, p)
+	}
+
+	if len(out) == 0 {
+		out = append(out, tui.ProviderState{})
+	}
+	return out
+}
+
+// matrix turns the counters into the per-address rows.
+func matrix(snap *state.Snapshot) ([]tui.AddressRow, tui.Totals) {
+	if snap == nil {
+		return nil, tui.Totals{}
+	}
+
+	var (
+		rows []tui.AddressRow
+		tot  tui.Totals
+	)
+	for _, day := range snap.Days {
+		if day.Day != snap.Today {
+			continue
+		}
+		tot = tui.Totals{Day: day.Day, OK: day.OK, Refused: day.Refused, Aborted: day.Aborted}
+
+		for _, a := range day.ByAddress {
+			row := tui.AddressRow{
+				Address:  a.Address,
+				Family:   a.Family,
+				OK:       a.OK,
+				Error:    a.Refused,
+				Aborted:  a.Aborted,
+				LastSeen: lastSeen(a.ByModel),
+			}
+			for _, m := range a.ByModel {
+				row.Models = append(row.Models, tui.ModelRow{
+					Model:   m.Model,
+					OK:      m.OK,
+					Error:   m.Refused,
+					Aborted: m.Aborted,
+				})
+			}
+			rows = append(rows, row)
+		}
+	}
+	return rows, tot
+}
+
+// lastSeen is the newest model mark under an address.
+//
+// The address row has no mark of its own, and the newest of its models is the
+// honest substitute: it answers "when was this address last used" without
+// inventing a fourth counter for it.
+func lastSeen(models []state.ModelSnapshot) time.Time {
+	var newest time.Time
+	for _, m := range models {
+		if t := millis(m.LastSeen); t.After(newest) {
+			newest = t
+		}
+	}
+	return newest
+}
+
+// millis converts a stored millisecond stamp into a time.
+func millis(v int64) time.Time {
+	if v <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(v)
+}
+
+// isMissing reports whether an error is a file that is not there.
+func isMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "no such file") || strings.Contains(msg, "not exist")
 }

@@ -231,10 +231,23 @@ type Failure struct {
 	// KeyRejected marks that the refusal was caused specifically by the
 	// credentials.
 	//
-	// This is the only judgement the provider makes about a refusal, and it
-	// exists for the sake of key rotation: switching a key is meaningful only
-	// when a key has been rejected.
+	// This judgement exists for the sake of key rotation: switching a key is
+	// meaningful only when a key has been rejected.
 	KeyRejected bool
+	// Retryable marks that the same request, sent again after a wait, may
+	// succeed.
+	//
+	// A SEPARATE JUDGEMENT from KeyRejected, and it must not be folded into it:
+	// the two are answered by different machinery. A rejected key is answered by
+	// taking another one; a "not now" is answered by waiting. A refusal may be
+	// either, neither, or in principle both, and the provider is the only party
+	// that can tell which — the same status carries different meanings at
+	// different services.
+	//
+	// A provider that leaves this false is saying that a repeat is pointless,
+	// which is the safe reading: repeating a refusal that will not change only
+	// spends the client's time.
+	Retryable bool
 }
 
 // Provider is what a particular free-model service implements.
@@ -253,6 +266,25 @@ type Provider interface {
 	// refusal: then it returns a Failure with KeyRejected == false, and the
 	// gateway simply forwards the response to the client.
 	Classify(resp *http.Response, body []byte) Failure
+}
+
+// Local is what a provider implements when it answers requests ITSELF instead of
+// sending them anywhere.
+//
+// An optional interface, deliberately separate from Provider: a service is the
+// normal case and must not be made to say so. A provider that offers a transport is
+// saying "do not dial the address I named — hand the request to me", and the gateway
+// then makes no exception for it anywhere else. The classification, the counters,
+// the pass-through and the stream loop all run unchanged, which is the point: what
+// is being exercised has to be the real path.
+//
+// It exists for the stub, whose whole purpose is to make the gateway runnable and
+// observable without a network and without a key. A provider for a real service has
+// no reason to implement it.
+type Local interface {
+	// RoundTripper returns the transport that answers this provider's requests.
+	// Nil means the provider is not, in the end, local.
+	RoundTripper() http.RoundTripper
 }
 
 // Registry is the set of available providers, assembled from configuration.

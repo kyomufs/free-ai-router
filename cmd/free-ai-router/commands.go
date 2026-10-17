@@ -18,6 +18,11 @@ import (
 // exactly when it is needed most.
 
 // loadConfig reads the configuration and parses the flags.
+//
+// THE PATHS ARE RESOLVED FIRST. A path override decides WHICH file is read, so
+// it cannot be layered on afterwards: a value applied after the read would have
+// come from the wrong file, and nothing would say so. Hence the order — resolve
+// the two paths, read, and only then layer the ordinary values.
 func loadConfig(args []string) (*config.Config, *flags, error) {
 	f, err := parseFlags(args)
 	if err != nil {
@@ -26,12 +31,66 @@ func loadConfig(args []string) (*config.Config, *flags, error) {
 	if f == nil {
 		return nil, nil, nil
 	}
-	cfg, err := config.Load()
+
+	cfg, err := loadConfigFor(f)
 	if err != nil {
 		return nil, nil, err
 	}
-	f.applyToConfig(cfg)
 	return cfg, f, nil
+}
+
+// resolvePaths turns the flags and the environment into the two paths.
+//
+// The environment first, the flags over it: the two move the same paths, and a
+// flag given on the command line is the more immediate instruction.
+func resolvePaths(f *flags) (config.Paths, config.PathOverrides, error) {
+	paths, err := config.DefaultPaths()
+	if err != nil {
+		return config.Paths{}, config.PathOverrides{}, err
+	}
+
+	ov := config.EnvPathOverrides()
+	if f.configPath != "" {
+		ov.ConfigFile = f.configPath
+	}
+	if f.statePath != "" {
+		ov.StateFile = f.statePath
+	}
+	return paths, ov, nil
+}
+
+// loadConfigFor reads and checks the configuration for already-parsed flags: the
+// result is what the daemon would run with.
+func loadConfigFor(f *flags) (*config.Config, error) {
+	cfg, err := loadConfigUnchecked(f)
+	if err != nil {
+		return nil, err
+	}
+	// Checked once, at the end, over the MERGED result: the file alone is not
+	// what runs, and a value from a flag was never in the file to be checked
+	// there.
+	return cfg, cfg.Validate()
+}
+
+// loadConfigUnchecked reads the configuration and applies the flags, WITHOUT
+// checking that the daemon could start with the result.
+//
+// For the commands that edit the file. They change one key, and a configuration
+// is allowed to be incomplete while it is being assembled.
+func loadConfigUnchecked(f *flags) (*config.Config, error) {
+	paths, ov, err := resolvePaths(f)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg, err := config.LoadUnchecked(config.ResolvePaths(paths, ov))
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.ApplyFlags(f.values()); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 // cmdConfig shows the effective configuration.
@@ -48,13 +107,19 @@ func cmdConfig(args []string) error {
 			"listen_source":          cfg.Listen.From,
 			"transport":              cfg.Transport.Val,
 			"upstream":               cfg.Upstream.Val,
+			"credential":             cfg.Credential.Val,
+			"credential_source":      cfg.Credential.From,
+			"key_rotation":           cfg.KeyRotation.Val,
+			"key_rotation_source":    cfg.KeyRotation.From,
+			"family":                 cfg.Family.Val,
+			"family_source":          cfg.Family.From,
 			"first_event_timeout":    cfg.FirstEventTimeout.Val.String(),
 			"idle_timeout":           cfg.IdleTimeout.Val.String(),
 			"reasoning_idle_timeout": cfg.ReasoningIdleTimeout.Val.String(),
 			"config_file":            cfg.Paths.ConfigFile,
 			"state_file":             cfg.Paths.StateFile,
 			"log_file":               cfg.Paths.LogFile,
-			"providers":              providerNames(cfg),
+			"providers":              providersDetail(cfg),
 		})
 	}
 	return printEffectiveConfig(cfg)
@@ -198,34 +263,29 @@ func cmdKeys(args []string) error {
 	return nil
 }
 
-// cmdOptions shows the available vocabulary values.
-func cmdOptions(args []string) error {
-	f, err := parseFlags(args)
-	if err != nil {
-		return err
+// providersDetail describes the configured providers for machine consumption.
+//
+// The effective axes are included next to the declared ones: a consumer asking
+// which credential a provider uses needs the answer in force, not the raw entry,
+// and computing the inheritance is the daemon's job rather than the caller's.
+func providersDetail(cfg *config.Config) []map[string]any {
+	ids := providerNames(cfg)
+	out := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		p := cfg.Providers[id]
+		out = append(out, map[string]any{
+			"id":                   id,
+			"type":                 p.Type,
+			"credential":           p.Credential,
+			"credential_effective": cfg.CredentialFor(id),
+			"key_rotation":         p.KeyRotation,
+			"rotation_effective":   cfg.RotationFor(id),
+			"rotates":              cfg.RotatesFor(id),
+			"base_url":             p.BaseURL,
+			"has_key":              p.ProviderKey() != "",
+		})
 	}
-	if f == nil {
-		return nil
-	}
-
-	opts := map[string][]string{
-		"modes":      {config.ModeLocal, config.ModeServer},
-		"toggle":     {"on", "off"},
-		"scopes":     {"logs", "stats", "all"},
-		"transports": {"direct"},
-	}
-	if f.json {
-		return printJSON(opts)
-	}
-	keys := make([]string, 0, len(opts))
-	for k := range opts {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		fmt.Printf("%-12s %s\n", k, strings.Join(opts[k], " | "))
-	}
-	return nil
+	return out
 }
 
 // providerNames returns the provider identifiers in a stable order.

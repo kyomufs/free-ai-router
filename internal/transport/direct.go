@@ -119,6 +119,17 @@ func (d *direct) Info() Info {
 	}
 }
 
+// Pinned returns a transport bound to one address family.
+//
+// WHY IT IS EXPORTED. Something outside the request path has to ask "which
+// address does my traffic leave from", and the answer is only true if it is
+// asked over the same transport and the same family as the requests themselves.
+// Asking over the system's own choice would answer a different question, and the
+// difference is exactly what the answer is wanted for.
+//
+// The caller owns the returned pool and must close its idle connections.
+func Pinned(family string) http.RoundTripper { return buildDirectTransport(family) }
+
 // NewRegistryWithDefaults creates a registry with all built-in transports.
 //
 // The function exists so that the entry point does not assemble the registry by

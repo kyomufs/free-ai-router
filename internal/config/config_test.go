@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -107,7 +108,9 @@ func TestFlagsOverrideEverything(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadFrom: %v", err)
 	}
-	c.ApplyFlags("", "127.0.0.1:7777", "", "", "")
+	if err := c.ApplyFlags(FlagValues{Listen: "127.0.0.1:7777"}); err != nil {
+		t.Fatal(err)
+	}
 
 	if c.Listen.Val != "127.0.0.1:7777" {
 		t.Fatalf("Listen = %q, want the flag value", c.Listen.Val)
@@ -125,7 +128,9 @@ func TestEmptyFlagsDoNotOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.ApplyFlags("", "", "", "", "")
+	if err := c.ApplyFlags(FlagValues{}); err != nil {
+		t.Fatal(err)
+	}
 
 	if c.Listen.Val != "127.0.0.1:8000" || c.Listen.From != SourceFile {
 		t.Fatalf("an empty flag changed the value: %q from %q", c.Listen.Val, c.Listen.From)
@@ -171,6 +176,11 @@ func TestInvalidValuesAreRejected(t *testing.T) {
 		{"empty transport", `{"transport": ""}`},
 		{"invalid duration", `{"first_event_timeout": "fast"}`},
 		{"zero duration", `{"idle_timeout": "0s"}`},
+		{"unknown credential", `{"credential": "key"}`},
+		{"unknown rotation", `{"key_rotation": "yes"}`},
+		{"unknown family", `{"family": "ipv7"}`},
+		{"unknown provider credential", `{"providers": {"p": {"type": "stub", "credential": "pool"}}}`},
+		{"unknown provider rotation", `{"providers": {"p": {"type": "stub", "key_rotation": "true"}}}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -270,12 +280,219 @@ func TestStateOverrideFromEnv(t *testing.T) {
 	override := filepath.Join(t.TempDir(), "one-off.json")
 	t.Setenv(EnvState, override)
 
-	c, err := LoadFrom(paths)
+	c, err := LoadWith(paths, EnvPathOverrides())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.Paths.StateFile != override {
 		t.Fatalf("StateFile = %q, want %q", c.Paths.StateFile, override)
+	}
+}
+
+// TestStateOverrideMovesTheLogToo — a redirected state must not append to the
+// real journal.
+//
+// The log lives in the state directory, so leaving it behind makes a test run
+// write into the journal of the daemon that is actually running — and the
+// journal stops describing that daemon.
+func TestStateOverrideMovesTheLogToo(t *testing.T) {
+	base := Paths{
+		ConfigDir:  "/base/cfg",
+		StateDir:   "/base/state",
+		ConfigFile: "/base/cfg/config.json",
+		StateFile:  "/base/state/state.json",
+		LogFile:    "/base/state/app.log",
+	}
+	got := ResolvePaths(base, PathOverrides{StateFile: "/tmp/probe/state.json"})
+
+	if got.StateFile != "/tmp/probe/state.json" {
+		t.Fatalf("StateFile = %q", got.StateFile)
+	}
+	if got.StateDir != "/tmp/probe" {
+		t.Fatalf("StateDir = %q, want the file's directory", got.StateDir)
+	}
+	if got.LogFile != "/tmp/probe/app.log" {
+		t.Fatalf("LogFile = %q, want it to follow the state", got.LogFile)
+	}
+	// An override that was not given leaves the base alone.
+	if got.ConfigFile != base.ConfigFile || got.ConfigDir != base.ConfigDir {
+		t.Fatalf("the absent override moved the config: %+v", got)
+	}
+}
+
+// TestConfigOverrideReadsAnotherFile — the override is resolved before the file
+// is opened, which is why it cannot be layered on after loading.
+func TestConfigOverrideReadsAnotherFile(t *testing.T) {
+	real := writeConfig(t, `{"listen": "127.0.0.1:8000"}`)
+
+	probe := filepath.Join(t.TempDir(), "probe.json")
+	if err := os.WriteFile(probe, []byte(`{"listen": "127.0.0.1:9123"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := LoadWith(real, PathOverrides{ConfigFile: probe})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Listen.Val != "127.0.0.1:9123" {
+		t.Fatalf("Listen = %q, want the probe file's value", c.Listen.Val)
+	}
+	if c.Paths.ConfigFile != probe {
+		t.Fatalf("ConfigFile = %q, want the probe path", c.Paths.ConfigFile)
+	}
+}
+
+// TestLoadFromIgnoresPathEnvironment — LoadFrom takes paths that are already
+// resolved and must not read the path variables itself.
+//
+// A library caller that resolved its own paths would otherwise be silently
+// redirected by the ambient environment, and the same call would read different
+// files in two contexts.
+func TestLoadFromIgnoresPathEnvironment(t *testing.T) {
+	paths := writeConfig(t, `{}`)
+	t.Setenv(EnvState, "/tmp/elsewhere/state.json")
+	t.Setenv(EnvConfig, "/tmp/elsewhere/config.json")
+
+	c, err := LoadFrom(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Paths.StateFile != paths.StateFile || c.Paths.ConfigFile != paths.ConfigFile {
+		t.Fatalf("LoadFrom followed the environment: %+v", c.Paths)
+	}
+}
+
+// TestNewAxesDefaults — the mechanism and addressing axes start where the free
+// tier is reachable without any configuration at all.
+func TestNewAxesDefaults(t *testing.T) {
+	paths := writeConfig(t, `{}`)
+	c, err := LoadFrom(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Credential.Val != CredentialAnonymous || c.Credential.From != SourceDefault {
+		t.Fatalf("Credential = %q from %q, want %q from the default", c.Credential.Val, c.Credential.From, CredentialAnonymous)
+	}
+	if c.KeyRotation.Val != RotationOn {
+		t.Fatalf("KeyRotation = %q, want %q", c.KeyRotation.Val, RotationOn)
+	}
+	if c.Family.Val != FamilyAuto {
+		t.Fatalf("Family = %q, want %q", c.Family.Val, FamilyAuto)
+	}
+}
+
+// TestNewAxesPrecedence — flags beat the environment, the environment beats the
+// file, and the file beats the defaults.
+func TestNewAxesPrecedence(t *testing.T) {
+	paths := writeConfig(t, `{
+		"credential": "account",
+		"key_rotation": "off",
+		"family": "v4"
+	}`)
+
+	c, err := LoadFrom(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Credential.Val != CredentialAccount || c.Credential.From != SourceFile {
+		t.Fatalf("Credential = %q from %q", c.Credential.Val, c.Credential.From)
+	}
+	if c.KeyRotation.Val != RotationOff {
+		t.Fatalf("KeyRotation = %q", c.KeyRotation.Val)
+	}
+	if c.Family.Val != FamilyV4 {
+		t.Fatalf("Family = %q", c.Family.Val)
+	}
+
+	t.Setenv(EnvCredential, CredentialAnonymous)
+	t.Setenv(EnvFamily, FamilyV6)
+	c, err = LoadFrom(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Credential.Val != CredentialAnonymous || c.Credential.From != SourceEnv {
+		t.Fatalf("Credential = %q from %q, want the environment to win over the file", c.Credential.Val, c.Credential.From)
+	}
+	if c.Family.Val != FamilyV6 || c.Family.From != SourceEnv {
+		t.Fatalf("Family = %q from %q", c.Family.Val, c.Family.From)
+	}
+	// Untouched by the environment, the file value keeps its source.
+	if c.KeyRotation.Val != RotationOff || c.KeyRotation.From != SourceFile {
+		t.Fatalf("KeyRotation = %q from %q", c.KeyRotation.Val, c.KeyRotation.From)
+	}
+
+	if err := c.ApplyFlags(FlagValues{Credential: CredentialAccount, Family: FamilyV4}); err != nil {
+		t.Fatal(err)
+	}
+	if c.Credential.Val != CredentialAccount || c.Credential.From != SourceFlag {
+		t.Fatalf("Credential = %q from %q, want the flag to win", c.Credential.Val, c.Credential.From)
+	}
+	if c.Family.Val != FamilyV4 || c.Family.From != SourceFlag {
+		t.Fatalf("Family = %q from %q", c.Family.Val, c.Family.From)
+	}
+}
+
+// TestProviderOverridesTheGlobalAxes — a provider can be worked around
+// differently from the rest of the process.
+func TestProviderOverridesTheGlobalAxes(t *testing.T) {
+	paths := writeConfig(t, `{
+		"credential": "anonymous",
+		"key_rotation": "on",
+		"providers": {
+			"picky": {"type": "stub", "credential": "account", "key_rotation": "off"},
+			"plain": {"type": "stub"}
+		}
+	}`)
+
+	c, err := LoadFrom(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.CredentialFor("picky"); got != CredentialAccount {
+		t.Fatalf("picky credential = %q, want its own value", got)
+	}
+	if got := c.RotationFor("picky"); got != RotationOff {
+		t.Fatalf("picky rotation = %q, want its own value", got)
+	}
+	if got := c.CredentialFor("plain"); got != CredentialAnonymous {
+		t.Fatalf("plain credential = %q, want the global value", got)
+	}
+	if got := c.RotationFor("plain"); got != RotationOn {
+		t.Fatalf("plain rotation = %q, want the global value", got)
+	}
+	// An unknown provider falls back to the global axes rather than failing.
+	if got := c.CredentialFor("absent"); got != CredentialAnonymous {
+		t.Fatalf("absent credential = %q, want the global value", got)
+	}
+}
+
+// TestRotationIsInertWithoutACredential — with nothing sent there is nothing to
+// rotate, and the monitor must not claim a mechanism that cannot run.
+func TestRotationIsInertWithoutACredential(t *testing.T) {
+	cases := []struct {
+		credential string
+		rotation   string
+		want       bool
+	}{
+		{CredentialAnonymous, RotationOn, false},
+		{CredentialAnonymous, RotationOff, false},
+		{CredentialAccount, RotationOn, true},
+		{CredentialAccount, RotationOff, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.credential+"+"+tc.rotation, func(t *testing.T) {
+			paths := writeConfig(t, `{"credential": "`+tc.credential+`", "key_rotation": "`+tc.rotation+`"}`)
+			c, err := LoadFrom(paths)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := c.RotatesFor("opencode"); got != tc.want {
+				t.Fatalf("RotatesFor = %t, want %t", got, tc.want)
+			}
+			if got := c.UsesAccount("opencode"); got != (tc.credential == CredentialAccount) {
+				t.Fatalf("UsesAccount = %t for credential %q", got, tc.credential)
+			}
+		})
 	}
 }
 
@@ -308,5 +525,153 @@ func TestEmptyFileIsValid(t *testing.T) {
 	}
 	if c.Mode.Val != DefaultMode {
 		t.Fatalf("Mode = %q, want the default", c.Mode.Val)
+	}
+}
+
+// TestAnUnknownKeyIsRefused.
+//
+// A key the daemon does not read and a key that works are indistinguishable from
+// the outside: the setting is written, the daemon starts, and the value never
+// takes effect. That is not hypothetical — the timeout options in the NixOS
+// module were written as "firstEventTimeout" while the daemon read
+// "first_event_timeout", and nothing anywhere reported it.
+func TestAnUnknownKeyIsRefused(t *testing.T) {
+	// The exact shape the module used to render.
+	paths := writeConfig(t, `{"mode":"local","firstEventTimeout":"45s"}`)
+
+	_, err := LoadFrom(paths)
+	if err == nil {
+		t.Fatal("a file with an unknown key was accepted")
+	}
+	if !strings.Contains(err.Error(), "firstEventTimeout") {
+		t.Errorf("the error does not name the key: %v", err)
+	}
+}
+
+// TestEveryKnownKeyIsAccepted is the other half: the refusal must not reach the
+// keys the daemon does read.
+//
+// Without this, tightening the check into a wholesale rejection of the file
+// shape would pass the test above and break every working configuration.
+func TestEveryKnownKeyIsAccepted(t *testing.T) {
+	paths := writeConfig(t, `{
+		"mode": "local",
+		"listen": "127.0.0.1:9000",
+		"token": "secret",
+		"transport": "direct",
+		"transport_settings": {"family": "v4"},
+		"upstream": "https://example.invalid",
+		"credential": "account",
+		"key_rotation": "off",
+		"family": "v6",
+		"first_event_timeout": "45s",
+		"idle_timeout": "90s",
+		"reasoning_idle_timeout": "600s",
+		"providers": {
+			"opencode": {
+				"type": "opencode",
+				"enabled": true,
+				"base_url": "https://example.invalid",
+				"api_key": "k",
+				"api_key_env": "K",
+				"credential": "anonymous",
+				"key_rotation": "on",
+				"settings": {"anything": "goes"}
+			}
+		}
+	}`)
+
+	c, err := LoadFrom(paths)
+	if err != nil {
+		t.Fatalf("a valid file was refused: %v", err)
+	}
+	if c.FirstEventTimeout.Val != 45*time.Second {
+		t.Errorf("FirstEventTimeout = %v, want 45s", c.FirstEventTimeout.Val)
+	}
+	if c.Family.Val != FamilyV6 {
+		t.Errorf("Family = %q, want %q", c.Family.Val, FamilyV6)
+	}
+	if c.Credential.Val != CredentialAccount {
+		t.Errorf("Credential = %q, want %q", c.Credential.Val, CredentialAccount)
+	}
+	if c.KeyRotation.Val != RotationOff {
+		t.Errorf("KeyRotation = %q, want %q", c.KeyRotation.Val, RotationOff)
+	}
+}
+
+// TestProviderSettingsStayOpen.
+//
+// The provider's settings bag is not interpreted by the daemon: a provider type
+// owns its keys, and refusing them here would mean the daemon had to be rebuilt
+// for every new setting a provider grows.
+func TestProviderSettingsStayOpen(t *testing.T) {
+	paths := writeConfig(t, `{"providers":{"opencode":{"type":"opencode","settings":{"unknown_to_the_daemon":1}}}}`)
+
+	if _, err := LoadFrom(paths); err != nil {
+		t.Fatalf("an unknown key inside settings was refused: %v", err)
+	}
+}
+
+// TestUncheckedLoadReadsWhatCheckedLoadRefuses.
+//
+// The dividing line between the two loaders is the whole point: one answers
+// "what would run", the other answers "what does the file say". A configuration
+// that cannot start is still a configuration, and the commands that edit it have
+// to be able to read it — including the one that can fix it.
+func TestUncheckedLoadReadsWhatCheckedLoadRefuses(t *testing.T) {
+	// Server mode with no token: refused at startup, by design.
+	paths := writeConfig(t, `{"mode":"server","listen":"0.0.0.0:8787","credential":"account"}`)
+
+	if _, err := LoadFrom(paths); err == nil {
+		t.Fatal("the checked loader accepted a configuration that cannot start")
+	}
+
+	c, err := LoadUnchecked(paths)
+	if err != nil {
+		t.Fatalf("the unchecked loader refused it: %v", err)
+	}
+	if c.Mode.Val != ModeServer {
+		t.Errorf("Mode = %q, want %q", c.Mode.Val, ModeServer)
+	}
+	if c.Credential.Val != CredentialAccount {
+		t.Errorf("Credential = %q, want %q", c.Credential.Val, CredentialAccount)
+	}
+	if c.Paths.ConfigFile != paths.ConfigFile {
+		t.Errorf("ConfigFile = %q, want %q", c.Paths.ConfigFile, paths.ConfigFile)
+	}
+}
+
+// TestUncheckedLoadStillRefusesABrokenFile.
+//
+// Relaxing the check must not relax the parsing: a file that cannot be read at
+// all is not an incomplete configuration, it is an unreadable one, and saying so
+// is the difference between a typo being reported and a typo being ignored.
+func TestUncheckedLoadStillRefusesABrokenFile(t *testing.T) {
+	paths := writeConfig(t, `{"mode":`)
+
+	if _, err := LoadUnchecked(paths); err == nil {
+		t.Fatal("an unparseable file was accepted")
+	}
+}
+
+// TestUncheckedLoadStillAppliesTheEnvironment.
+//
+// The two loaders differ in one thing only. If skipping the check also skipped
+// the environment, the file commands would report a value the daemon is not
+// going to use — which is exactly the kind of quiet disagreement they exist to
+// prevent.
+func TestUncheckedLoadStillAppliesTheEnvironment(t *testing.T) {
+	paths := writeConfig(t, `{"credential":"anonymous"}`)
+	t.Setenv(EnvCredential, CredentialAccount)
+
+	c, err := LoadUnchecked(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Credential.Val != CredentialAccount {
+		t.Errorf("Credential = %q, want the value from the environment", c.Credential.Val)
+	}
+	if c.Credential.From != SourceEnv {
+		t.Errorf("Credential source = %q, want %q", c.Credential.From, SourceEnv)
 	}
 }
