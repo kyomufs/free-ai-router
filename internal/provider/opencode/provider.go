@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"free-ai-router/internal/provider"
 	"free-ai-router/internal/provider/modelcat"
@@ -100,6 +101,20 @@ type Config struct {
 	// suitable for both, and no such limit exists. Empty means the default
 	// client.
 	HTTP *http.Client
+	// Log receives the background catalog refresh warnings. May be nil.
+	Log func(format string, args ...any)
+
+	// FirstEventTimeout, IdleTimeout and ReasoningIdleTimeout are the silence
+	// budgets carried into every prepared request: until the headers, between
+	// events of an ordinary answer, and between events while the model reasons.
+	//
+	// Zero means the contract's own number. The contract is where the defaults
+	// come from, but an operator whose uplink is slow needs to widen the band
+	// without a rebuild — and a budget that cannot be widened is a budget that
+	// gets disabled altogether.
+	FirstEventTimeout    time.Duration
+	IdleTimeout          time.Duration
+	ReasoningIdleTimeout time.Duration
 }
 
 // Provider is the provider.Provider implementation for OpenCode Zen.
@@ -165,7 +180,7 @@ func New(cfg Config) (*Provider, error) {
 	p.catalog = modelcat.New(
 		p.baseURL, liveModelsPath, httpClient, p.applyHeaders,
 		&metaSource{http: httpClient, url: cfg.MetaURL},
-	).WithEligibility(isFree)
+	).WithEligibility(isFree).WithLog(cfg.Log)
 	return p, nil
 }
 
@@ -174,12 +189,22 @@ func (p *Provider) ID() provider.ID { return p.id }
 
 // Models implements provider.Provider.
 //
-// The catalog is taken from the service on every call — with caching inside the
-// client. A list in the code is deliberately not kept here: it would drift from
-// the service, and the client would select models that no longer exist.
+// Read from memory; the background refresher owns the network. A list in the
+// code is deliberately not kept here: it would drift from the service, and the
+// client would select models that no longer exist.
 func (p *Provider) Models(ctx context.Context) ([]provider.Model, error) {
 	return p.catalog.Models(ctx)
 }
+
+// Start begins the background catalog refresh.
+//
+// Implements provider.Polling. Reads come out of memory afterwards, so this has
+// to run before the listener accepts anything — otherwise the first requests
+// see an empty catalog.
+func (p *Provider) Start(ctx context.Context) { p.catalog.Start(ctx) }
+
+// Stop ends the background catalog refresh.
+func (p *Provider) Stop() error { return p.catalog.Stop() }
 
 // Credential returns the value for Authorization.
 //
@@ -217,9 +242,10 @@ func (p *Provider) Build(req provider.Request) (provider.Prepared, error) {
 		Body:    raw,
 		// The reasoning band holds longer pauses than an ordinary stream,
 		// because the model can stay silent for several minutes while still
-		// working. Splitting the budgets is part of the contract, not a setting.
-		IdleTimeout:       idleTimeoutFor(req.Model),
-		FirstEventTimeout: firstEventTimeout,
+		// working. Splitting the budgets is part of the contract, not a setting;
+		// their lengths are the operator's, within the contract's defaults.
+		IdleTimeout:       p.idleTimeoutFor(req.Model),
+		FirstEventTimeout: p.firstEventBudget(),
 	}, nil
 }
 
@@ -272,6 +298,18 @@ func (p *Provider) buildBody(req provider.Request) (map[string]any, error) {
 func (p *Provider) buildMessages(req provider.Request) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(req.Messages)+1)
 
+	// The thinking field of the model, and whether the conversation is in
+	// thinking mode at all.
+	//
+	// The NAME comes from the model metadata: different models carry the
+	// thinking in different places, and writing it to the wrong one would either
+	// be ignored or rejected.
+	field := req.Model.ReasoningField
+	if field == "" {
+		field = "reasoning_content"
+	}
+	thinking := reasoningMode(req)
+
 	// The system part is one message, rendered by the provider.
 	if req.System != "" {
 		out = append(out, map[string]any{"role": "system", "content": req.System})
@@ -281,13 +319,17 @@ func (p *Provider) buildMessages(req provider.Request) ([]map[string]any, error)
 		switch m.Role {
 		case "assistant":
 			msg := map[string]any{"role": "assistant", "content": m.Text}
-			if m.Reasoning != "" {
-				// The field name comes from the model metadata: different
-				// models expect the thinking in different places.
-				field := req.Model.ReasoningField
-				if field == "" {
-					field = "reasoning_content"
-				}
+			// The field is written for EVERY assistant message of a thinking
+			// conversation, an empty string included.
+			//
+			// Not an empty value but a missing key is the failure: a gateway in
+			// thinking mode requires the field on every assistant message when
+			// tools are in play, and a turn whose thinking happened to be empty
+			// would lose the key here and be rejected upstream with
+			// "The `reasoning_content` in the thinking mode must be passed back
+			// to the API" — after a round trip, in the middle of a tool call.
+			// The client itself sends the empty string for exactly this reason.
+			if thinking {
 				msg[field] = m.Reasoning
 			}
 			if len(m.ToolCalls) > 0 {
@@ -329,6 +371,27 @@ func (p *Provider) buildMessages(req provider.Request) ([]map[string]any, error)
 		}
 	}
 	return out, nil
+}
+
+// reasoningMode reports whether the conversation is in thinking mode.
+//
+// Two signals, and the second is what makes the first one safe to rely on. A
+// model that can reason is in thinking mode by definition. But the metadata may
+// lag behind the service — a model that has just learned to think is still
+// described as an ordinary one — and the conversation itself carries the
+// evidence: an assistant turn whose thinking came back non-empty is a
+// conversation the upstream is holding in thinking mode, whatever the catalog
+// says.
+func reasoningMode(req provider.Request) bool {
+	if req.Model.Reasoning {
+		return true
+	}
+	for _, m := range req.Messages {
+		if m.Role == "assistant" && m.Reasoning != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // buildUserContent assembles the content of a user message.

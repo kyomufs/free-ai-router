@@ -17,18 +17,46 @@ type fakeSource struct {
 	obs   Observation
 	err   error
 	calls int
+	// days is every day the monitor asked for, in order: the day is an argument
+	// to a reading, and a selector that changed a label without re-reading is
+	// exactly the bug this record exists to catch.
+	days []string
+	// byDay answers a day with its own reading, which is how the fallback and
+	// the move between days are exercised without a state file.
+	byDay map[string]Observation
 }
 
-func (f *fakeSource) Observe() (Observation, error) {
+func (f *fakeSource) Observe(day string) (Observation, error) {
 	f.calls++
+	f.days = append(f.days, day)
+	if obs, ok := f.byDay[day]; ok {
+		return obs, f.err
+	}
 	return f.obs, f.err
 }
 
+// asked is the last day the source was asked for, and whether it was asked at
+// all: "" means the daemon's own day, which an unasked source cannot claim.
+func (f *fakeSource) asked() (string, bool) {
+	if len(f.days) == 0 {
+		return "", false
+	}
+	return f.days[len(f.days)-1], true
+}
+
 // observation is a deployment with two addresses, two models and a journal.
+//
+// The addresses carry their marks, and in the order of use: the IPv4 address came
+// first and is the busier one, so the default order of the matrix agrees with the
+// order the counters would suggest. The tests that need the two orders to differ
+// have a fixture of their own.
 func observation() Observation {
 	at := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	return Observation{
-		At: at,
+		At:    at,
+		Day:   "2026-10-17",
+		Today: "2026-10-17",
+		Days:  []string{"2026-10-17"},
 		Daemon: []Row{
 			{Name: "mode", Value: "local", Source: "file"},
 			{Name: "listen", Value: "127.0.0.1:8795", Source: "flag"},
@@ -49,22 +77,25 @@ func observation() Observation {
 		}},
 		Addresses: []AddressRow{
 			{
-				Address:  "213.14.43.234",
-				Family:   "v4",
-				OK:       41,
-				Error:    3,
-				LastSeen: at.Add(-2 * time.Second),
+				Address:   "213.14.43.234",
+				Family:    "v4",
+				OK:        41,
+				Error:     3,
+				FirstSeen: at.Add(-6 * time.Hour),
+				LastSeen:  at.Add(-2 * time.Second),
 				Models: []ModelRow{
 					{Model: "mimo-v2.6-flash", OK: 20, Error: 1},
 					{Model: "deepseek-v4.1-flash-free", OK: 21, Error: 2},
 				},
 			},
 			{
-				Address: "2a00:1450:4001:80e::200e",
-				Family:  "v6",
-				OK:      4,
-				Error:   0,
-				Models:  []ModelRow{{Model: "mimo-v2.6-flash", OK: 4}},
+				Address:   "2a00:1450:4001:80e::200e",
+				Family:    "v6",
+				OK:        4,
+				Error:     0,
+				FirstSeen: at.Add(-90 * time.Minute),
+				LastSeen:  at.Add(-30 * time.Minute),
+				Models:    []ModelRow{{Model: "mimo-v2.6-flash", OK: 4}},
 			},
 		},
 		Totals:  Totals{Day: "2026-10-17", OK: 45, Refused: 3},
@@ -649,31 +680,109 @@ func TestAModelRowSitsUnderItsAddress(t *testing.T) {
 	}
 }
 
+// firstUsedObservation is a matrix whose orders disagree: the address used first
+// is the least busy one, so "in the order of use" and "the busiest first" cannot
+// be confused for one another.
+func firstUsedObservation() Observation {
+	at := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	return Observation{
+		At:    at,
+		Day:   "2026-10-17",
+		Today: "2026-10-17",
+		Days:  []string{"2026-10-17"},
+		Addresses: []AddressRow{
+			{
+				Address:   "203.0.113.9",
+				Family:    "v4",
+				OK:        3,
+				FirstSeen: at.Add(-8 * time.Hour),
+				LastSeen:  at.Add(-7 * time.Hour),
+			},
+			{
+				Address:   "198.51.100.4",
+				Family:    "v4",
+				OK:        50,
+				Error:     2,
+				FirstSeen: at.Add(-10 * time.Minute),
+				LastSeen:  at.Add(-time.Minute),
+			},
+		},
+		Totals: Totals{Day: "2026-10-17", OK: 53, Refused: 2},
+	}
+}
+
+// TestTheMatrixOpensInTheOrderOfUse checks the default order of the matrix: the
+// addresses in the order they were first used, which is the order the uplink was
+// switched in and the only order that reads as a history of the day.
+func TestTheMatrixOpensInTheOrderOfUse(t *testing.T) {
+	m := monitor(firstUsedObservation())
+
+	if m.sort != sortUsed {
+		t.Fatalf("the monitor opens in %v, want the order of use", m.sort)
+	}
+	lines := frameLines(m)
+	if indexOfLine(lines, "203.0.113.9") > indexOfLine(lines, "198.51.100.4") {
+		t.Errorf("the address used first is not the first row:\n%s", strings.Join(lines, "\n"))
+	}
+	// The order of use is NOT the order of traffic, and the frame says which one
+	// it is in: without the label, the reader would take the top row for the
+	// busiest one.
+	if !strings.Contains(draw(m), "sort used") {
+		t.Errorf("the tile does not name the order it is in:\n%s", draw(m))
+	}
+}
+
+// TestAddressesWithoutMarksGoLast checks an address with no mark: it has no place
+// in a sequence of use, and a row invented at the top would claim the first
+// request of the day.
+func TestAddressesWithoutMarksGoLast(t *testing.T) {
+	obs := firstUsedObservation()
+	obs.Addresses = append([]AddressRow{{Address: "192.0.2.1", Family: "v4", OK: 9}}, obs.Addresses...)
+
+	lines := frameLines(monitor(obs))
+	unmarked := indexOfLine(lines, "192.0.2.1")
+	if unmarked < 0 {
+		t.Fatalf("the unmarked address is not drawn:\n%s", strings.Join(lines, "\n"))
+	}
+	if unmarked < indexOfLine(lines, "198.51.100.4") {
+		t.Errorf("the unmarked address sorted as the oldest:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
 // TestTheSortKeyReordersTheMatrix checks that the sort key is real: the counters
 // are unchanged, only their order is.
 func TestTheSortKeyReordersTheMatrix(t *testing.T) {
-	m := monitor(observation())
+	m := monitor(firstUsedObservation())
 	before := strings.Join(frameLines(m), "\n")
-	if indexOfLine(frameLines(m), "213.14.43.234") > indexOfLine(frameLines(m), "2a00:1450:4001:80e::200e") {
-		t.Fatalf("the default sort does not put the busiest address first:\n%s", before)
+	if indexOfLine(frameLines(m), "198.51.100.4") < indexOfLine(frameLines(m), "203.0.113.9") {
+		t.Fatalf("the fixture does not tell the two orders apart:\n%s", before)
 	}
 
 	got := press(t, m, "s")
 	if m.sort == got.sort {
 		t.Fatal("the sort key did not change the order")
 	}
-	if !strings.Contains(draw(got), "sort errors") {
+	if !strings.Contains(draw(got), "sort traffic") {
 		t.Errorf("the frame does not name the sort it is in:\n%s", draw(got))
 	}
 
-	// The address with the errors is now above the one without them.
+	// The busiest address is now the first row: the same rows, another order.
 	lines := frameLines(got)
-	if indexOfLine(lines, "213.14.43.234") > indexOfLine(lines, "2a00:1450:4001:80e::200e") {
-		t.Errorf("sorting by errors did not move the failing address up:\n%s", strings.Join(lines, "\n"))
+	if indexOfLine(lines, "198.51.100.4") > indexOfLine(lines, "203.0.113.9") {
+		t.Errorf("sorting by traffic did not move the busiest address up:\n%s", strings.Join(lines, "\n"))
+	}
+
+	// And by errors, which is the same row here but a differently named mode.
+	got = press(t, got, "s")
+	if !strings.Contains(draw(got), "sort errors") {
+		t.Errorf("the frame does not name the error sort:\n%s", draw(got))
+	}
+	if indexOfLine(frameLines(got), "198.51.100.4") > indexOfLine(frameLines(got), "203.0.113.9") {
+		t.Errorf("sorting by errors did not move the failing address up:\n%s", draw(got))
 	}
 
 	// Cycling round returns to where it started.
-	for range sortModeCount - 1 {
+	for range sortModeCount - 2 {
 		got = press(t, got, "s")
 	}
 	if got.sort != m.sort {
@@ -1587,6 +1696,263 @@ func TestTheNarrowTerminalKeepsTheSectionsReachable(t *testing.T) {
 			if title := got.sectionTitle(); title != b.String() {
 				t.Errorf("%d columns: the %v section is titled %q", width, b, title)
 			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// the day selector
+// ---------------------------------------------------------------------------
+
+// dayObservation is a deployment whose state holds three days with today the
+// newest, and whose journal reaches two of them.
+func dayObservation() Observation {
+	obs := observation()
+	obs.Days = []string{"2026-10-17", "2026-10-16", "2026-10-15"}
+	obs.Logs = []string{
+		journalStamp("2026-10-17", 11) + " INFO served",
+		journalStamp("2026-10-17", 9) + " INFO started",
+		journalStamp("2026-10-16", 22) + " WARN provider refused",
+		journalStamp("2026-10-16", 8) + " INFO served",
+	}
+	return obs
+}
+
+// journalStamp is a journal line's stamp for an hour of a day.
+//
+// The instant is built in UTC and written in local time, which is what the
+// journal does: building it in local time instead would make the day key depend
+// on the timezone the test runs in, and the last hours of a day are filed under
+// the next one anywhere east of Greenwich.
+func journalStamp(day string, hour int) string {
+	at, err := time.Parse("2006-01-02", day)
+	if err != nil {
+		panic(err)
+	}
+	return at.Add(time.Duration(hour) * time.Hour).Local().Format("2006-01-02 15:04:05.000")
+}
+
+// pastDay is a reading of one of the recorded days that are not today.
+func pastDay(day string) Observation {
+	obs := dayObservation()
+	obs.Day = day
+	obs.Totals = Totals{Day: day, OK: 7, Refused: 1}
+	obs.Addresses = nil
+	return obs
+}
+
+// monitorOver builds a monitor over a source the test keeps, so it can be asked
+// which days the frame read.
+func monitorOver(t *testing.T, obs Observation) (Model, *fakeSource) {
+	t.Helper()
+	src := &fakeSource{obs: obs}
+	m := New(src)
+	m.loaded = true
+	m.obs = obs
+	m.width, m.height = 120, 40
+	m.filterLogs()
+	m.resize()
+	return m, src
+}
+
+// moveDay delivers a day key and follows the reading it returned.
+//
+// The command is run because moving the day is a re-read and not a re-sort: a
+// frame that only changed its label would be a different day's counters under the
+// previous day's numbers. A refused move returns a toast timer rather than a
+// reading — the runtime runs it, a test does not wait for it — so it is left
+// where it is, and the refusal is judged by the frame's own message.
+func moveDay(t *testing.T, m Model, k string) Model {
+	t.Helper()
+	msg, ok := keyMsg(k)
+	if !ok {
+		t.Fatalf("no key message for %q", k)
+	}
+	next, cmd := m.Update(msg)
+	got, ok := next.(Model)
+	if !ok {
+		t.Fatalf("Update returned %T, want Model", next)
+	}
+	if cmd == nil || got.day == m.day {
+		return got
+	}
+	next, _ = got.Update(cmd())
+	after, ok := next.(Model)
+	if !ok {
+		t.Fatalf("Update returned %T, want Model", next)
+	}
+	return after
+}
+
+// TestTheDayKeysWalkTheRecordedDays checks the selector: the days are walked in
+// their recorded order, the ends of the list say so, and returning to today hands
+// the choice back to the daemon rather than pinning its key.
+func TestTheDayKeysWalkTheRecordedDays(t *testing.T) {
+	m, src := monitorOver(t, dayObservation())
+	src.byDay = map[string]Observation{
+		"2026-10-16": pastDay("2026-10-16"),
+		"2026-10-15": pastDay("2026-10-15"),
+	}
+	if m.day != "" {
+		t.Fatalf("the monitor opens pinned to %q, want the daemon's own day", m.day)
+	}
+
+	// Older, once: yesterday.
+	got := moveDay(t, m, "[")
+	if got.day != "2026-10-16" {
+		t.Fatalf("the older key landed on %q", got.day)
+	}
+	day, ok := src.asked()
+	if !ok || day != "2026-10-16" {
+		t.Fatalf("the frame asked for %q, want the day it moved to", day)
+	}
+
+	// The frame names the day it shows, and where it sits in the record.
+	if !strings.Contains(draw(got), "2026-10-16") {
+		t.Errorf("the frame does not name the day it shows:\n%s", draw(got))
+	}
+	if !strings.Contains(draw(got), "2/3") {
+		t.Errorf("the frame does not say where the day sits in the record:\n%s", draw(got))
+	}
+
+	// Older again: the oldest recorded day.
+	got = moveDay(t, got, "[")
+	if got.day != "2026-10-15" {
+		t.Fatalf("the second older key landed on %q", got.day)
+	}
+
+	// And again: refused, because there is nothing older than the oldest.
+	refused := moveDay(t, got, "[")
+	if refused.day != "2026-10-15" {
+		t.Errorf("the frame moved past the oldest day, to %q", refused.day)
+	}
+	if refused.toast == nil {
+		t.Fatal("a refused move raised no message: the key looks broken")
+	}
+	if !strings.Contains(draw(refused), "oldest day recorded") {
+		t.Errorf("the refusal is not drawn:\n%s", draw(refused))
+	}
+
+	// Newer twice: back to the daemon's own day, following rather than pinned.
+	got = moveDay(t, refused, "]")
+	if got.day != "2026-10-16" {
+		t.Fatalf("the newer key landed on %q", got.day)
+	}
+	got = moveDay(t, got, "]")
+	if got.day != "" {
+		t.Errorf("the frame is pinned to %q instead of following the daemon", got.day)
+	}
+
+	// Newer at the newest: refused, and the frame says which end it is at.
+	newest := moveDay(t, got, "]")
+	if newest.day != "" {
+		t.Errorf("the frame moved past the newest day, to %q", newest.day)
+	}
+	if !strings.Contains(draw(newest), "newest day recorded") {
+		t.Errorf("the refusal at the newest day is not drawn:\n%s", draw(newest))
+	}
+}
+
+// TestTheTodayKeyUnpinsTheDay checks the way back: one key that means "whatever
+// the daemon is writing into now", which is what a reader wants after wandering.
+func TestTheTodayKeyUnpinsTheDay(t *testing.T) {
+	m, src := monitorOver(t, dayObservation())
+	src.byDay = map[string]Observation{"2026-10-16": pastDay("2026-10-16")}
+
+	got := moveDay(t, m, "[")
+	if got.day != "2026-10-16" {
+		t.Fatalf("the older key landed on %q", got.day)
+	}
+
+	pinned := draw(got)
+	if !strings.Contains(pinned, "2026-10-16") {
+		t.Fatalf("the frame does not name the pinned day:\n%s", pinned)
+	}
+
+	back := moveDay(t, got, "t")
+	if back.day != "" {
+		t.Fatalf("today left the frame pinned to %q", back.day)
+	}
+	if strings.Contains(draw(back), "2026-10-16") {
+		t.Errorf("the frame still names the day it left:\n%s", draw(back))
+	}
+	if _, ok := src.asked(); !ok {
+		t.Error("returning to today did not re-read")
+	}
+
+	// Already there: a message rather than a silent no-op, and no reading at all.
+	before := len(src.days)
+	same := moveDay(t, back, "t")
+	if len(src.days) != before {
+		t.Errorf("already being today re-read the source: %v", src.days[before:])
+	}
+	if !strings.Contains(draw(same), "already today") {
+		t.Errorf("the frame does not say it is already at today:\n%s", draw(same))
+	}
+}
+
+// TestTheJournalFollowsTheDay checks the second half of the selector: the journal
+// is filtered to the day the counters show, and says so when the day is one the
+// tail does not reach.
+func TestTheJournalFollowsTheDay(t *testing.T) {
+	m, src := monitorOver(t, dayObservation())
+	src.byDay = map[string]Observation{
+		"2026-10-16": pastDay("2026-10-16"),
+		"2026-10-15": pastDay("2026-10-15"),
+	}
+
+	// Today: the whole tail, unfiltered — the day filter can only hide lines on
+	// today's view, never find any.
+	today := pressAll(t, m, "2")
+	if body := draw(today); !strings.Contains(body, "provider refused") {
+		t.Errorf("the tail is not shown in full on today:\n%s", body)
+	}
+
+	// Yesterday: only the lines stamped on it.
+	yesterday := moveDay(t, today, "[")
+	body := draw(yesterday)
+	if !strings.Contains(body, "provider refused") {
+		t.Errorf("the day's own line is not drawn:\n%s", body)
+	}
+	if got := strings.Count(body, "INFO served"); got != 1 {
+		t.Errorf("%d of today's served lines are still in yesterday's journal", got)
+	}
+	if got := strings.Count(body, "INFO started"); got != 0 {
+		t.Errorf("%d of today's startup lines are in yesterday's journal", got)
+	}
+
+	// The day before that: recorded in the state, gone from the tail, and the
+	// frame says which of the two it is looking at.
+	older := moveDay(t, yesterday, "[")
+	if body := draw(older); !strings.Contains(body, "no lines for 2026-10-15") {
+		t.Errorf("the frame does not say the tail does not reach the day:\n%s", body)
+	}
+	if hint := draw(older); !strings.Contains(hint, "t returns to today") {
+		t.Errorf("the empty journal does not name the way out:\n%s", hint)
+	}
+}
+
+// TestLineOnDayKeepsWhatItCannotParse checks the filter's edge: a line whose
+// stamp cannot be read is shown, because dropping it turns a changed format into
+// an empty day, and an empty day is the one answer a filter must never invent.
+func TestLineOnDayKeepsWhatItCannotParse(t *testing.T) {
+	onThe16th := journalStamp("2026-10-16", 12)
+
+	cases := []struct {
+		line string
+		day  string
+		want bool
+	}{
+		{line: onThe16th + " INFO served", day: "2026-10-16", want: true},
+		{line: onThe16th + " INFO served", day: "2026-10-17", want: false},
+		{line: onThe16th + " INFO served", day: "", want: true},
+		{line: "no stamp here at all", day: "2026-10-16", want: true},
+		{line: "", day: "2026-10-16", want: true},
+		{line: "2026-10-16 12:00", day: "2026-10-16", want: true},
+	}
+	for _, c := range cases {
+		if got := lineOnDay(c.line, c.day); got != c.want {
+			t.Errorf("lineOnDay(%q, %q) = %v, want %v", c.line, c.day, got, c.want)
 		}
 	}
 }

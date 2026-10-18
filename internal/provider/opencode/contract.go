@@ -42,9 +42,11 @@ const jsonSchemaDialect = "https://json-schema.org/draft/2020-12/schema"
 // meaningful.
 const DefaultUserAgent = "opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 
-// Stream budgets. The numbers belong to the contract, not to settings: the
-// client holds its own timeouts, and a mismatch would make the gateway break the
-// connection before the client.
+// Stream budgets. The numbers are the contract's own: the client holds its own
+// timeouts, and a budget shorter than the client's would make the gateway break
+// a connection the client still expects to be alive. They are therefore the
+// defaults rather than the only values — an operator on a slow uplink may need
+// a wider band, and the configuration carries it here.
 const (
 	// firstEventTimeout is the budget until the first response headers.
 	firstEventTimeout = 30 * time.Second
@@ -55,10 +57,24 @@ const (
 	reasoningIdleTimeout = 300 * time.Second
 )
 
+// firstEventBudget returns the budget until the first response headers.
+func (p *Provider) firstEventBudget() time.Duration {
+	if p.cfg.FirstEventTimeout > 0 {
+		return p.cfg.FirstEventTimeout
+	}
+	return firstEventTimeout
+}
+
 // idleTimeoutFor chooses the silence budget by the model's capabilities.
-func idleTimeoutFor(m provider.Model) time.Duration {
+func (p *Provider) idleTimeoutFor(m provider.Model) time.Duration {
 	if m.Reasoning {
+		if p.cfg.ReasoningIdleTimeout > 0 {
+			return p.cfg.ReasoningIdleTimeout
+		}
 		return reasoningIdleTimeout
+	}
+	if p.cfg.IdleTimeout > 0 {
+		return p.cfg.IdleTimeout
 	}
 	return chatIdleTimeout
 }

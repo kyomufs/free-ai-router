@@ -68,8 +68,13 @@ func build(cfg *config.Config) (*daemon, error) {
 	}
 	d.state = st
 
-	// The providers.
-	providers, err := catalog.Build(cfg)
+	// The providers. The log goes to the catalog refreshers: a poll failure has
+	// no caller to return to, and the log is the only place it can be reported.
+	var buildLog func(string, ...any)
+	if d.log != nil {
+		buildLog = d.log.Warn
+	}
+	providers, err := catalog.BuildWithLog(cfg, buildLog)
 	if err != nil {
 		return nil, fmt.Errorf("providers: %w", err)
 	}
@@ -133,6 +138,18 @@ func (d *daemon) buildHandler() http.Handler {
 		// in plain strings, while the gateway identifies providers by their own
 		// type, and neither package should have to learn the other's spelling.
 		Credential: func(id provider.ID) string { return d.cfg.CredentialFor(string(id)) },
+
+		// The silence budgets reach the request path here. Without them the
+		// gateway has only the numbers a provider declares for itself, and a
+		// provider that declares none leaves a request waiting on a connection
+		// that has gone quiet — which is what the client sees as a daemon that
+		// has hung.
+		//
+		// Where both exist the provider's numbers win: they are part of ITS
+		// contract, and the pause a reasoning model holds is why they are
+		// per-model at all.
+		FirstEventTimeout: d.cfg.FirstEventTimeout.Val,
+		IdleTimeout:       d.cfg.IdleTimeout.Val,
 	}
 	gw.AllRoutes(root)
 
@@ -172,6 +189,14 @@ func (d *daemon) serve(ctx context.Context) error {
 		d.log.Warn("egress: %v", err)
 	}
 	defer d.egress.Stop()
+
+	// The catalog refresh starts before the listener too, and for the same
+	// reason: reads come out of memory, so a catalog that is still empty would
+	// answer 404 to every request until the first poll. Start waits for that
+	// first read, and a failure is not fatal — the poller keeps trying and the
+	// gateway works, minus the models it cannot name.
+	startPollers(ctx, d.providers)
+	defer stopPollers(d.providers)
 
 	srv := &http.Server{
 		Addr:              d.cfg.Listen.Val,
@@ -333,4 +358,30 @@ func transportIDs() []string {
 		out = append(out, string(id))
 	}
 	return out
+}
+
+// startPollers starts the providers that keep their catalog fresh themselves.
+//
+// Type-asserted rather than declared on Provider: a provider whose catalog is a
+// constant has nothing to refresh, and requiring the method of everyone would
+// put two do-nothing implementations in the codebase to satisfy an interface.
+//
+// A provider that fails to warm up is NOT reported here: Start does not fail, it
+// leaves the catalog empty and keeps retrying. The failure is visible in the
+// poller's log line instead, where the reason is.
+func startPollers(ctx context.Context, reg *provider.Registry) {
+	for _, p := range reg.All() {
+		if polling, ok := p.(provider.Polling); ok {
+			polling.Start(ctx)
+		}
+	}
+}
+
+// stopPollers ends the catalog refreshers.
+func stopPollers(reg *provider.Registry) {
+	for _, p := range reg.All() {
+		if polling, ok := p.(provider.Polling); ok {
+			_ = polling.Stop()
+		}
+	}
 }

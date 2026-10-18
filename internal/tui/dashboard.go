@@ -188,22 +188,35 @@ func (m Model) tileTop(t tileSpec, width int) string {
 
 // todayTile is the day's traffic: what came in, how much of it was answered,
 // and the proportion as a bar.
+//
+// It is titled with the day it shows — "today" only while that is what it is.
+// The tile is the biggest object on the screen, and a reader who moved to a past
+// day and came back to the dashboard must not find the day's own date relegated
+// to a small line under a title that says "today": the numbers and the title would
+// then disagree about which day they describe.
 func (m Model) todayTile() tileSpec {
 	t := m.obs.Totals
+	title := m.dayName()
 	meta := t.Day
-	if meta == "" {
+	switch {
+	case t.Day == "":
 		meta = "no counters"
+	case title != "today":
+		// Under the date itself the key only repeats the title. Under "today" it
+		// stays: it is where the daemon's own boundary falls, and a reader
+		// comparing two days needs it.
+		meta = ""
 	}
 
 	return tileSpec{
-		title:  "today",
+		title:  title,
 		meta:   meta,
 		weight: 1,
 		body: func(inner int) []string {
 			total := t.OK + t.Refused + t.Aborted
 			if total == 0 {
 				return []string{
-					m.pal.Dim.Render("nothing counted yet"),
+					m.pal.Dim.Render("nothing counted"),
 					m.pal.Hint.Render("the counters fill in as the daemon serves"),
 				}
 			}

@@ -47,6 +47,22 @@ type Defaults struct {
 	// provider its own connection pool would mean holding several sets of idle
 	// sockets for one and the same host.
 	HTTP *http.Client
+	// Log receives the warnings of the background catalog refresh.
+	//
+	// A poll failure has no caller to return to: it happens between requests,
+	// and the only place it can be reported is the log. Nil means silent.
+	Log func(format string, args ...any)
+	// FirstEventTimeout, IdleTimeout and ReasoningIdleTimeout are the silence
+	// budgets the provider is to enforce on its own requests.
+	//
+	// They are passed here rather than read inside a provider because the
+	// operator's axes are the operator's: a slow uplink is allowed a longer
+	// silence, and a provider that ignored the setting would keep breaking a
+	// stream the operator had knowingly widened. Zero means the provider's own
+	// contract, which is what its defaults are.
+	FirstEventTimeout    time.Duration
+	IdleTimeout          time.Duration
+	ReasoningIdleTimeout time.Duration
 }
 
 // builders — the mapping "provider type → constructor".
@@ -71,7 +87,23 @@ var builders = map[string]Builder{
 // services have their catalog discovered later, and the gateway itself works
 // without one.
 func Build(cfg *config.Config) (*provider.Registry, error) {
-	defaults := Defaults{Upstream: cfg.Upstream.Val}
+	return BuildWithLog(cfg, nil)
+}
+
+// BuildWithLog assembles the registry and points the background catalog
+// refreshers at a log.
+//
+// A separate entry point rather than a third argument on Build: a one-shot
+// command has no log to give, and a nil parameter at every call site would
+// obscure the calls that do have one.
+func BuildWithLog(cfg *config.Config, log func(format string, args ...any)) (*provider.Registry, error) {
+	defaults := Defaults{
+		Upstream:             cfg.Upstream.Val,
+		Log:                  log,
+		FirstEventTimeout:    cfg.FirstEventTimeout.Val,
+		IdleTimeout:          cfg.IdleTimeout.Val,
+		ReasoningIdleTimeout: cfg.ReasoningIdleTimeout.Val,
+	}
 
 	ids := make([]string, 0, len(cfg.Providers))
 	for id := range cfg.Providers {
@@ -146,6 +178,11 @@ func buildOpenCode(id string, pc config.ProviderConfig, defaults Defaults) (prov
 		OSName:       stringSetting(settings, "os_name"),
 		ClientName:   stringSetting(settings, "client_name"),
 		HTTP:         defaults.HTTP,
+		Log:          defaults.Log,
+
+		FirstEventTimeout:    defaults.FirstEventTimeout,
+		IdleTimeout:          defaults.IdleTimeout,
+		ReasoningIdleTimeout: defaults.ReasoningIdleTimeout,
 	})
 }
 

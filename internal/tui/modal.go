@@ -16,8 +16,11 @@ const (
 	modalMargin = 4
 	// modalContext is how many journal lines are shown around the opened one.
 	modalContext = 3
-	// modalLabelWidth is the column the key list aligns its descriptions to.
-	modalLabelWidth = 16
+	// modalLabelWidth is the column the key list aligns its descriptions to. The
+	// widest key the monitor declares is `⇧tab h ←`, which is eight cells, so this
+	// is a gutter and not a fit: it is what makes two columns of keys possible
+	// inside one modal.
+	modalLabelWidth = 14
 )
 
 // modalWidth is the modal's width for the current terminal.
@@ -167,10 +170,61 @@ func (m Model) axesModal() string {
 // one thing a reader must not have to scroll for — "can this program be made to
 // change my daemon" is the question they opened the help with — and a line at the
 // bottom is the first thing dropped when the list runs past the terminal.
+//
+// TWO COLUMNS ON A WIDE MODAL. The list grows with the keys, and this is the one
+// place every one of them has to be visible at once: a help that runs past the
+// bottom is elided, and an elided help answers "there is a key for that,
+// somewhere". The groups are split in their own order — first half down the left
+// column, second half down the right — which keeps every group together and
+// halves the height. A modal too narrow to hold two columns keeps the single
+// column and the elision note.
 func (m Model) helpModal() string {
 	groups := m.keys.groups()
-	lines := make([]string, 0, len(groups)*4)
+	inner := max(1, m.modalWidth()-m.pal.Modal.GetHorizontalFrameSize())
+	meta := "read-only · ? closes"
 
+	if split, ok := m.helpSplit(groups, inner); ok {
+		return m.modalBox("keys", meta, joinHelpColumns(
+			m.helpColumn(groups[:split]), m.helpColumn(groups[split:])))
+	}
+	return m.modalBox("keys", meta, m.helpColumn(groups))
+}
+
+// helpTwoColumns is the inner width below which the list is never split: two
+// columns need at least the width of a key description each.
+const helpTwoColumns = 56
+
+// helpColumnGap separates the two columns of the help.
+const helpColumnGap = 3
+
+// helpSplit is where the groups divide in two, and whether any split fits.
+//
+// EVERY SPLIT IS TRIED, because the columns' widths come from the length of the
+// descriptions and only laying them out says whether two of them fit side by
+// side. Among the splits that fit, the one with the shortest taller column wins:
+// the height is what the reader pays for, and an uneven pair wastes room the
+// longest description may need next month.
+func (m Model) helpSplit(groups []keyGroup, inner int) (int, bool) {
+	if inner < helpTwoColumns {
+		return 0, false
+	}
+
+	best, bestHeight := 0, 0
+	for split := 1; split < len(groups); split++ {
+		left, right := m.helpColumn(groups[:split]), m.helpColumn(groups[split:])
+		if joinHelpWidth(left, right) > inner {
+			continue
+		}
+		if h := max(len(left), len(right)); best == 0 || h < bestHeight {
+			best, bestHeight = split, h
+		}
+	}
+	return best, best != 0
+}
+
+// helpColumn renders a run of groups, each titled, as lines.
+func (m Model) helpColumn(groups []keyGroup) []string {
+	lines := make([]string, 0, len(groups)*4)
 	for i, g := range groups {
 		if i > 0 {
 			lines = append(lines, "")
@@ -182,6 +236,41 @@ func (m Model) helpModal() string {
 				m.pal.Value.Render(b.Help().Desc))
 		}
 	}
+	return lines
+}
 
-	return m.modalBox("keys", "read-only · ? closes", lines)
+// joinHelpColumns puts two runs of lines side by side.
+//
+// The left column is padded to its own widest line and the shorter run with empty
+// lines, so the rows of the two columns stay aligned with each other: a column
+// that drifted by a row would read as if the group opposite it were its parent.
+func joinHelpColumns(left, right []string) []string {
+	width := helpColumnGap + columnWidth(left)
+
+	out := make([]string, 0, max(len(left), len(right)))
+	for i := range max(len(left), len(right)) {
+		var l, r string
+		if i < len(left) {
+			l = left[i]
+		}
+		if i < len(right) {
+			r = right[i]
+		}
+		out = append(out, padTo(l, width)+r)
+	}
+	return out
+}
+
+// joinHelpWidth is how wide the joined columns would be.
+func joinHelpWidth(left, right []string) int {
+	return columnWidth(left) + helpColumnGap + columnWidth(right)
+}
+
+// columnWidth is the widest line of a column.
+func columnWidth(lines []string) int {
+	width := 0
+	for _, l := range lines {
+		width = max(width, lipgloss.Width(l))
+	}
+	return width
 }

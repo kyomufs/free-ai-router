@@ -265,6 +265,12 @@ func (m Model) sectionMeta() string {
 	if n := len(m.obs.Logs); n != len(m.filtered) {
 		meta = itoa(len(m.filtered)) + " of " + itoa(n) + " lines"
 	}
+	// The day is named whenever the journal is filtered to one: the meta line is
+	// what says the block is not showing everything the file holds, and on a past
+	// day it is showing a selection of a tail rather than a tail.
+	if day := m.logDay(); day != "" {
+		meta += " · " + day
+	}
 	if m.filter != "" {
 		meta += " · filter " + m.filter
 	}

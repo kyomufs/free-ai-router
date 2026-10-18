@@ -17,17 +17,30 @@ import (
 // one so that a check reaches the parsing rather than a 404.
 const listPath = "/zen/v1/models"
 
-// newTestCatalog serves one answer for the list and returns the catalog that
-// reads it.
+// newTestCatalog serves one answer for the list and returns a started catalog.
 //
 // The server stands in for the service because a check must not reach the
 // network: the real list changes with the service, and a check that depended on
 // it would fail for reasons that have nothing to do with the parsing.
+//
+// Start is called because reads come out of memory: an unstarted catalog has
+// never read anything and reports nothing, which would make every parse check
+// pass vacuously.
 func newTestCatalog(t *testing.T, handler http.HandlerFunc) *Catalog {
+	t.Helper()
+	return newTestCatalogWithLog(t, handler, nil)
+}
+
+// newTestCatalogWithLog is newTestCatalog with somewhere for the poller's
+// warnings to go.
+func newTestCatalogWithLog(t *testing.T, handler http.HandlerFunc, log func(string, ...any)) *Catalog {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return New(srv.URL, listPath, srv.Client(), nil)
+	c := New(srv.URL, listPath, srv.Client(), nil).WithLog(log)
+	c.Start(t.Context())
+	t.Cleanup(func() { _ = c.Stop() })
+	return c
 }
 
 // serveList answers every request with the given status and body.
@@ -164,17 +177,17 @@ func TestEligibilityJudgesUndescribedModelsToo(t *testing.T) {
 	}
 }
 
-// TestRefusalStatusBecomesACatalogError — a refusal has to come back as an error
-// carrying the status and the service's explanation.
+// TestARefusalCarriesTheStatusAndTheExplanation — the log line names the cause.
 //
-// A catalog that quietly returned nothing would show the operator an empty
-// selector, which is indistinguishable from the service having no models at all.
-func TestRefusalStatusBecomesACatalogError(t *testing.T) {
+// A poll that failed with only "something went wrong" would leave the operator
+// with an empty selector and nothing to act on. The status says WHICH refusal it
+// was and the body says why, and both survive into the message.
+func TestARefusalCarriesTheStatusAndTheExplanation(t *testing.T) {
 	c := newTestCatalog(t, serveList(t, http.StatusUnauthorized, `{"error":"no key"}`))
 
-	models, err := c.Models(t.Context())
+	ids, err := c.fetchList(t.Context())
 	if err == nil {
-		t.Fatalf("Models = %+v and no error, want the refusal reported", models)
+		t.Fatalf("fetchList = %v and no error, want the refusal reported", ids)
 	}
 	var catErr *Error
 	if !asError(err, &catErr) {
@@ -190,33 +203,72 @@ func TestRefusalStatusBecomesACatalogError(t *testing.T) {
 	}
 }
 
-// TestEmptyListIsAnError — the service answering with no models means the
-// parsing drifted from the response shape, not that the service has none.
+// TestEmptyListLeavesTheCatalogEmpty — the service answering with no models is
+// not taken as a catalog.
 //
-// Returning an empty catalog silently would leave the operator with an empty
-// selector and no explanation of why.
-func TestEmptyListIsAnError(t *testing.T) {
+// The read is silent now: it serves memory and has no error to return. What
+// matters is that an unusable answer does not become a list — a catalog of
+// nothing is the honest state, and the poller will report the reason into the
+// log on its next pass.
+func TestEmptyListLeavesTheCatalogEmpty(t *testing.T) {
 	c := newTestCatalog(t, serveList(t, http.StatusOK, `{"data":[]}`))
 
-	if models, err := c.Models(t.Context()); err == nil {
-		t.Fatalf("Models = %+v and no error, want the empty answer reported as a fault", models)
+	models, err := c.Models(t.Context())
+	if err != nil {
+		t.Fatalf("Models: %v, want a read from memory not to fail", err)
+	}
+	if len(models) != 0 {
+		t.Fatalf("Models = %+v, want no models from an empty answer", models)
 	}
 }
 
-// TestUnparsableAnswerIsAnError — a body that is not JSON must be reported rather
-// than read as an empty list.
-func TestUnparsableAnswerIsAnError(t *testing.T) {
-	c := newTestCatalog(t, serveList(t, http.StatusOK, `<html>gateway</html>`))
+// TestUnparsableAnswerLeavesTheCatalogEmpty — a body that is not JSON must not be
+// read as a list of models.
+func TestUnparsableAnswerLeavesTheCatalogEmpty(t *testing.T) {
+	var logged atomic.Int32
+	c := newTestCatalogWithLog(t, serveList(t, http.StatusOK, `<html>gateway</html>`),
+		func(string, ...any) { logged.Add(1) })
 
-	if models, err := c.Models(t.Context()); err == nil {
-		t.Fatalf("Models = %+v and no error, want the unparsed answer reported", models)
+	models, err := c.Models(t.Context())
+	if err != nil {
+		t.Fatalf("Models: %v, want a read from memory not to fail", err)
+	}
+	if len(models) != 0 {
+		t.Fatalf("Models = %+v, want no models from an unparsable answer", models)
+	}
+	if logged.Load() == 0 {
+		t.Fatal("the poll failure was not logged: nothing would explain the empty catalog")
 	}
 }
 
-// TestFreshListIsNotRequestedTwice — the list is cached, because every client
-// request would otherwise turn into a request to the service and the gateway
-// would spend quota enumerating what it already knows.
-func TestFreshListIsNotRequestedTwice(t *testing.T) {
+// TestARefusedListIsReportedToTheLog — a refusal has no caller to return to.
+//
+// The poller runs between requests, so the error cannot be handed back to
+// anyone: the log is the only place it survives, and a silent refusal would
+// leave an empty catalog with no explanation.
+func TestARefusedListIsReportedToTheLog(t *testing.T) {
+	var logged atomic.Int32
+	c := newTestCatalogWithLog(t, serveList(t, http.StatusForbidden, `{"error":"denied"}`),
+		func(string, ...any) { logged.Add(1) })
+
+	models, err := c.Models(t.Context())
+	if err != nil {
+		t.Fatalf("Models: %v, want a read from memory not to fail", err)
+	}
+	if len(models) != 0 {
+		t.Fatalf("Models = %+v, want no models after a refusal", models)
+	}
+	if logged.Load() == 0 {
+		t.Fatal("the refusal was not logged: the empty catalog would be unexplained")
+	}
+}
+
+// TestReadsDoNotReachTheService — the request path never pays for the catalog.
+//
+// This is the whole point of the background poller: a hundred client requests
+// and a quiet gateway ask the service the same number of times, and none of
+// those requests can be delayed by a slow or unreachable service.
+func TestReadsDoNotReachTheService(t *testing.T) {
 	var hits atomic.Int32
 	c := newTestCatalog(t, func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
@@ -224,13 +276,20 @@ func TestFreshListIsNotRequestedTwice(t *testing.T) {
 		_, _ = w.Write([]byte(`{"data":[{"id":"alpha-free"}]}`))
 	})
 
+	before := hits.Load()
 	for i := 0; i < 3; i++ {
 		if _, err := c.Models(t.Context()); err != nil {
 			t.Fatalf("Models call %d: %v", i+1, err)
 		}
 	}
-	if got := hits.Load(); got != 1 {
-		t.Fatalf("the list was requested %d times, want 1 while it is fresh", got)
+	if got := hits.Load(); got != before {
+		t.Fatalf("the list was requested %d more times on the read path, want 0", got-before)
+	}
+
+	// The warm-up read is the one request that IS expected: without it a freshly
+	// started catalog would have nothing to report.
+	if before != 1 {
+		t.Fatalf("warm-up made %d requests, want exactly 1", before)
 	}
 }
 
@@ -276,6 +335,8 @@ func TestPropertiesAugmentTheListWithoutDecidingIt(t *testing.T) {
 		Free:      true,
 	}}}
 	c := New(srv.URL, listPath, srv.Client(), nil, described)
+	c.Start(t.Context())
+	t.Cleanup(func() { _ = c.Stop() })
 
 	models, err := c.Models(t.Context())
 	if err != nil {
@@ -294,6 +355,8 @@ func TestPropertiesAugmentTheListWithoutDecidingIt(t *testing.T) {
 	// A source that failed leaves the catalog standing, described with defaults.
 	failing := &metaSourceStub{err: &Error{Op: "property catalog", Status: 500, Reason: "down"}}
 	broken := New(srv.URL, listPath, srv.Client(), nil, failing)
+	broken.Start(t.Context())
+	t.Cleanup(func() { _ = broken.Stop() })
 	models, err = broken.Models(t.Context())
 	if err != nil {
 		t.Fatalf("Models with a failed property source: %v", err)
@@ -346,5 +409,39 @@ func TestDescribeKeepsTheReasoningLadderIntact(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), `"budget_tokens"`) {
 		t.Fatalf("the budget form lost its kind: %s", encoded)
+	}
+}
+
+// TestTheWaitAfterAFailureShrinksTowardsTheTtl — the poller's interval is a
+// ladder, not a constant. What it must never be is the TTL straight after a
+// failure: a daemon that came up while the uplink was down would then serve an
+// empty catalog for five minutes, and every request inside that window would be
+// answered "the model does not exist".
+func TestTheWaitAfterAFailureShrinksTowardsTheTtl(t *testing.T) {
+	// The first wait is the one the warm-up's result sizes. A warm catalog is
+	// polled at the TTL, a cold one is asked again as soon as firstRetryDelay.
+	if got := firstWait(true); got != listTTL {
+		t.Fatalf("the wait after a successful warm-up = %v, want %v", got, listTTL)
+	}
+	if got := firstWait(false); got != firstRetryDelay {
+		t.Fatalf("the wait after a failed warm-up = %v, want %v", got, firstRetryDelay)
+	}
+
+	// A failure doubles the wait, and a success returns it to the TTL.
+	if got := nextWait(false, firstRetryDelay); got != 2*firstRetryDelay {
+		t.Fatalf("the wait after a second failure = %v, want %v", got, 2*firstRetryDelay)
+	}
+	if got := nextWait(true, firstRetryDelay); got != listTTL {
+		t.Fatalf("the wait after a good read = %v, want %v", got, listTTL)
+	}
+
+	// The ladder is capped by the TTL, and a failure AT the TTL comes back to the
+	// short retry: a service that recovers after a long outage must be noticed in
+	// seconds, not at the end of another interval.
+	if got := nextWait(false, 4*listTTL/5); got != listTTL {
+		t.Fatalf("the ladder sailed past the TTL: %v, want %v", got, listTTL)
+	}
+	if got := nextWait(false, listTTL); got != firstRetryDelay {
+		t.Fatalf("the wait after a failure at the TTL = %v, want %v", got, firstRetryDelay)
 	}
 }

@@ -67,6 +67,10 @@ type keyMap struct {
 	Axes    key.Binding
 	Refresh key.Binding
 
+	PrevDay key.Binding
+	NextDay key.Binding
+	Today   key.Binding
+
 	Help key.Binding
 	Back key.Binding
 	Quit key.Binding
@@ -152,6 +156,23 @@ func newKeyMap() keyMap {
 			key.WithHelp("r", "read again"),
 		),
 
+		// The day keys mirror paging through the state: one day back, one day
+		// forward, and one key all the way home. `[` and `]` rather than the
+		// arrows, which already walk the focused block, and `t` rather than
+		// `0`, which would read as a section number beside `1` and `2`.
+		PrevDay: key.NewBinding(
+			key.WithKeys("["),
+			key.WithHelp("[", "the day before"),
+		),
+		NextDay: key.NewBinding(
+			key.WithKeys("]"),
+			key.WithHelp("]", "the day after"),
+		),
+		Today: key.NewBinding(
+			key.WithKeys("t"),
+			key.WithHelp("t", "today"),
+		),
+
 		Help: key.NewBinding(
 			key.WithKeys("?"),
 			key.WithHelp("?", "these keys"),
@@ -192,6 +213,9 @@ func (k keyMap) groups() []keyGroup {
 		}},
 		{name: "the daemon", bindings: []key.Binding{
 			k.Sort, k.Axes, k.Refresh,
+		}},
+		{name: "the days", bindings: []key.Binding{
+			k.PrevDay, k.NextDay, k.Today,
 		}},
 		{name: "the monitor", bindings: []key.Binding{
 			k.Help, k.Back, k.Quit,
@@ -438,6 +462,26 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.sort = m.sort.next()
 		m.Scroll[BlockDashboard] = 0
 		return m, nil
+
+	case key.Matches(msg, m.keys.PrevDay):
+		// Which day is shown is a property of the READING, so these three
+		// re-read rather than re-render, and they are not gated on the journal
+		// being on screen: today's counters and a past day's counters are the
+		// same question asked of a different bucket.
+		return m.stepDay(-1)
+
+	case key.Matches(msg, m.keys.NextDay):
+		return m.stepDay(1)
+
+	case key.Matches(msg, m.keys.Today):
+		// Returning to today is not "a jump to the newest day": it hands the
+		// choice back to the daemon, which is what makes a monitor left open
+		// across midnight follow it.
+		next, cmd, moved := m.backToToday()
+		if !moved {
+			return next.raiseToast("already today", false)
+		}
+		return next, cmd
 
 	case key.Matches(msg, m.keys.Wrap):
 		m.Wrap = !m.Wrap
@@ -831,16 +875,29 @@ func trimLast(s string) string {
 	return string(r[:len(r)-1])
 }
 
-// filterLogs applies the current filter to the journal.
+// filterLogs applies the current filter and the selected day to the journal.
 //
 // Matching is case-insensitive and on a substring, not a pattern: the reader is
 // looking for a word they saw, and a pattern language would be one more thing to
 // get wrong while reading a log.
+//
+// The day is applied HERE rather than to the reading, because the journal is one
+// tail of one file: the source has nothing to select a day out of, and a filter
+// over the tail is the only thing it can be. dayLines counts what the day filter
+// kept before the text filter ran, which is the difference between "the tail does
+// not reach that day" and "nothing in it matches" — two empty blocks with
+// different answers.
 func (m *Model) filterLogs() {
 	m.filtered = m.filtered[:0]
+	m.dayLines = 0
 	needle := strings.ToLower(m.filter)
+	day := m.logDay()
 
 	for i, line := range m.obs.Logs {
+		if !lineOnDay(line, day) {
+			continue
+		}
+		m.dayLines++
 		if needle == "" || strings.Contains(strings.ToLower(line), needle) {
 			m.filtered = append(m.filtered, logLine{text: line, index: i})
 		}

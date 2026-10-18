@@ -31,19 +31,29 @@ import (
 const (
 	// catalogTimeout is the catalog wait limit.
 	//
-	// The catalog is requested on the path of a live request: both for the model
-	// list and for validating a model before sending. A long wait here would
-	// delay the request itself, so the limit is short: the catalog is either
-	// there or it is not, and there is nothing worth waiting longer for.
+	// The catalog is read by the background poller, never on the path of a live
+	// request: reading is served from memory. So this limit does not delay
+	// anyone, and a slow service may take its time.
 	catalogTimeout = 8 * time.Second
 
-	// listTTL is the list's shelf life.
+	// listTTL is how often the background poller re-reads the list.
 	//
 	// Models are added and disappear rarely, but are asked for often. Without a
-	// shelf life every client request would turn into a network request to the
-	// service, and the gateway would burn quota enumerating what it already
+	// poll interval every client request would turn into a network request to
+	// the service, and the gateway would burn quota enumerating what it already
 	// knows.
 	listTTL = 5 * time.Minute
+
+	// firstRetryDelay is how soon the poller asks again after a failure.
+	//
+	// A failed poll keeps the list that is already in memory — the previous list
+	// is still the best answer there is — but it must not also mean a full TTL
+	// of silence. A network that went away for twenty seconds comes back in
+	// twenty seconds, and a gateway that waits five minutes to notice is a
+	// gateway that reports an empty catalog long after the models are served
+	// again. The retry backs off from here towards listTTL, so an unreachable
+	// service is still asked rarely.
+	firstRetryDelay = 5 * time.Second
 
 	// metaTTL is the shelf life of model properties. They change even more
 	// rarely than the list.
@@ -104,17 +114,37 @@ type Catalog struct {
 	eligible Eligibility
 
 	mu sync.Mutex
-	// list is the last list and the time it was fetched.
-	list   []string
-	listAt time.Time
+	// list is the last list read by the poller.
+	list []string
 	// meta is the last properties merged from the sources.
 	meta   map[string]provider.Model
 	metaAt time.Time
 
-	// fetching separates fetching from cache reads. Holding the main lock for
-	// the duration of the network call would stall cache reads for every other
-	// request.
+	// fetching serializes the meta refresh. The poller is the only writer, but
+	// a source may be slow, and a second poll overlapping the first would pay
+	// for the same request twice.
 	fetching sync.Mutex
+
+	// log receives poller warnings. May be nil.
+	log Logger
+	// stop ends the poller, stopped confirms it ended.
+	stop    chan struct{}
+	stopped chan struct{}
+	// started guards against a second poller.
+	started bool
+}
+
+// Logger receives poller warnings.
+//
+// Declared here rather than imported: the catalog needs one method, and a
+// package that demanded a whole logging interface would force its callers to
+// satisfy a contract they do not otherwise use.
+type Logger func(format string, args ...any)
+
+// WithLog attaches a logger to the poller.
+func (c *Catalog) WithLog(log Logger) *Catalog {
+	c.log = log
+	return c
 }
 
 // New creates a catalog.
@@ -142,6 +172,144 @@ func (c *Catalog) WithEligibility(eligible Eligibility) *Catalog {
 	return c
 }
 
+// Start begins the background refresh and returns once the first fetch is done.
+//
+// The warm-up is synchronous on purpose: a daemon that starts serving before it
+// has a catalog would answer 404 to every request until the first poll. Waiting
+// here costs one round trip at start-up and removes that window entirely.
+//
+// A failed warm-up is not fatal. The list stays empty and the poller keeps
+// trying, which is the same honest state the catalog reports when the service
+// is unreachable.
+func (c *Catalog) Start(ctx context.Context) {
+	c.mu.Lock()
+	if c.started {
+		c.mu.Unlock()
+		return
+	}
+	c.started = true
+	c.stop = make(chan struct{})
+	c.stopped = make(chan struct{})
+	c.mu.Unlock()
+
+	c.refreshList(ctx)
+
+	go c.loop(ctx, c.warmed())
+}
+
+// warmed reports whether the warm-up left a list in memory.
+func (c *Catalog) warmed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.list) > 0
+}
+
+// Stop ends the poller and waits for it to finish.
+func (c *Catalog) Stop() error {
+	c.mu.Lock()
+	if !c.started {
+		c.mu.Unlock()
+		return nil
+	}
+	stop, stopped := c.stop, c.stopped
+	c.started = false
+	c.mu.Unlock()
+
+	close(stop)
+	<-stopped
+	return nil
+}
+
+// loop refreshes the list on an interval.
+//
+// The interval is shared with the warm-up: the poller reads the list regardless
+// of traffic, so a quiet gateway and a busy one ask the service the same number
+// of times. That is the point of moving the fetch off the request path — the
+// cost no longer depends on how many clients are talking.
+//
+// On a failure the interval is no longer the TTL but a backoff from
+// firstRetryDelay up to it. The reads keep being served from the list already in
+// memory either way, so the only thing the backoff affects is how quickly a
+// recovered network is noticed.
+//
+// The warm-up's own result is the first wait: a daemon that starts while the
+// uplink is down has already failed once by the time the poller begins, and
+// starting the countdown at the TTL would leave the catalog empty for those five
+// minutes. Every request in that window is answered "the model does not exist",
+// which is both wrong and looks like a configuration mistake — so the poller's
+// first question after a failed warm-up comes as soon as firstRetryDelay.
+func (c *Catalog) loop(ctx context.Context, warm bool) {
+	defer close(c.stopped)
+
+	wait := firstWait(warm)
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.stop:
+			return
+		case <-timer.C:
+			wait = nextWait(c.refreshList(ctx), wait)
+			timer.Reset(wait)
+		}
+	}
+}
+
+// firstWait sizes the poller's first interval from the warm-up's result.
+func firstWait(warm bool) time.Duration {
+	if warm {
+		return listTTL
+	}
+	return firstRetryDelay
+}
+
+// nextWait sizes the wait that follows an attempt.
+//
+// Separate from the loop so the ladder is readable — and testable — on its own:
+// the interval is the TTL after a good read, doubles towards it while it keeps
+// failing, and returns to firstRetryDelay once the TTL itself has failed, so that
+// a service that comes back after a long outage is noticed in seconds rather
+// than at the end of another interval.
+func nextWait(ok bool, wait time.Duration) time.Duration {
+	switch {
+	case ok:
+		return listTTL
+	case wait < listTTL:
+		return min(2*wait, listTTL)
+	default:
+		return firstRetryDelay
+	}
+}
+
+// refreshList re-reads the list, keeping the previous one if the service fails.
+//
+// A failure is logged and dropped, never returned: the poller runs in the
+// background with no caller to hand an error to, and a broken poll must not
+// disturb the reads that are still being served from memory. The result is
+// reported as a bool instead, because it is what the poller needs to size its
+// next wait.
+func (c *Catalog) refreshList(ctx context.Context) bool {
+	ids, err := c.fetchList(ctx)
+	if err != nil {
+		if c.log != nil {
+			c.log("the model list could not be refreshed: %v", err)
+		}
+		return false
+	}
+	c.mu.Lock()
+	c.list = ids
+	c.mu.Unlock()
+
+	// The properties are refreshed in the same pass. They are needed to decide
+	// which models are free, so an unanswered list should not be followed by a
+	// read that still owes a request.
+	c.refreshMeta(ctx)
+	return true
+}
+
 // Error describes why the catalog was not obtained.
 //
 // A separate type rather than a string: the caller distinguishes the cases — the
@@ -166,19 +334,18 @@ func (e *Error) Error() string {
 
 // Models returns the model catalog.
 //
-// Order: fresh cache, then the network. A network error is NOT substituted with
-// the previous list. A substituted list would put models back into the selector
-// that may no longer exist, i.e. it would reproduce exactly the
-// desynchronisation that the catalog is taken from the network to eliminate. A
-// missing catalog is an honest state, and the client must see it as missing
-// rather than as a list.
+// The list comes from memory and the meta sources from their own cache: a read
+// never performs a network request. Refreshing is the background poller's job,
+// so a slow or unreachable service delays nobody and the request path never
+// pays for the catalog.
+//
+// An empty list is reported as an empty catalog rather than an error. The
+// service may simply not have answered yet, and the caller sees a catalog of
+// zero models — a state it already has to handle.
 func (c *Catalog) Models(ctx context.Context) ([]provider.Model, error) {
-	ids, err := c.listIDs(ctx)
-	if err != nil {
-		return nil, err
-	}
+	ids := c.listIDs()
 
-	meta := c.metaModels(ctx)
+	meta := c.metaModels()
 
 	out := make([]provider.Model, 0, len(ids))
 	for _, id := range ids {
@@ -203,38 +370,14 @@ func (c *Catalog) Models(ctx context.Context) ([]provider.Model, error) {
 }
 
 // listIDs returns the identifiers of the models available right now.
-func (c *Catalog) listIDs(ctx context.Context) ([]string, error) {
-	c.mu.Lock()
-	if c.list != nil && time.Since(c.listAt) < listTTL {
-		ids := c.list
-		c.mu.Unlock()
-		return ids, nil
-	}
-	c.mu.Unlock()
-
-	c.fetching.Lock()
-	defer c.fetching.Unlock()
-
-	// While we were waiting in the queue, another request may have refreshed
-	// the list.
-	c.mu.Lock()
-	if c.list != nil && time.Since(c.listAt) < listTTL {
-		ids := c.list
-		c.mu.Unlock()
-		return ids, nil
-	}
-	c.mu.Unlock()
-
-	ids, err := c.fetchList(ctx)
-
+//
+// It reads and nothing else: no locking around a network call, no waiting on a
+// fetch in flight. The poller may be mid-refresh, and the answer it is about to
+// store is for the NEXT read, not this one.
+func (c *Catalog) listIDs() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err != nil {
-		// The previous list is not kept as an answer: it would look fresh.
-		return nil, err
-	}
-	c.list, c.listAt = ids, time.Now()
-	return ids, nil
+	return c.list
 }
 
 // fetchList requests the model list.
@@ -297,28 +440,28 @@ func (c *Catalog) fetchList(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
-// metaModels collects model properties from the sources.
+// metaModels returns the properties collected so far.
+//
+// Read-only: the sources are polled by refreshMeta from the background pass.
+func (c *Catalog) metaModels() map[string]provider.Model {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.meta
+}
+
+// refreshMeta collects model properties from the sources.
 //
 // The sources are polled in turn, each with its own shelf life. A failure of any
 // of them does not interrupt the collection: properties are a refinement, and
 // their absence merely means a more modest model description.
-func (c *Catalog) metaModels(ctx context.Context) map[string]provider.Model {
-	c.mu.Lock()
-	if c.meta != nil && time.Since(c.metaAt) < metaTTL {
-		m := c.meta
-		c.mu.Unlock()
-		return m
-	}
-	c.mu.Unlock()
-
+func (c *Catalog) refreshMeta(ctx context.Context) {
 	c.fetching.Lock()
 	defer c.fetching.Unlock()
 
 	c.mu.Lock()
 	if c.meta != nil && time.Since(c.metaAt) < metaTTL {
-		m := c.meta
 		c.mu.Unlock()
-		return m
+		return
 	}
 	c.mu.Unlock()
 
@@ -337,13 +480,12 @@ func (c *Catalog) metaModels(ctx context.Context) map[string]provider.Model {
 		}
 	}
 	if !got {
-		return nil
+		return
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.meta, c.metaAt = merged, time.Now()
-	return merged
+	c.mu.Unlock()
 }
 
 // Defaults for a model without properties.

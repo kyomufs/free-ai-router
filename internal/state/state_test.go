@@ -182,8 +182,8 @@ func TestAddressesAreIndependentBuckets(t *testing.T) {
 	if len(day.ByAddress) != 2 {
 		t.Fatalf("ByAddress = %+v, want two independent rows", day.ByAddress)
 	}
-	// The order is alphabetical, and digits sort before letters, so the IPv4
-	// literal comes first.
+	// The rows are in use order, and the IPv4 address is the one that was used
+	// first — whether the two marks land in the same millisecond or not.
 	v4, v6 := day.ByAddress[0], day.ByAddress[1]
 	if v4.Address != "213.14.43.234" || v4.Family != "v4" {
 		t.Fatalf("v4 row = %+v", v4)
@@ -196,6 +196,106 @@ func TestAddressesAreIndependentBuckets(t *testing.T) {
 	}
 	if v6.Refused != 2 || v6.OK != 0 {
 		t.Fatalf("v6 counters = %+v", v6)
+	}
+}
+
+// TestAddressesKeepFirstAndLastSeen — the marks are what makes a day's
+// addresses readable as a sequence of uplinks.
+//
+// The egress address changes when the operator switches the uplink, and the
+// question afterwards is which address carried what, in which order. Counters
+// alone cannot answer it: they say how much, never when.
+func TestAddressesKeepFirstAndLastSeen(t *testing.T) {
+	s, path := openTemp(t)
+	s.RecordSuccess(Outcome{Model: "m", Address: "198.51.100.7"})
+	time.Sleep(3 * time.Millisecond)
+	s.RecordRefusal(Outcome{Model: "m", Address: "203.0.113.9"})
+	time.Sleep(3 * time.Millisecond)
+	s.RecordSuccess(Outcome{Model: "m", Address: "198.51.100.7"})
+
+	day := s.Snapshot().Days[0]
+	if len(day.ByAddress) != 2 {
+		t.Fatalf("ByAddress = %+v, want two rows", day.ByAddress)
+	}
+	first, second := day.ByAddress[0], day.ByAddress[1]
+	if first.Address != "198.51.100.7" || second.Address != "203.0.113.9" {
+		t.Fatalf("use order = %q then %q, want the first-used address first",
+			first.Address, second.Address)
+	}
+	if first.FirstSeen == 0 || first.LastSeen == 0 {
+		t.Fatalf("first-used address has no marks: %+v", first)
+	}
+	if first.LastSeen <= first.FirstSeen {
+		t.Fatalf("first-used address LastSeen %d is not after FirstSeen %d",
+			first.LastSeen, first.FirstSeen)
+	}
+	if second.FirstSeen <= first.FirstSeen {
+		t.Fatalf("second address was first seen at %d, not after %d",
+			second.FirstSeen, first.FirstSeen)
+	}
+
+	// The marks reach the disk: the monitor reads them after a restart, and an
+	// order that only exists in memory would come back alphabetical.
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open after Save: %v", err)
+	}
+	reloaded := reopened.Snapshot().Days[0]
+	if len(reloaded.ByAddress) != 2 {
+		t.Fatalf("ByAddress = %+v after reload", reloaded.ByAddress)
+	}
+	if reloaded.ByAddress[0].Address != "198.51.100.7" {
+		t.Fatalf("use order after reload = %+v", reloaded.ByAddress)
+	}
+	if reloaded.ByAddress[0].FirstSeen != first.FirstSeen {
+		t.Fatalf("FirstSeen after reload = %d, want %d",
+			reloaded.ByAddress[0].FirstSeen, first.FirstSeen)
+	}
+}
+
+// TestAddressRowsWithoutMarksStillOrder — a file written before the marks
+// existed must still read in one fixed order.
+//
+// A missing mark reads as zero, and zero is what a restoration or an upgrade
+// produces. The rows then fall back to the address string, which is the order
+// the previous version showed: an upgrade must not reshuffle the matrix.
+func TestAddressRowsWithoutMarksStillOrder(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	fixture := `{
+  "version": 2,
+  "updated_at": 1792253829189,
+  "days": {
+    "` + dayKeyForTest() + `": {
+      "ok": 3,
+      "by_address": {
+        "203.0.113.9": { "family": "v4", "ok": 2 },
+        "198.51.100.7": { "family": "v4", "ok": 1 }
+      }
+    }
+  }
+}`
+	if err := os.WriteFile(path, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open of a file without address marks: %v", err)
+	}
+
+	day := s.Snapshot().Days[0]
+	if len(day.ByAddress) != 2 {
+		t.Fatalf("ByAddress = %+v, want two rows", day.ByAddress)
+	}
+	if day.ByAddress[0].Address != "198.51.100.7" {
+		t.Fatalf("rows without marks = %+v, want the address order", day.ByAddress)
+	}
+	if day.ByAddress[0].FirstSeen != 0 || day.ByAddress[0].LastSeen != 0 {
+		t.Fatalf("a file without marks invented one: %+v", day.ByAddress[0])
 	}
 }
 

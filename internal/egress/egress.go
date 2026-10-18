@@ -67,11 +67,42 @@ const DefaultURLV6 = "https://[2606:4700:4700::1111]/cdn-cgi/trace"
 
 // DefaultTTL is how long an answer is trusted.
 //
-// Five minutes: the address of a deployment changes when the uplink reconnects or
-// when a policy route is switched, which is a rare event, while a request that
-// waits for the answer must not wait long. The value is a compromise between
-// noticing a change and not asking on every request.
-const DefaultTTL = 5 * time.Minute
+// A MINUTE, and the cost of it is one small request per family per minute on a
+// connection that is already warm. What it buys is the case that made this a
+// complaint: the operator switches the uplink by hand — a VPN, a tethered
+// modem — and from that moment every request leaves from an address the resolver
+// still believes is the old one. The counters are then attributed to an address
+// that is no longer in use, which is worse than a missing address: the free tier
+// is limited per address, so the monitor's rows answer the operator's real
+// question ("which address spent the quota") with the wrong address.
+//
+// Five minutes was the earlier value, on the grounds that the address rarely
+// changes. It rarely changes per hour and often changes per session — a switch is
+// exactly the moment the operator is watching, and it is the moment the answer
+// has to be right.
+const DefaultTTL = time.Minute
+
+// DefaultRetry is how soon a family that has no answer is asked again.
+//
+// The TTL cannot govern this. A TTL says how long a KNOWN answer is trusted, and
+// a family that never resolved has nothing to trust; gating both on it is what
+// left an address unknown for the whole five minutes between two ticks. While the
+// address is unknown every request is counted without one, and the monitor's rows
+// then do not add up to the day they belong to.
+//
+// A minute rather than seconds: the echo is a third party, and a family that is
+// permanently unusable — an IPv6 route the uplink does not have — must not be
+// asked to death for an answer it can never give.
+const DefaultRetry = time.Minute
+
+// retryTolerance is how much of the retry interval the throttle gives up.
+//
+// The throttle and the tick that feeds it are the same interval, and a tick that
+// arrives a few milliseconds before the throttle expires is skipped — the next
+// one is then a whole interval away. Observed live as a family retried every two
+// and three minutes instead of every one. The intent is "no more often than
+// Retry", and one second of slack keeps it while removing the double wait.
+const retryTolerance = time.Second
 
 // DefaultTimeout bounds one echo request.
 const DefaultTimeout = 10 * time.Second
@@ -131,6 +162,9 @@ type Config struct {
 	Families []string
 	// TTL is how long an answer is trusted.
 	TTL time.Duration
+	// Retry is how soon a family that returned no answer is asked again. Zero
+	// means DefaultRetry.
+	Retry time.Duration
 	// Timeout bounds one request.
 	Timeout time.Duration
 	// Transport returns the transport for a family. Required.
@@ -178,6 +212,10 @@ type answer struct {
 	address string
 	// at is when it was observed.
 	at time.Time
+	// attempt is when it was last ASKED for, whether or not the answer arrived.
+	// Kept apart from at so that a failure can be throttled without pretending
+	// that a fresh address was seen.
+	attempt time.Time
 	// err is why it is unknown, if it is.
 	err error
 }
@@ -204,6 +242,9 @@ func New(cfg Config) *Resolver {
 	// being asked", which is decided per family in resolve.
 	if cfg.TTL <= 0 {
 		cfg.TTL = DefaultTTL
+	}
+	if cfg.Retry <= 0 {
+		cfg.Retry = DefaultRetry
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = DefaultTimeout
@@ -245,7 +286,7 @@ func (r *Resolver) Start(ctx context.Context) error {
 	r.mu.Unlock()
 
 	r.prepareTransports()
-	r.refresh(ctx)
+	r.refresh(ctx, false)
 
 	go r.loop(ctx)
 	return nil
@@ -274,10 +315,16 @@ func (r *Resolver) prepareTransports() {
 }
 
 // loop keeps the answers fresh.
+//
+// The tick is the RETRY interval, not the TTL, and that is deliberate: the tick
+// only DECIDES whether a family is due, and refresh does the deciding. A tick
+// that follows the TTL can only ever retry an unanswered family once per TTL,
+// which is what made an address that failed to resolve stay unknown long after
+// the echo recovered.
 func (r *Resolver) loop(ctx context.Context) {
 	defer close(r.stopped)
 
-	ticker := time.NewTicker(r.cfg.TTL)
+	ticker := time.NewTicker(r.cfg.Retry)
 	defer ticker.Stop()
 
 	for {
@@ -287,7 +334,7 @@ func (r *Resolver) loop(ctx context.Context) {
 		case <-r.stop:
 			return
 		case <-ticker.C:
-			r.refresh(ctx)
+			r.refresh(ctx, false)
 		}
 	}
 }
@@ -350,12 +397,24 @@ func (r *Resolver) Addresses() []Address {
 	return out
 }
 
+// Refresh re-resolves now, ignoring the TTL of an answer that is already known.
+//
+// It exists because the address is not only a column: the provider's free tier is
+// limited per address, so a refusal is the moment the address stops being
+// bookkeeping and becomes the question. An uplink that changed a minute ago is
+// not noticed by the tick until the TTL expires, and every request in between is
+// attributed to the address the traffic no longer leaves from.
+//
+// A family whose last attempt failed is still throttled by Retry: a refusal is
+// not a reason to hammer an echo that is not answering.
+func (r *Resolver) Refresh(ctx context.Context) { r.refresh(ctx, true) }
+
 // refresh resolves every configured family, skipping the ones whose answer is
-// still fresh.
-func (r *Resolver) refresh(ctx context.Context) {
-	// One resolution at a time. The background tick and an interface-triggered
-	// refresh can otherwise overlap, and two in-flight answers for one family
-	// would race to be stored.
+// still fresh. A forced refresh re-asks a family that already has an answer.
+func (r *Resolver) refresh(ctx context.Context, force bool) {
+	// One resolution at a time. The background tick and an on-demand refresh can
+	// otherwise overlap, and two in-flight answers for one family would race to
+	// be stored.
 	r.refreshMu.Lock()
 	defer r.refreshMu.Unlock()
 
@@ -365,7 +424,15 @@ func (r *Resolver) refresh(ctx context.Context) {
 		a := r.answers[family]
 		r.mu.Unlock()
 
-		if a.address != "" && now.Sub(a.at) < r.cfg.TTL {
+		if !force && a.address != "" && now.Sub(a.at) < r.cfg.TTL {
+			continue
+		}
+
+		// The last attempt failed, and the answer is unknown or stale precisely
+		// because of it. Asking again right away would turn an unreachable echo
+		// into a busy loop. The throttle keeps a second of slack so a tick that
+		// lands a moment early is not skipped for a whole interval.
+		if a.err != nil && now.Sub(a.attempt) < r.cfg.Retry-retryTolerance {
 			continue
 		}
 
@@ -380,6 +447,7 @@ func (r *Resolver) refresh(ctx context.Context) {
 			// age and the reason stay visible.
 			prev := r.answers[family]
 			prev.err = err
+			prev.attempt = now
 			r.answers[family] = prev
 			r.primary = r.primaryLocked()
 			r.mu.Unlock()
@@ -390,9 +458,18 @@ func (r *Resolver) refresh(ctx context.Context) {
 			continue
 		}
 
-		r.answers[family] = answer{address: address, at: now}
+		r.answers[family] = answer{address: address, at: now, attempt: now}
 		r.primary = r.primaryLocked()
 		r.mu.Unlock()
+
+		// THE CHANGE IS THE EVENT, not the address. A monitor shows the address
+		// it has now; the journal has to say that it became a different one, when,
+		// and from what — that line is what explains a counter row the operator
+		// did not expect, and without it an uplink switch is only inferable from
+		// two rows that both look current.
+		if prev := a.address; prev != "" && prev != address && r.cfg.Log != nil {
+			r.cfg.Log.Warn("egress: family %s: address changed from %s to %s", family, prev, address)
+		}
 	}
 }
 

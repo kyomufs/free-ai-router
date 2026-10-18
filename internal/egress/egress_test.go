@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -168,7 +169,7 @@ func TestAFailedObservationKeepsTheLastAddress(t *testing.T) {
 	// The echo breaks, then the resolver asks again.
 	e.set("", http.StatusInternalServerError)
 	time.Sleep(5 * time.Millisecond)
-	r.refresh(ctx)
+	r.refresh(ctx, false)
 
 	if got := r.Address(); got != "203.0.113.7" {
 		t.Fatalf("Address = %q, want the last known address to survive a failure", got)
@@ -312,5 +313,200 @@ func TestEachFamilyHasItsOwnEchoAddress(t *testing.T) {
 	}
 	if !strings.Contains(v4, "1.1.1.1") {
 		t.Fatalf("v4 address = %q, want the service's IPv4 address", v4)
+	}
+}
+
+// clock is a clock the test moves by hand, so that a TTL and a retry interval can
+// be outlived without sleeping through them.
+type clock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func (c *clock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+func (c *clock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at = c.at.Add(d)
+}
+
+// TestAnUnansweredFamilyIsRetriedWithinTheTTL — the wait for an unknown address
+// is bounded by Retry, not by the TTL.
+//
+// WHY THIS IS NOT COSMETIC. A request sent while the address is unknown is counted
+// in the day and in the model, and dropped from the address axis, because an empty
+// address deliberately creates no entry. So waiting out a TTL is not a stale
+// column: it is missing rows, and the breakdown stops adding up to the day it
+// belongs to. A family that never resolved is exactly the case a TTL cannot
+// govern — there is no answer for a TTL to expire.
+func TestAnUnansweredFamilyIsRetriedWithinTheTTL(t *testing.T) {
+	e := &echo{status: http.StatusInternalServerError}
+	srv := httptest.NewServer(e.handler())
+	defer srv.Close()
+
+	c := &clock{at: time.Now()}
+	r := New(Config{
+		Families:  FamiliesFor("v4"),
+		URL:       srv.URL,
+		Retry:     time.Minute,
+		Now:       c.now,
+		Transport: func(string) (http.RoundTripper, error) { return srv.Client().Transport, nil },
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = r.Stop() }()
+
+	if got := r.Address(); got != "" {
+		t.Fatalf("Address = %q, want unknown after a failing echo", got)
+	}
+
+	// A recovery is not looked for before Retry has passed: the echo answers
+	// nothing, and asking it every tick would be a loop, not a retry.
+	e.set("ip=203.0.113.7\n", 0)
+	c.advance(30 * time.Second)
+	r.refresh(ctx, false)
+	if n := len(e.asked()); n != 1 {
+		t.Fatalf("the echo was asked %d times, want 1: a failure is throttled by Retry", n)
+	}
+
+	// Once Retry has passed the address is learned, while the TTL has not.
+	c.advance(40 * time.Second)
+	r.refresh(ctx, false)
+	if got := r.Address(); got != "203.0.113.7" {
+		t.Fatalf("Address = %q, want the recovered answer without waiting out the TTL", got)
+	}
+}
+
+// TestRefreshDoesNotWaitOutTheTTL — the address can be re-asked on demand.
+//
+// This is the path a refusal takes. The operator moves to another uplink because
+// the current one is spent, and the requests that follow have to be credited to
+// the address they really leave from: an answer up to a TTL old credits them to
+// the address the operator has just left, which is the counter that must not keep
+// growing.
+func TestRefreshDoesNotWaitOutTheTTL(t *testing.T) {
+	e := &echo{body: "ip=203.0.113.7\n"}
+	srv := httptest.NewServer(e.handler())
+	defer srv.Close()
+
+	r := New(Config{
+		Families:  FamiliesFor("v4"),
+		URL:       srv.URL,
+		Transport: func(string) (http.RoundTripper, error) { return srv.Client().Transport, nil },
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = r.Stop() }()
+
+	// The uplink changed. The cached answer is still the one from before.
+	e.set("ip=198.51.100.9\n", 0)
+
+	// The ordinary refresh honours the TTL: the answer is fresh, so it is kept.
+	r.refresh(ctx, false)
+	if got := r.Address(); got != "203.0.113.7" {
+		t.Fatalf("Address = %q, want a fresh answer to be trusted", got)
+	}
+
+	// The on-demand one does not.
+	r.Refresh(ctx)
+	if got := r.Address(); got != "198.51.100.9" {
+		t.Fatalf("Address = %q, want the changed address to be taken at once", got)
+	}
+}
+
+// TestTheAddressIsTrustedForAMinute — how long an answer is trusted is how long a
+// switched uplink keeps being credited to the address it left.
+//
+// A policy, not an implementation detail: the address is what the free tier is
+// counted against, and every request in that window is filed under the wrong one.
+func TestTheAddressIsTrustedForAMinute(t *testing.T) {
+	if DefaultTTL > time.Minute {
+		t.Fatalf("DefaultTTL = %s, want at most a minute", DefaultTTL)
+	}
+}
+
+// warnLog records the warnings the resolver reports.
+type warnLog struct {
+	mu       sync.Mutex
+	warnings []string
+}
+
+func (l *warnLog) Warn(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.warnings = append(l.warnings, fmt.Sprintf(format, args...))
+}
+
+func (l *warnLog) all() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.warnings...)
+}
+
+// TestAnAddressChangeIsReportedOnce — the journal has to say that the address
+// became a different one, and only when it did.
+//
+// The monitor shows the address it has now; the one thing it cannot show is that
+// this is a DIFFERENT address from the one an hour ago, and that line is what
+// explains a counter row the operator did not expect.
+func TestAnAddressChangeIsReportedOnce(t *testing.T) {
+	e := &echo{body: "ip=203.0.113.7\n"}
+	srv := httptest.NewServer(e.handler())
+	defer srv.Close()
+
+	log := &warnLog{}
+	c := &clock{at: time.Now()}
+	r := New(Config{
+		Families:  FamiliesFor("v4"),
+		URL:       srv.URL,
+		Log:       log,
+		Now:       c.now,
+		Transport: func(string) (http.RoundTripper, error) { return srv.Client().Transport, nil },
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = r.Stop() }()
+
+	// The first observation is not a change: there was no address before it.
+	if got := log.all(); len(got) != 0 {
+		t.Fatalf("warnings = %v, want none for a first observation", got)
+	}
+
+	// The uplink is switched, and the answer is asked for again once its
+	// lifetime has passed.
+	e.set("ip=198.51.100.9\n", 0)
+	c.advance(2 * time.Minute)
+	r.refresh(ctx, false)
+
+	got := log.all()
+	if len(got) != 1 {
+		t.Fatalf("warnings = %v, want one report of the change", got)
+	}
+	if want := "address changed from 203.0.113.7 to 198.51.100.9"; !strings.Contains(got[0], want) {
+		t.Fatalf("warning = %q, want it to contain %q", got[0], want)
+	}
+
+	// The same address seen again is not a change, and a report repeated on
+	// every refresh would bury it in the journal it is meant to explain.
+	r.Refresh(ctx)
+	if n := len(log.all()); n != 1 {
+		t.Fatalf("the change was reported %d times, want once", n)
 	}
 }

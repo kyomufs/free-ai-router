@@ -285,6 +285,88 @@ func TestReasoningFieldFromModel(t *testing.T) {
 	}
 }
 
+// TestEmptyReasoningIsStillWritten — the thinking field is written even when the
+// thinking is empty.
+//
+// A missing key is the failure, not an empty value: in thinking mode the
+// upstream requires the field on every assistant message when tools are in
+// play, and a turn whose thinking happened to be empty cannot be allowed to
+// lose it. That is what the client means when it sends `reasoning_content: ""`,
+// and it is what the upstream holds the client to with "The `reasoning_content`
+// in the thinking mode must be passed back to the API".
+func TestEmptyReasoningIsStillWritten(t *testing.T) {
+	p := newTestProvider(t)
+
+	prep, err := p.Build(provider.Request{
+		Model: provider.Model{ID: "x", Reasoning: true, ReasoningField: "reasoning_content"},
+		Messages: []provider.Message{
+			{Role: "user", Text: "hi"},
+			{Role: "assistant", Text: "looking", ToolCalls: []provider.ToolCall{
+				{ID: "call_1", Name: "shell", Arguments: `{"command":"ls"}`},
+			}},
+			{Role: "tool", ToolCallID: "call_1", Text: "file"},
+		},
+		Tools: []provider.Tool{{Name: "shell"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var body struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(prep.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range body.Messages {
+		if m["role"] != "assistant" {
+			continue
+		}
+		value, ok := m["reasoning_content"]
+		if !ok {
+			t.Fatalf("the thinking field is missing: %v", m)
+		}
+		if value != "" {
+			t.Fatalf("the thinking field = %v, want an empty string", value)
+		}
+	}
+}
+
+// TestNoThinkingFieldOutsideThinkingMode — an ordinary conversation does not get
+// the field.
+//
+// A provider is free to reject a field it does not know, and an empty
+// `reasoning_content` on every message of every request would be exactly that
+// field. The field belongs to thinking mode, and thinking mode is what has to be
+// established.
+func TestNoThinkingFieldOutsideThinkingMode(t *testing.T) {
+	p := newTestProvider(t)
+
+	prep, err := p.Build(provider.Request{
+		Model: provider.Model{ID: "x", ReasoningField: "reasoning_content"},
+		Messages: []provider.Message{
+			{Role: "user", Text: "hi"},
+			{Role: "assistant", Text: "answer"},
+			{Role: "user", Text: "again"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var body struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(prep.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range body.Messages {
+		if _, ok := m["reasoning_content"]; ok {
+			t.Fatalf("the thinking field appeared outside thinking mode: %v", m)
+		}
+	}
+}
+
 // TestEmptyAssistantDropped — an empty assistant turn is not allowed on the wire
 // and must be dropped.
 func TestEmptyAssistantDropped(t *testing.T) {
@@ -446,6 +528,10 @@ func newCatalogProvider(t *testing.T, listBody string, listStatus int) *Provider
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// Reads come out of memory, so the catalog has to be warmed before anything
+	// can be read from it.
+	p.Start(t.Context())
+	t.Cleanup(func() { _ = p.Stop() })
 	return p
 }
 
@@ -504,6 +590,10 @@ func newCatalogProviderWithMeta(t *testing.T, listBody string, meta map[string]s
 		srv.URL, liveModelsPath, srv.Client(), p.applyHeaders,
 		&metaSource{http: srv.Client(), url: srv.URL + metaPath},
 	).WithEligibility(isFree)
+	// Reads come out of memory, so the catalog has to be warmed before anything
+	// can be read from it.
+	p.Start(t.Context())
+	t.Cleanup(func() { _ = p.Stop() })
 	return p
 }
 
@@ -586,25 +676,39 @@ func TestUnpricedModelWithoutFreeNameIsDropped(t *testing.T) {
 	}
 }
 
-// TestCatalogRefusalIsAnError — an unavailable catalog is returned as an error
-// rather than as an empty list. An operator would read an empty list as "the
-// service has no models" and look for the cause in the wrong place.
-func TestCatalogRefusalIsAnError(t *testing.T) {
+// TestCatalogRefusalLeavesTheCatalogEmpty — an unavailable catalog is not an
+// error on the read path any more.
+//
+// The poller owns the network, and its failure has no caller to return to: the
+// read serves memory and reports what it has. An empty catalog is the honest
+// answer, and the reason is in the log rather than in a return value nobody is
+// waiting for.
+func TestCatalogRefusalLeavesTheCatalogEmpty(t *testing.T) {
 	p := newCatalogProvider(t, `{"type":"error"}`, http.StatusForbidden)
 
-	if models, err := p.Models(t.Context()); err == nil {
-		t.Fatalf("Models = %+v, want an error", models)
+	models, err := p.Models(t.Context())
+	if err != nil {
+		t.Fatalf("Models: %v, want a read from memory not to fail", err)
+	}
+	if len(models) != 0 {
+		t.Fatalf("Models = %+v, want nothing after a refused list", models)
 	}
 }
 
-// TestCatalogEmptyListIsAnError — a response without models means the parsing
-// drifted from the response shape, and staying silent about that is not an
-// option.
-func TestCatalogEmptyListIsAnError(t *testing.T) {
+// TestCatalogEmptyListLeavesTheCatalogEmpty — a response without models does not
+// become a catalog.
+//
+// Staying silent about the reason is what the read does now; what must not
+// happen is the empty answer being taken for a list.
+func TestCatalogEmptyListLeavesTheCatalogEmpty(t *testing.T) {
 	p := newCatalogProvider(t, `{"data":[]}`, http.StatusOK)
 
-	if models, err := p.Models(t.Context()); err == nil {
-		t.Fatalf("Models = %+v, want an error for an empty answer", models)
+	models, err := p.Models(t.Context())
+	if err != nil {
+		t.Fatalf("Models: %v, want a read from memory not to fail", err)
+	}
+	if len(models) != 0 {
+		t.Fatalf("Models = %+v, want nothing from an empty answer", models)
 	}
 }
 

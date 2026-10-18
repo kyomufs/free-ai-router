@@ -125,12 +125,23 @@ func uptimeClock(d time.Duration) string {
 }
 
 // countersCell is the day's totals.
+//
+// The label names the day rather than saying "today", because the cell is the one
+// place on every screen that carries the counters: a reader who moved to a past
+// day and looked away from the dashboard would otherwise read the day's numbers
+// as the current ones. The day is also the position in the recorded days — "3/7"
+// — so that the reader can see how far back they are and that the keys have
+// somewhere left to go.
 func (m Model) countersCell() string {
-	if !m.loaded || m.obs.Totals.Day == "" {
-		return m.pal.Dim.Render("no counters for today")
+	if !m.loaded || m.obs.Day == "" {
+		return m.pal.Dim.Render("no counters")
 	}
 	t := m.obs.Totals
-	cell := m.pal.Label.Render("today") + " " + m.pal.SuccessText.Render(fmt.Sprintf("%d OK", t.OK))
+	label := m.dayName()
+	if pos, count, ok := m.dayPlace(); ok && count > 1 {
+		label += fmt.Sprintf(" %d/%d", pos, count)
+	}
+	cell := m.pal.Label.Render(label) + " " + m.pal.SuccessText.Render(fmt.Sprintf("%d OK", t.OK))
 	cell += " " + m.pal.ErrorText.Render(fmt.Sprintf("%d ERR", t.Refused))
 	if t.Aborted > 0 {
 		cell += " " + m.pal.WarningText.Render(fmt.Sprintf("%d ABT", t.Aborted))

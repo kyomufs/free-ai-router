@@ -40,6 +40,14 @@ const schemaVersion = 2
 // does not mean "it grows without bound".
 const retentionDays = 30
 
+// RetentionDays is the window as the reader of a day selector needs it.
+//
+// Exported because the number is the answer to a question asked OUTSIDE this
+// package: a reader asking for a day the state no longer holds is asking about
+// the retention, and "not kept" without a window is a shrug rather than an
+// answer. It is the same constant the trim uses — one number, one place.
+func RetentionDays() int { return retentionDays }
+
 // Store is the daemon's state.
 //
 // All methods are safe for concurrent calls: the counters are updated from
@@ -105,6 +113,14 @@ type AddressCounters struct {
 	OK      int64  `json:"ok"`
 	Refused int64  `json:"refused"`
 	Aborted int64  `json:"aborted"`
+	// FirstSeen is the moment this address first carried a request. It is what
+	// orders the addresses of a day: the uplink is switched by hand, so the
+	// order the addresses appeared in IS the order of the switches, and a reader
+	// follows it without having to compare timestamps.
+	FirstSeen int64 `json:"first_seen,omitempty"`
+	// LastSeen is the moment it last carried one. Zero means the mark predates
+	// this field.
+	LastSeen int64 `json:"last_seen,omitempty"`
 	// ByModel is the breakdown by model within this address.
 	ByModel map[string]*ModelCounters `json:"by_model,omitempty"`
 }
@@ -225,6 +241,14 @@ func (s *Store) record(o Outcome, kind outcomeKind) {
 	if o.Address != "" {
 		a := s.addressLocked(day, o.Address)
 		kind.bump(&a.OK, &a.Refused, &a.Aborted)
+		// The first mark is written once and then never moved: it is what makes
+		// the addresses of a day readable as a sequence of uplinks rather than as
+		// a set. Every outcome moves the last mark, for the same reason every
+		// outcome moves a key's.
+		if a.FirstSeen == 0 {
+			a.FirstSeen = now.UnixMilli()
+		}
+		a.LastSeen = now.UnixMilli()
 		if o.Model != "" {
 			am := s.addressModelLocked(a, o.Model)
 			kind.bump(&am.OK, &am.Refused, &am.Aborted)
@@ -457,6 +481,11 @@ type AddressSnapshot struct {
 	Refused int64           `json:"refused"`
 	Aborted int64           `json:"aborted"`
 	ByModel []ModelSnapshot `json:"by_model,omitempty"`
+	// FirstSeen is the moment this address first carried a request. Zero means
+	// the mark predates the field.
+	FirstSeen int64 `json:"first_seen,omitempty"`
+	// LastSeen is the moment it last carried one.
+	LastSeen int64 `json:"last_seen,omitempty"`
 }
 
 // KeySnapshot are the counters of a single key.
@@ -473,9 +502,16 @@ type KeySnapshot struct {
 
 // Snapshot returns a snapshot for reading.
 //
-// The order is given explicitly: days from the newest to the oldest, models,
-// addresses and keys alphabetically. Without that the output would change
-// between calls, and comparing two snapshots would be impossible.
+// The order is given explicitly: days from the newest to the oldest, models and
+// keys alphabetically, addresses from the first used to the last. Without an
+// order stated here the output would change between calls, and comparing two
+// snapshots would be impossible.
+//
+// THE ADDRESSES ARE IN USE ORDER, NOT ALPHABETICAL. The egress address changes
+// when the uplink is switched, by hand or by a route, and the addresses of a day
+// then read as the sequence of uplinks that carried it. Alphabetical order threw
+// that sequence away for a property nobody was asking about, and put a new
+// address wherever its digits happened to sort.
 func (s *Store) Snapshot() Snapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -503,16 +539,27 @@ func (s *Store) Snapshot() Snapshot {
 		for address := range d.ByAddress {
 			addresses = append(addresses, address)
 		}
-		sort.Strings(addresses)
+		// The address string breaks a tie: two addresses first seen in the same
+		// millisecond — which is what a restored state file or a clock with a
+		// coarse resolution produces — must still come out in one fixed order.
+		sort.Slice(addresses, func(i, j int) bool {
+			a, b := d.ByAddress[addresses[i]], d.ByAddress[addresses[j]]
+			if a.FirstSeen != b.FirstSeen {
+				return a.FirstSeen < b.FirstSeen
+			}
+			return addresses[i] < addresses[j]
+		})
 		for _, address := range addresses {
 			a := d.ByAddress[address]
 			day.ByAddress = append(day.ByAddress, AddressSnapshot{
-				Address: address,
-				Family:  a.Family,
-				OK:      a.OK,
-				Refused: a.Refused,
-				Aborted: a.Aborted,
-				ByModel: modelSnapshots(a.ByModel),
+				Address:   address,
+				Family:    a.Family,
+				OK:        a.OK,
+				Refused:   a.Refused,
+				Aborted:   a.Aborted,
+				ByModel:   modelSnapshots(a.ByModel),
+				FirstSeen: a.FirstSeen,
+				LastSeen:  a.LastSeen,
 			})
 		}
 

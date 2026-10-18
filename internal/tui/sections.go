@@ -410,11 +410,17 @@ const colGap = 2
 // rows that compare equal stay in the order the daemon reported them — without
 // that, a redraw could shuffle two rows with identical counters and the table
 // would flicker between two orderings of the same data.
+//
+// The default is the order of USE, which is the one order the daemon already
+// knows and the only one that reads as a history: the address changes when the
+// operator switches the uplink, so the rows are the switches.
 func (m Model) sortedAddresses() []AddressRow {
 	rows := make([]AddressRow, len(m.obs.Addresses))
 	copy(rows, m.obs.Addresses)
 
 	switch m.sort {
+	case sortTraffic:
+		sort.SliceStable(rows, func(i, j int) bool { return requests(rows[i]) > requests(rows[j]) })
 	case sortErrors:
 		sort.SliceStable(rows, func(i, j int) bool { return rows[i].Error > rows[j].Error })
 	case sortRecent:
@@ -422,7 +428,22 @@ func (m Model) sortedAddresses() []AddressRow {
 	case sortAddress:
 		sort.SliceStable(rows, func(i, j int) bool { return rows[i].Address < rows[j].Address })
 	default:
-		sort.SliceStable(rows, func(i, j int) bool { return requests(rows[i]) > requests(rows[j]) })
+		// A row without a mark — one recorded before the marks existed, or
+		// restored from such a file — has no place in a sequence of use, so it
+		// goes last rather than sorting as the oldest: an invented position at
+		// the top would claim it carried the day's first request.
+		sort.SliceStable(rows, func(i, j int) bool {
+			a, b := rows[i].FirstSeen, rows[j].FirstSeen
+			switch {
+			case a.IsZero():
+				return false
+			case b.IsZero():
+				return true
+			case !a.Equal(b):
+				return a.Before(b)
+			}
+			return rows[i].Address < rows[j].Address
+		})
 	}
 	return rows
 }
@@ -623,11 +644,23 @@ func (m Model) journalLayout(inner int) []journalRow {
 // No fixed head: a log line carries its own timestamp and level, so a row of
 // column titles above it would be a second, weaker copy of what is already in
 // every line.
+//
+// AN EMPTY BLOCK NAMES WHAT MADE IT EMPTY. There are three reasons for no lines —
+// no journal, no lines for the shown day in the tail that was read, and a filter
+// that matched nothing — and they call for three different actions. One message
+// covering all of them ("nothing to show") would leave the reader guessing which
+// one they are looking at, and the guess is usually the wrong one.
 func (m Model) journalSection(inner int) []string {
 	if len(m.obs.Logs) == 0 {
 		return []string{
 			m.pal.Dim.Render("the journal is empty"),
 			m.pal.Hint.Render("the daemon writes to " + m.obs.LogPath),
+		}
+	}
+	if day := m.logDay(); day != "" && m.dayLines == 0 {
+		return []string{
+			m.pal.Dim.Render("no lines for " + day + " in the tail"),
+			m.pal.Hint.Render("the journal is a tail of the file: t returns to today"),
 		}
 	}
 	if len(m.filtered) == 0 {

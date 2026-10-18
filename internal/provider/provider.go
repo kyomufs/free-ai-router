@@ -287,6 +287,21 @@ type Local interface {
 	RoundTripper() http.RoundTripper
 }
 
+// Polling is what a provider implements when it keeps its catalog fresh in the
+// background.
+//
+// Optional, on the same reasoning as Local: a provider whose catalog is a
+// constant has nothing to poll, and forcing it to say so would add a method
+// that only ever returns. A provider that implements it promises that Models
+// reads from memory and never touches the network, which is what lets the
+// gateway call Models on the request path without paying for it.
+type Polling interface {
+	// Start begins refreshing and returns once the first read is done.
+	Start(ctx context.Context)
+	// Stop ends the refresher.
+	Stop() error
+}
+
 // Registry is the set of available providers, assembled from configuration.
 type Registry struct {
 	providers map[ID]Provider

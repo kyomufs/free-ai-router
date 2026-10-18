@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -332,6 +333,14 @@ func TestSectionAddressesReachTheProvider(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	p, _ := reg.Get("own")
+	// The catalog is read from memory: a built provider has to be warmed before
+	// it can report anything, exactly as the daemon does before listening.
+	polling, ok := p.(provider.Polling)
+	if !ok {
+		t.Fatal("the provider does not poll its catalog")
+	}
+	polling.Start(t.Context())
+	t.Cleanup(func() { _ = polling.Stop() })
 	models, err := p.Models(t.Context())
 	if err != nil {
 		t.Fatalf("Models: %v", err)
@@ -350,10 +359,12 @@ func TestSectionAddressesReachTheProvider(t *testing.T) {
 	}
 }
 
-// TestCatalogFailureIsReported — an unavailable catalog is returned as an
-// error, not as an empty list. An empty list would be read by the operator as
-// "the service has no models" and send them looking in the wrong place.
+// TestCatalogFailureIsReported — an unavailable catalog is reported into the
+// log, not returned as an error. The read serves memory, so an empty catalog is
+// what the caller sees; the reason has to survive somewhere, and the log is the
+// only place left.
 func TestCatalogFailureIsReported(t *testing.T) {
+	var captured strings.Builder
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"nope"}`, http.StatusForbidden)
 	}))
@@ -367,19 +378,31 @@ func TestCatalogFailureIsReported(t *testing.T) {
 		},
 	})
 
-	reg, err := Build(c)
+	reg, err := BuildWithLog(c, func(format string, args ...any) {
+		fmt.Fprintf(&captured, format, args...)
+	})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
 	p, _ := reg.Get("own")
-	models, err := p.Models(t.Context())
-	if err == nil {
-		t.Fatalf("Models = %+v, want an error for an unavailable catalog", models)
+	polling, ok := p.(provider.Polling)
+	if !ok {
+		t.Fatal("the provider does not poll its catalog")
 	}
-	// The service's refusal must be visible in the cause: without it there is
-	// nothing to investigate.
-	if !strings.Contains(err.Error(), "403") {
-		t.Fatalf("error %q does not name the status", err)
+	polling.Start(t.Context())
+	t.Cleanup(func() { _ = polling.Stop() })
+
+	models, err := p.Models(t.Context())
+	if err != nil {
+		t.Fatalf("Models: %v, want a read from memory not to fail", err)
+	}
+	if len(models) != 0 {
+		t.Fatalf("Models = %+v, want nothing from an unavailable catalog", models)
+	}
+	// The refusal has no caller to return to, so the log is the only place it
+	// survives — and without it there is nothing to investigate.
+	if !strings.Contains(captured.String(), "403") {
+		t.Fatalf("the log %q does not name the status", captured.String())
 	}
 }
 

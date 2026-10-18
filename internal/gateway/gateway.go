@@ -101,6 +101,19 @@ type Handler struct {
 	// request: the client holds a connection pool, and losing it is not
 	// acceptable.
 	Client *http.Client
+
+	// FirstEventTimeout is how long a stream may stay silent before its response
+	// headers, and IdleTimeout how long a response may stay silent between
+	// events. They are the FALLBACKS: a provider that declares a budget of its
+	// own is obeyed, because the numbers belong to its contract — a model that
+	// reasons holds pauses of minutes, and a shared budget would tear its stream.
+	// Zero means the gateway's own default.
+	//
+	// They are not advice. A connection that goes quiet stops raising any error
+	// at all, and without these budgets a request on it waits forever while the
+	// client waits with it.
+	FirstEventTimeout time.Duration
+	IdleTimeout       time.Duration
 }
 
 // RoundTripperFactory hands out the transport for requests.
@@ -520,24 +533,94 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Pro
 	// blanket refusal would ping-pong for as long as the client waits.
 	tried := make(map[string]bool)
 
+	// The budgets of one attempt. Both are re-armed as the attempt progresses:
+	// the first bounds the wait for the response headers, the second the silence
+	// between events.
+	//
+	// The two are read from their OWN fields of the prepared request. They are
+	// not interchangeable: a provider that reasons declares a generous silence
+	// budget between events, and using that number for the wait before the
+	// headers would leave a request hanging on a connection that has gone quiet
+	// for as long as the model is allowed to think.
+	firstEvent := Timeout(prepared.FirstEventTimeout, h.FirstEventTimeout)
+	idle := Timeout(prepared.IdleTimeout, h.IdleTimeout)
+
 	// The number of the attempt being made, counting from one. It belongs to this
 	// request and to this loop: the retry policy's budget is per request, so it
 	// cannot live inside the mechanism.
 	attempt := 1
 
+	// The number of the CONNECTION-level attempt. Separate from the one above,
+	// because the two count different things: the retry policy counts refusals,
+	// and a connection that was never established is not a refusal by anyone.
+	connection := 1
+
 	for {
 		h.applyCredential(p, prepared, key)
 
-		upstream, err := http.NewRequestWithContext(r.Context(), http.MethodPost, prepared.URL, bytes.NewReader(prepared.Body))
+		wd, ctx := newWatchdog(r.Context())
+		upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, prepared.URL, bytes.NewReader(prepared.Body))
 		if err != nil {
+			wd.stop()
 			writeError(w, http.StatusInternalServerError, "gateway error", err.Error())
 			return
 		}
 		upstream.Header = prepared.Headers
 
+		// The stage being bounded depends on the shape of the answer. A stream
+		// sends its headers as soon as the provider starts answering, so a
+		// silence before them is already evidence that something is wrong. A
+		// single response sends nothing until it is complete, so the only thing
+		// that can be bounded there is the answer itself.
+		if req.Stream {
+			wd.arm(firstEvent, errFirstEvent)
+		} else {
+			wd.arm(idle, errNoAnswer)
+		}
+
 		resp, err := h.do(upstream, p)
 		if err != nil {
-			// The upstream is unreachable. This is NOT a provider refusal, and
+			wd.stop()
+			cause := wd.fired()
+
+			// A retry is worth the time when the fault was in the PATH rather
+			// than in the provider's answer. Two shapes qualify: a failure on the
+			// way there, and a stream whose headers never arrived — the second is
+			// usually the same dead connection seen a moment later, and a fresh
+			// one answers at once.
+			attempts := transportAttempts
+			if cause == errFirstEvent {
+				attempts = silenceAttempts
+			}
+			if (cause == errFirstEvent || retriableTransport(err)) && connection < attempts {
+				h.warn("provider %q: attempt %d/%d failed: %v", p.ID(), connection, attempts, err)
+				// The connection that failed is the reason the pool is suspect,
+				// and a fresh connection is the whole point of repeating the
+				// request.
+				h.dropConnections(p)
+				delay := transportDelays[min(connection-1, len(transportDelays)-1)]
+				connection++
+				if !h.wait(r.Context(), delay) {
+					h.recordAbort(model.ID, address, h.fingerprint(key))
+					return
+				}
+				continue
+			}
+
+			if cause != nil {
+				// The provider took the connection and then went quiet. Nothing
+				// failed: the request was written into a path that no longer
+				// exists, and no answer is coming. The path is suspect, so the
+				// egress address is asked for again rather than waited out.
+				h.warn("provider %q: silent: %v", p.ID(), cause)
+				h.refreshAddress()
+				writeError(w, http.StatusGatewayTimeout, "timeout",
+					"the provider did not answer: "+cause.Error())
+				h.recordAbort(model.ID, address, h.fingerprint(key))
+				return
+			}
+
+			// The provider is unreachable. This is NOT a provider refusal, and
 			// presenting it as one is not allowed: the client must see a
 			// transport failure. The same applies to the counters — a broken
 			// path is not the provider refusing.
@@ -547,14 +630,30 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Pro
 			return
 		}
 
+		// The status line is here: the wait for the headers is over in both
+		// shapes, and what remains bounded is the silence between the pieces of
+		// the answer.
+		wd.arm(idle, errSilence)
+
 		if resp.StatusCode < 400 {
-			h.passThroughStream(w, resp)
+			h.passThroughStream(w, resp, wd, idle)
+			wd.stop()
 			resp.Body.Close()
+			if cause := wd.fired(); cause != nil {
+				// The provider stopped speaking in the middle of the stream. The
+				// client sees a truncated answer and asks again; counting this as
+				// a success would hide it from the monitor exactly where it costs
+				// most.
+				h.warn("provider %q: stream cut short: %v", p.ID(), cause)
+				h.recordAbort(model.ID, address, h.fingerprint(key))
+				return
+			}
 			h.recordSuccess(model.ID, address, h.fingerprint(key))
 			return
 		}
 
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		wd.stop()
 		resp.Body.Close()
 		if readErr != nil {
 			// The provider refused, but the refusal itself did not arrive
@@ -567,6 +666,14 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Pro
 		}
 
 		failure := p.Classify(resp, body)
+
+		// A refusal is about an address as much as it is about a key: the free
+		// tier is limited per address, and the operator moves to another uplink
+		// precisely because this one is spent. So the refusal is the one moment
+		// where a stale answer costs something — the requests that follow would
+		// be credited to the address they no longer leave from — and the address
+		// is asked for again here instead of waiting out the TTL.
+		h.refreshAddress()
 
 		// A verdict on the key is only meaningful when a key was sent.
 		//
@@ -694,7 +801,12 @@ func (h *Handler) do(req *http.Request, p provider.Provider) (*http.Response, er
 }
 
 // passThroughStream passes the stream to the client.
-func (h *Handler) passThroughStream(w http.ResponseWriter, resp *http.Response) {
+//
+// The watchdog is re-armed before every read, because the silence that matters
+// is the one between two pieces of the answer. Without it a stream that stops
+// arriving without closing reads as a healthy one: there is no error to return
+// and the client waits for an end that will not come.
+func (h *Handler) passThroughStream(w http.ResponseWriter, resp *http.Response, wd *watchdog, idle time.Duration) {
 	if ct := resp.Header.Get("content-type"); ct != "" {
 		w.Header().Set("content-type", ct)
 	} else {
@@ -706,6 +818,7 @@ func (h *Handler) passThroughStream(w http.ResponseWriter, resp *http.Response) 
 	flusher, canFlush := w.(http.Flusher)
 	buf := make([]byte, 32<<10)
 	for {
+		wd.arm(idle, errSilence)
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
 			if _, werr := w.Write(buf[:n]); werr != nil {
@@ -797,12 +910,35 @@ type AddressResolver interface {
 	Address() string
 }
 
+// AddressRefresher is a resolver that can be asked to re-resolve.
+//
+// Separate from AddressResolver rather than folded into it: a resolver that can
+// only report what it already has is still a perfectly good resolver, and how
+// often the answer is worth taking is not the gateway's decision to force.
+type AddressRefresher interface {
+	Refresh(ctx context.Context)
+}
+
 // address returns the egress address, or an empty string when unknowable.
 func (h *Handler) address() string {
 	if h.Addresses == nil {
 		return ""
 	}
 	return h.Addresses.Address()
+}
+
+// refreshAddress asks for a fresh address WITHOUT waiting for it.
+//
+// Detached from the request on purpose. The client is owed the refusal, not a
+// round trip to an echo endpoint, and the answer is not needed here either: the
+// next request is the one that reads it, and that is the request a stale answer
+// would have mislabelled.
+func (h *Handler) refreshAddress() {
+	r, ok := h.Addresses.(AddressRefresher)
+	if !ok {
+		return
+	}
+	go r.Refresh(context.Background())
 }
 
 // recordSuccess records a successful request.
@@ -858,13 +994,14 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	})
 }
 
-// Timeout suggests to the caller a silence budget for the request.
+// Timeout resolves the silence budget of one stage.
 //
 // The provider declares it itself: reasoning models hold pauses noticeably
-// longer than ordinary ones, and a shared budget would tear their stream.
-func Timeout(prepared provider.Prepared, fallback time.Duration) time.Duration {
-	if prepared.IdleTimeout > 0 {
-		return prepared.IdleTimeout
+// longer than ordinary ones, and a shared budget would tear their stream. A
+// provider that declares nothing takes the configured value.
+func Timeout(declared, fallback time.Duration) time.Duration {
+	if declared > 0 {
+		return declared
 	}
 	return fallback
 }

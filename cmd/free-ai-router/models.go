@@ -28,6 +28,13 @@ func cmdModels(ctx context.Context, args []string) error {
 		return err
 	}
 
+	// The catalog is read from memory, and this command has no daemon to keep it
+	// fresh: without a warm-up every provider would report an empty list. Start
+	// performs one read synchronously, which is what a one-shot command needs;
+	// the poller it leaves behind ends with the process.
+	startPollers(ctx, reg)
+	defer stopPollers(reg)
+
 	type row struct {
 		Provider  string `json:"provider"`
 		ID        string `json:"id"`

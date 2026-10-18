@@ -84,8 +84,15 @@ const blockCount = 2
 // block and not in the matrix, with no way for the reader to tell which is
 // current.
 type DataSource interface {
-	// Observe returns one reading.
-	Observe() (Observation, error)
+	// Observe returns one reading of the counters for the day named by day, or
+	// of the current day when day is empty.
+	//
+	// THE DAY IS AN ARGUMENT because it is a question the reader asks, not a
+	// property of the source: "what did the daemon do on the 12th" is one reading
+	// from one state file. A source that always returned today and a model that
+	// picked the day out of it afterwards would have to keep two copies of every
+	// list to answer the same question.
+	Observe(day string) (Observation, error)
 }
 
 // Observation is a single reading of everything the monitor shows.
@@ -105,8 +112,22 @@ type Observation struct {
 	Providers []ProviderState
 	// Addresses are the matrix rows: one per egress address.
 	Addresses []AddressRow
-	// Totals are the counters for the current day.
+	// Totals are the counters for the day.
 	Totals Totals
+	// Day is the day the counters describe, as the state keys it. It is the day
+	// that was READ, which is the day that was asked for whenever the state
+	// still holds it.
+	Day string
+	// Today is the day the daemon is writing into.
+	//
+	// Read from the reading rather than derived in the view: the day key is the
+	// state's own, and a view that computed it from its own clock would disagree
+	// with the counters for the minutes after midnight — which is exactly when a
+	// reader is comparing two days.
+	Today string
+	// Days are the days the state holds counters for, newest first. It is what
+	// bounds the day selector: a reader can only be moved to a day that exists.
+	Days []string
 	// Logs are the tail of the journal, oldest line first.
 	Logs []string
 	// LogPath is where the journal lives, so that a reader can find it.
@@ -182,6 +203,13 @@ type AddressRow struct {
 	Aborted int64
 	// Models are the per-model counters of this address.
 	Models []ModelRow
+	// FirstSeen is when the address first carried a request, and zero when the
+	// mark predates it.
+	//
+	// It is what the default order uses: the address changes when the operator
+	// switches the uplink, so the order the addresses appeared in is the order of
+	// the switches.
+	FirstSeen time.Time
 	// LastSeen is when the address was last used.
 	LastSeen time.Time
 }
@@ -282,6 +310,15 @@ type Model struct {
 	// sort is the order the address matrix is shown in.
 	sort sortMode
 
+	// day is the day the reader asked for, empty to follow the current one.
+	//
+	// EMPTY IS NOT "TODAY", and the difference is the whole reason this is not a
+	// day key initialised at construction: a monitor left open across midnight
+	// must follow the daemon into the new day, and a pinned key would leave it
+	// showing a day that ended. What the READING returned is obs.Day, so a day
+	// the reader never touched is re-resolved on every tick.
+	day string
+
 	// toast is the transient confirmation shown in place of the metrics, nil
 	// when there is nothing to confirm.
 	toast *toast
@@ -292,6 +329,11 @@ type Model struct {
 	// selected is the index into the filtered journal of the line the details
 	// key would open. -1 means nothing is selected.
 	selected int
+
+	// dayLines is how many journal lines the selected day left, before the text
+	// filter ran. It is what tells an empty block that the tail does not reach
+	// the day from one whose lines were all filtered out.
+	dayLines int
 
 	// Scrollback keeps the output in the terminal's scrollback instead of taking
 	// the alternate screen.
@@ -346,11 +388,19 @@ type overlay struct {
 type sortMode int
 
 const (
-	// sortTraffic is the default: most requests first. The address that has
-	// carried the most traffic is the one the reader is usually looking for, and
-	// the rows that did nothing collect at the bottom where they are out of the
-	// way.
-	sortTraffic sortMode = iota
+	// sortUsed is the default: the order the addresses were first used in. The
+	// egress address changes when the operator switches the uplink — a VPN, a
+	// tethered modem — so the order is the sequence of switches, and the address
+	// in use now is the last row.
+	//
+	// It replaced "most requests first" as the default because that order answers
+	// the wrong question at the moment the matrix is looked at: the address that
+	// was just switched away from has the most traffic of the day, so it stays on
+	// top and the new one is pushed down the table, which reads as the switch not
+	// having been noticed.
+	sortUsed sortMode = iota
+	// sortTraffic is most requests first: which address carried the day.
+	sortTraffic
 	// sortErrors puts the addresses that refuse first — the question "is
 	// anything broken" is the other one worth asking of a matrix.
 	sortErrors
@@ -366,6 +416,8 @@ const (
 // String is the mode's name, as the frame shows it.
 func (s sortMode) String() string {
 	switch s {
+	case sortTraffic:
+		return "traffic"
 	case sortErrors:
 		return "errors"
 	case sortRecent:
@@ -373,7 +425,7 @@ func (s sortMode) String() string {
 	case sortAddress:
 		return "address"
 	default:
-		return "traffic"
+		return "used"
 	}
 }
 
@@ -483,11 +535,15 @@ func (m Model) Init() tea.Cmd {
 // read returns the command that performs a reading.
 func (m Model) read() tea.Cmd {
 	source := m.Source
+	// The day is captured with the source: the command runs after the model
+	// moved on, and a reading that resolved the day when it arrived would answer
+	// the previous question.
+	day := m.day
 	return func() tea.Msg {
 		if source == nil {
 			return readMsg{}
 		}
-		obs, err := source.Observe()
+		obs, err := source.Observe(day)
 		return readMsg{obs: obs, err: err}
 	}
 }

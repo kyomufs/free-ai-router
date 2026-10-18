@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,7 +64,12 @@ func newTUISource(cfg *config.Config) *tuiSource {
 }
 
 // Observe implements tui.DataSource.
-func (s *tuiSource) Observe() (tui.Observation, error) {
+//
+// The day is resolved HERE and reported back, rather than left for the model to
+// compare against a list: what the state holds is this side's knowledge, and a
+// model that had to decide for itself whether a day exists would be a second copy
+// of the retention rule.
+func (s *tuiSource) Observe(day string) (tui.Observation, error) {
 	obs := tui.Observation{At: time.Now()}
 	cfg := s.cfg
 
@@ -88,8 +94,25 @@ func (s *tuiSource) Observe() (tui.Observation, error) {
 		obs.Notes = append(obs.Notes, "state file: "+err.Error())
 	}
 
-	obs.Providers = s.providers(snap)
-	obs.Addresses, obs.Totals = matrix(snap)
+	// The shown day. A day the state no longer holds — the retention window has
+	// passed, or the file was rotated away — falls back to the daemon's own day,
+	// with a note: silently answering a question about the 3rd of last month with
+	// today's numbers would make the frame wrong about the one thing it is for.
+	shown := daySnapshot(snap, day)
+	if snap != nil {
+		obs.Today = snap.Today
+		obs.Days = dayKeys(snap)
+		obs.Day = snap.Today
+		if shown != nil {
+			obs.Day = shown.Day
+		} else if day != "" {
+			obs.Notes = append(obs.Notes, "no counters for "+day+
+				" (the state keeps "+strconv.Itoa(state.RetentionDays())+" days); showing "+obs.Day)
+		}
+	}
+
+	obs.Providers = s.providers(snap, obs.Day)
+	obs.Addresses, obs.Totals = matrix(snap, obs.Day)
 
 	lines, err := state.Tail(cfg.Paths.LogFile, tailLines)
 	if err != nil && !isMissing(err) {
@@ -102,6 +125,41 @@ func (s *tuiSource) Observe() (tui.Observation, error) {
 	}
 
 	return obs, nil
+}
+
+// daySnapshot is the day of counters to show, nil when the state holds none.
+//
+// An empty want means the daemon's own day, which is what makes the monitor
+// follow the daemon across midnight instead of pinning a key of its own.
+func daySnapshot(snap *state.Snapshot, want string) *state.DaySnapshot {
+	if snap == nil {
+		return nil
+	}
+	if want == "" {
+		want = snap.Today
+	}
+	for i := range snap.Days {
+		if snap.Days[i].Day == want {
+			return &snap.Days[i]
+		}
+	}
+	return nil
+}
+
+// dayKeys lists the recorded days, newest first.
+//
+// The order is the state's own and is passed through unchanged: it is the order
+// the selector walks, and re-sorting here would leave the model's position and
+// the source's list able to disagree.
+func dayKeys(snap *state.Snapshot) []string {
+	if snap == nil {
+		return nil
+	}
+	days := make([]string, 0, len(snap.Days))
+	for _, day := range snap.Days {
+		days = append(days, day.Day)
+	}
+	return days
 }
 
 // tailLines is how many journal lines a reading keeps.
@@ -148,19 +206,16 @@ func readSnapshot(path string) (*state.Snapshot, error) {
 }
 
 // providers turns the configuration and the counters into the key block.
-func (s *tuiSource) providers(snap *state.Snapshot) []tui.ProviderState {
-	// The counters are read from the day the state file calls "today" rather
-	// than from today's date: the two agree except across midnight, and the file
-	// is the one that knows which bucket the daemon was writing into.
+//
+// The counters are read from the day being shown, which is the daemon's own day
+// until the reader moves the selector: the key pool is a property of the
+// deployment, but its counters are per day like everything else, and a past day
+// has to show the keys as they were used then.
+func (s *tuiSource) providers(snap *state.Snapshot, day string) []tui.ProviderState {
 	counters := map[string]state.KeySnapshot{}
-	if snap != nil {
-		for _, day := range snap.Days {
-			if day.Day != snap.Today {
-				continue
-			}
-			for _, k := range day.Keys {
-				counters[k.Fingerprint] = k
-			}
+	if shown := daySnapshot(snap, day); shown != nil {
+		for _, k := range shown.Keys {
+			counters[k.Fingerprint] = k
 		}
 	}
 
@@ -210,57 +265,40 @@ func (s *tuiSource) providers(snap *state.Snapshot) []tui.ProviderState {
 }
 
 // matrix turns the counters into the per-address rows.
-func matrix(snap *state.Snapshot) ([]tui.AddressRow, tui.Totals) {
-	if snap == nil {
+//
+// The row order is the state's own — first used to last — and it is passed
+// through: the order of the addresses is the order the uplink was switched in, and
+// the monitor's own sort modes are applied to a copy of this list.
+func matrix(snap *state.Snapshot, day string) ([]tui.AddressRow, tui.Totals) {
+	shown := daySnapshot(snap, day)
+	if shown == nil {
 		return nil, tui.Totals{}
 	}
 
-	var (
-		rows []tui.AddressRow
-		tot  tui.Totals
-	)
-	for _, day := range snap.Days {
-		if day.Day != snap.Today {
-			continue
-		}
-		tot = tui.Totals{Day: day.Day, OK: day.OK, Refused: day.Refused, Aborted: day.Aborted}
+	tot := tui.Totals{Day: shown.Day, OK: shown.OK, Refused: shown.Refused, Aborted: shown.Aborted}
 
-		for _, a := range day.ByAddress {
-			row := tui.AddressRow{
-				Address:  a.Address,
-				Family:   a.Family,
-				OK:       a.OK,
-				Error:    a.Refused,
-				Aborted:  a.Aborted,
-				LastSeen: lastSeen(a.ByModel),
-			}
-			for _, m := range a.ByModel {
-				row.Models = append(row.Models, tui.ModelRow{
-					Model:   m.Model,
-					OK:      m.OK,
-					Error:   m.Refused,
-					Aborted: m.Aborted,
-				})
-			}
-			rows = append(rows, row)
+	var rows []tui.AddressRow
+	for _, a := range shown.ByAddress {
+		row := tui.AddressRow{
+			Address:   a.Address,
+			Family:    a.Family,
+			OK:        a.OK,
+			Error:     a.Refused,
+			Aborted:   a.Aborted,
+			FirstSeen: millis(a.FirstSeen),
+			LastSeen:  millis(a.LastSeen),
 		}
+		for _, m := range a.ByModel {
+			row.Models = append(row.Models, tui.ModelRow{
+				Model:   m.Model,
+				OK:      m.OK,
+				Error:   m.Refused,
+				Aborted: m.Aborted,
+			})
+		}
+		rows = append(rows, row)
 	}
 	return rows, tot
-}
-
-// lastSeen is the newest model mark under an address.
-//
-// The address row has no mark of its own, and the newest of its models is the
-// honest substitute: it answers "when was this address last used" without
-// inventing a fourth counter for it.
-func lastSeen(models []state.ModelSnapshot) time.Time {
-	var newest time.Time
-	for _, m := range models {
-		if t := millis(m.LastSeen); t.After(newest) {
-			newest = t
-		}
-	}
-	return newest
 }
 
 // millis converts a stored millisecond stamp into a time.
