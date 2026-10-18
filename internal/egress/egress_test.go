@@ -386,6 +386,57 @@ func TestAnUnansweredFamilyIsRetriedWithinTheTTL(t *testing.T) {
 	}
 }
 
+// TestATickThatLandsAMomentEarlyStillAsks — the throttle and the tick that feeds
+// it are the same interval.
+//
+// A tick that arrives a few milliseconds short of the interval used to be
+// skipped, which put the next attempt a whole interval away: observed live as a
+// family retried every two and three minutes instead of every one, with the
+// address unknown the whole time — and an unknown address is a day of counters
+// that do not add up.
+func TestATickThatLandsAMomentEarlyStillAsks(t *testing.T) {
+	e := &echo{status: http.StatusInternalServerError}
+	srv := httptest.NewServer(e.handler())
+	defer srv.Close()
+
+	c := &clock{at: time.Now()}
+	const retry = time.Minute
+	r := New(Config{
+		Families:  FamiliesFor("v4"),
+		URL:       srv.URL,
+		Retry:     retry,
+		Now:       c.now,
+		Transport: func(string) (http.RoundTripper, error) { return srv.Client().Transport, nil },
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = r.Stop() }()
+
+	if n := len(e.asked()); n != 1 {
+		t.Fatalf("the echo was asked %d times at the start, want 1", n)
+	}
+
+	// Well before the interval the failure is still throttled: a retry is not a
+	// loop.
+	c.advance(retry / 2)
+	r.refresh(ctx, false)
+	if n := len(e.asked()); n != 1 {
+		t.Fatalf("the echo was asked %d times, want a failure throttled by Retry", n)
+	}
+
+	// Inside the tolerance it is not: the tick has come, and answering it costs
+	// one request per interval either way.
+	c.advance(retry/2 - retryTolerance/2)
+	r.refresh(ctx, false)
+	if n := len(e.asked()); n != 2 {
+		t.Fatalf("a tick inside the tolerance was skipped: the echo was asked %d times, want 2", n)
+	}
+}
+
 // TestRefreshDoesNotWaitOutTheTTL — the address can be re-asked on demand.
 //
 // This is the path a refusal takes. The operator moves to another uplink because
