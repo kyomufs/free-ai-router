@@ -102,23 +102,32 @@ func (m Model) frame() string {
 	return strings.Join(bands, "\n")
 }
 
-// banner is the title strip: the product, what the frame is, and the clock.
+// banner is the title strip: the product on the left, the daemon's pulse on the
+// right.
 //
-// THE CLOCK IS NOT DECORATION. A monitor is read by someone wondering whether
-// what they are looking at is current. The age of the reading answers half of
-// that; the other half is whether the clock is moving at all, and that is the
-// only way to tell a frozen screen from a quiet system — the difference matters
-// most when nothing is happening.
+// THE RIGHT CELL IS THE ONLY PLACE THE MONITOR ANSWERS "IS THIS CURRENT". It says
+// whether the reading is live, how long the daemon has been up, and nothing else:
+// the age of the reading is already the difference between the clock in that cell
+// and the clock on the wall, and a caption spelling it out ("just now", "3s ago")
+// would be a number that changes on every redraw and pushes the frame around with
+// it.
+//
+// THE LEFT CELL IS ONLY THE TITLE. What the frame is and that it changes nothing
+// are said once, in the key bar along the bottom, where they are read while
+// learning the keys rather than skipped as part of a heading.
 func (m Model) banner() string {
 	w := m.geom.Banner.W
 	title := m.pal.GradientTitle("free-ai-router")
-	right := m.pal.Subtitle.Render("monitor · read-only · " + m.now.Format("15:04:05"))
+	right := m.liveCell()
 
-	line := clip(title, w)
-	if gap := w - lipgloss.Width(title) - lipgloss.Width(right); gap > 0 {
-		line = title + repeat(" ", gap) + right
+	// THE PULSE KEEPS ITS CELLS, the title gives way: the pulse is fixed-width by
+	// construction and a shortened one would stop being a clock, while a shortened
+	// title still names the program.
+	left := w - lipgloss.Width(right)
+	line := right
+	if left > 0 {
+		line = padTo(clip(title, left-1), left-1) + " " + right
 	}
-
 	if m.geom.Banner.H < bannerLines {
 		return line
 	}
@@ -181,19 +190,13 @@ func (m Model) bodyRows(n int) []string {
 	}
 
 	inner := contentWidth(m.geom.Body.W)
-	sv := m.sectionOf(inner)
+	body := m.sectionOf(inner)
 
-	// The head is fixed and the body scrolls under it: a table's column titles
-	// that scrolled away with the data would leave the reader counting columns.
-	headRows := min(len(sv.head), n)
-	page := max(0, n-headRows)
-
-	off := clampScroll(m.Scroll[m.Focus], len(sv.body), page)
-	end := min(len(sv.body), off+page)
+	off := clampScroll(m.Scroll[m.Focus], len(body), n)
+	end := min(len(body), off+n)
 
 	rows := make([]string, 0, n)
-	rows = append(rows, sv.head[:headRows]...)
-	rows = append(rows, sv.body[off:end]...)
+	rows = append(rows, body[off:end]...)
 	for len(rows) < n {
 		rows = append(rows, "")
 	}
@@ -245,31 +248,27 @@ func (m Model) sectionTitle() string { return m.Focus.String() }
 // It sits in the border rather than on a line of its own: one line of every
 // section spent on a count is one line of the thing being counted, and the
 // border was already there.
+//
+// The sort mode is NOT repeated here — it belongs to the matrix tile's own
+// heading, next to the table it orders. The count of what is on the screen is
+// about the frame, the sort is about one tile inside it.
 func (m Model) sectionMeta() string {
-	switch m.Focus {
-	case BlockKeys:
-		keys := 0
-		for _, p := range m.obs.Providers {
-			keys += len(p.Keys)
-		}
-		return plural(len(m.obs.Providers), "provider", "providers") + " · " + plural(keys, "key", "keys")
-
-	case BlockMatrix:
-		return plural(len(m.obs.Addresses), "address", "addresses") + " · sort " + m.sort.String()
-
-	default:
-		if m.editing {
-			return "filter " + m.filterDraft + "▏"
-		}
-		meta := plural(len(m.filtered), "line", "lines")
-		if n := len(m.obs.Logs); n != len(m.filtered) {
-			meta = itoa(len(m.filtered)) + " of " + itoa(n) + " lines"
-		}
-		if m.filter != "" {
-			meta += " · filter " + m.filter
-		}
-		return meta + " · follow " + onOff(m.Follow) + " · wrap " + onOff(m.Wrap)
+	if m.Focus != BlockLogs {
+		return plural(len(m.obs.Providers), "provider", "providers") +
+			" · " + plural(len(m.obs.Addresses), "address", "addresses")
 	}
+
+	if m.editing {
+		return "filter " + m.filterDraft + "▏"
+	}
+	meta := plural(len(m.filtered), "line", "lines")
+	if n := len(m.obs.Logs); n != len(m.filtered) {
+		meta = itoa(len(m.filtered)) + " of " + itoa(n) + " lines"
+	}
+	if m.filter != "" {
+		meta += " · filter " + m.filter
+	}
+	return meta + " · follow " + onOff(m.Follow) + " · wrap " + onOff(m.Wrap)
 }
 
 // plural renders a count with its noun.

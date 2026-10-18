@@ -92,6 +92,20 @@ type Hint struct {
 // внутри бокса, поэтому StatusBar задаётся прямо по width: так фон закрашивает
 // всю полосу, а длинные подсказки обрезаются по её краю.
 func (t Theme) HelpBar(width int, hints ...Hint) string {
+	bar := strings.Join(t.HintCells(hints...), t.Dim.Render(" · "))
+	if width < 1 {
+		return t.StatusBar.Render(bar)
+	}
+	return t.StatusBar.MaxWidth(width).Width(width).Render(bar)
+}
+
+// HintCells — те же подсказки, но по отдельности: клавиша акцентом, описание
+// приглушённо, пустые пропущены.
+//
+// Нужен там, где полосу собирают не в одну строку: разделитель между
+// подсказками задаёт вызывающий, и он же решает, чем развести куски — « · » или
+// свободным местом.
+func (t Theme) HintCells(hints ...Hint) []string {
 	parts := make([]string, 0, len(hints))
 	for _, h := range hints {
 		if h.Key == "" || h.Desc == "" {
@@ -99,11 +113,7 @@ func (t Theme) HelpBar(width int, hints ...Hint) string {
 		}
 		parts = append(parts, t.Key.Render(h.Key)+" "+t.Dim.Render(h.Desc))
 	}
-	bar := strings.Join(parts, t.Dim.Render(" · "))
-	if width < 1 {
-		return t.StatusBar.Render(bar)
-	}
-	return t.StatusBar.MaxWidth(width).Width(width).Render(bar)
+	return parts
 }
 
 // Pill — пилюля (бейдж) на фоне Surface: цветной жирный текст в отступах.

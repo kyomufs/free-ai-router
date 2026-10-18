@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"image/color"
 	"strings"
 	"testing"
 	"time"
@@ -226,6 +227,48 @@ func journalObs(n int) Observation {
 	return obs
 }
 
+// TestThePaletteKeepsTheSemanticHuesApart checks the colour roles.
+//
+// TWO THINGS MUST NOT BE THE SAME INK. "This went through" and "this is the
+// frame" are the two most easily confused at a glance on a monitor that paints a
+// bar per key, and a green success counter sitting in a green frame reads as
+// decoration rather than as a result.
+func TestThePaletteKeepsTheSemanticHuesApart(t *testing.T) {
+	ink := func(c color.Color) string {
+		return lipgloss.NewStyle().Foreground(c).Render("#")
+	}
+
+	for _, dark := range []bool{false, true} {
+		p := newPalette(dark)
+		for _, tone := range []struct {
+			name string
+			ink  string
+		}{
+			{"success", ink(p.Success)},
+			{"warning", ink(p.Warning)},
+			{"danger", ink(p.Danger)},
+		} {
+			if tone.ink == ink(p.Accent) {
+				t.Errorf("dark=%v: %s is the accent colour", dark, tone.name)
+			}
+		}
+		// The two levels of frame: the section's carries the accent, a tile's is
+		// the neutral border, so a tile never reads as a second section.
+		if ink(p.Border) == ink(p.BorderFocus) {
+			t.Errorf("dark=%v: the section frame is the neutral border", dark)
+		}
+		if ink(p.TileFrame.GetForeground()) != ink(p.Border) {
+			t.Errorf("dark=%v: a tile's border is not the neutral border", dark)
+		}
+	}
+
+	// The two backgrounds are actually resolved: a palette that ignored the
+	// terminal would look washed out on one of them.
+	if ink(newPalette(true).Accent) == ink(newPalette(false).Accent) {
+		t.Error("the accent is the same colour on a light and a dark terminal")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // the frame
 // ---------------------------------------------------------------------------
@@ -254,7 +297,7 @@ func TestTheFrameIsExactlyTheTerminal(t *testing.T) {
 		width, height := size[0], size[1]
 		m := resize(t, monitor(obs), width, height)
 
-		for _, focus := range []Block{BlockKeys, BlockMatrix, BlockLogs} {
+		for _, focus := range []Block{BlockDashboard, BlockLogs} {
 			m.Focus = focus
 			lines := frameLines(m)
 
@@ -285,14 +328,20 @@ func TestTheGeometryMatchesTheDrawnFrame(t *testing.T) {
 	if got := rowOf(m, "free-ai-router"); got != g.Banner.Y {
 		t.Errorf("the banner is drawn on row %d, the geometry says %d", got, g.Banner.Y)
 	}
-	if got := rowOf(m, "keys"); got != g.Tabs.Y {
+	if got := rowOf(m, "dashboard"); got != g.Tabs.Y {
 		t.Errorf("the tab strip is drawn on row %d, the geometry says %d", got, g.Tabs.Y)
 	}
 	if got := rowOf(m, "╭"); got != g.Body.Y {
 		t.Errorf("the body frame opens on row %d, the geometry says %d", got, g.Body.Y)
 	}
-	if got := rowOf(m, "live"); got != g.Status.Y {
+	if got := rowOf(m, "45 OK"); got != g.Status.Y {
 		t.Errorf("the metrics line is drawn on row %d, the geometry says %d", got, g.Status.Y)
+	}
+	// The pulse belongs to the banner, not to the status line: the top right of
+	// the frame is where it was asked for, and the status line is chrome that a
+	// reader does not watch for liveness.
+	if got := rowOf(m, "live"); got != g.Banner.Y {
+		t.Errorf("the pulse is drawn on row %d, the geometry says the banner is %d", got, g.Banner.Y)
 	}
 
 	// Every band is non-empty and together they tile the terminal exactly: no
@@ -342,7 +391,8 @@ func TestANoteTakesARowFromTheBodyOnlyWhileItIsThere(t *testing.T) {
 }
 
 // TestOnlyTheActiveSectionIsFramed checks the tab design: one section fills the
-// body, and it is the only thing on screen with a border.
+// body, and it is the only thing on screen with a border — inside it, the
+// dashboard's own tiles, which are the one exception and are counted.
 func TestOnlyTheActiveSectionIsFramed(t *testing.T) {
 	m := resize(t, monitor(observation()), 120, 40)
 
@@ -350,49 +400,131 @@ func TestOnlyTheActiveSectionIsFramed(t *testing.T) {
 		key    string
 		title  string
 		hidden string
+		tiles  int
 	}{
-		{"1", "keys", "213.14.43.234"},
-		{"2", "addresses", "2222bbbb"},
-		{"3", "log", "213.14.43.234"},
+		{"1", "dashboard", "provider refused", 4},
+		{"d", "dashboard", "provider refused", 4},
+		{"2", "log", "213.14.43.234", 0},
 	} {
 		got := draw(press(t, m, tc.key))
 
 		if !strings.Contains(got, tc.title) {
 			t.Errorf("%q: the section is not named:\n%s", tc.key, got)
 		}
-		if n := strings.Count(got, "╭"); n != 1 {
-			t.Errorf("%q: %d frames are drawn, want 1:\n%s", tc.key, n, got)
+		// One frame, opened by the section and closed by the section: the tiles
+		// inside it are the only other boxes, and they close as well.
+		if n, want := strings.Count(got, "╰"), tc.tiles+1; n != want {
+			t.Errorf("%q: %d frames are closed at the bottom, want %d:\n%s", tc.key, n, want, got)
 		}
-		if n := strings.Count(got, "╰"); n != 1 {
-			t.Errorf("%q: %d frames are closed at the bottom, want 1:\n%s", tc.key, n, got)
-		}
-		if strings.Contains(got, tc.hidden) {
+		if tc.hidden != "" && strings.Contains(got, tc.hidden) {
 			t.Errorf("%q: another section's content is on screen (%q):\n%s", tc.key, tc.hidden, got)
 		}
-		// Every top frame ends in a corner, which is what a wrapped line loses.
+		// Every corner opened is closed on its own line: a border that runs off
+		// the end is a line that wrapped, which is the one thing a frame may not
+		// do.
 		for i, line := range strings.Split(got, "\n") {
-			if strings.Contains(line, "╭") && !strings.HasSuffix(line, "╮") {
-				t.Errorf("%q: the top frame on line %d does not close: %q", tc.key, i, line)
+			if a, b := strings.Count(line, "╭"), strings.Count(line, "╮"); a != b {
+				t.Errorf("%q: line %d opens %d frames and closes %d: %q", tc.key, i, a, b, line)
 			}
 		}
 	}
 }
 
-// TestTheBannerNamesTheFrameAndItsClock checks the top strip: what this is, that
-// it does not write, and that the clock is moving.
-func TestTheBannerNamesTheFrameAndItsClock(t *testing.T) {
-	m := monitor(observation())
-	m.now = time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
-	m.resize()
+// TestTheBannerCarriesTheDaemonPulse checks the top strip: what this is, and the
+// one cell that answers "is this current".
+//
+// THE COUNTER IS FIXED WIDTH, and that is the part worth a test: a counter that
+// grew a cell when it passed ten seconds would shift the whole banner under the
+// reader's eye on every redraw, which is exactly what the removed "just now"
+// caption did.
+func TestTheBannerCarriesTheDaemonPulse(t *testing.T) {
+	obs := observation()
+	obs.Uptime = 8*time.Hour + 12*time.Minute + 59*time.Second
+	m := monitor(obs)
 
 	got := draw(m)
-	for _, want := range []string{"free-ai-router", "monitor", "read-only", "12:00:00"} {
+	for _, want := range []string{"free-ai-router", "live", "08:12:59"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the banner does not say %q:\n%s", want, got)
 		}
 	}
+	if !strings.Contains(got, "read-only") {
+		t.Errorf("the promise that the monitor does not write is not made:\n%s", got)
+	}
+	// It is the LAST thing on the line, and it ends there: the pulse owns the top
+	// right corner rather than floating in the middle of the banner.
+	banner := frameLines(m)[m.geom.Banner.Y]
+	if !strings.HasSuffix(banner, "08:12:59") {
+		t.Errorf("the pulse does not end the banner line: %q", banner)
+	}
+
+	// A stopped daemon gets a placeholder of the same width rather than a zero:
+	// "00:00:00" would read as a daemon that had just started.
+	stopped := monitor(observation())
+	plain := strings.TrimSpace(ansi.Strip(stopped.liveCell()))
+	if plain != "● live --------" {
+		t.Errorf("a deployment with no daemon reads %q, want a dashed placeholder", plain)
+	}
+
+	// And the counter never changes the width of the line it sits on.
+	width := lipgloss.Width(draw(m))
+	obs.Uptime = 100 * time.Hour
+	if got := lipgloss.Width(draw(monitor(obs))); got != width {
+		t.Errorf("a longer uptime changed the banner width to %d, want %d", got, width)
+	}
 }
 
+// TestTheBottomBarsAreSpreadAcrossTheWidth checks the last two lines: the frame's
+// own summary, and how to move around it.
+//
+// THE CELLS FILL THE BAR. A cluster of short cells against the left edge of a
+// frame that is otherwise full reads as a line that failed to render its right
+// half, which is what the earlier layout produced.
+func TestTheBottomBarsAreSpreadAcrossTheWidth(t *testing.T) {
+	m := resize(t, monitor(observation()), 120, 40)
+	lines := frameLines(m)
+
+	for _, y := range []int{m.geom.Status.Y, m.geom.Keys.Y} {
+		line := lines[y]
+		// The bar's own right padding is the only blank there may be: the cells
+		// end where it begins, rather than in a cluster mid-frame.
+		pad := lipgloss.Width(line) - lipgloss.Width(strings.TrimRight(line, " "))
+		if want := m.pal.StatusBar.GetPaddingRight(); pad != want {
+			t.Errorf("row %d ends %d cells short of the bar, want %d: %q", y, pad, want, line)
+		}
+	}
+
+	// As the bar narrows the cells give way whole, from the right: a cell cut in
+	// half is indistinguishable from a value that is merely long.
+	for _, width := range []int{120, 80, 62, 44, 32, 16} {
+		narrow := resize(t, monitor(observation()), width, 20)
+		bar := frameLines(narrow)[narrow.geom.Status.Y]
+		if !strings.Contains(bar, "today") {
+			t.Errorf("%d columns: the counters are not on the metrics bar: %q", width, bar)
+		}
+		for _, word := range []string{"credential", "family", "anonymous"} {
+			if strings.Contains(bar, word[:5]) != strings.Contains(bar, word) {
+				t.Errorf("%d columns: %q was cut mid-word: %q", width, word, bar)
+			}
+		}
+	}
+
+	// The promise is never cut in half either: the whole sentence, the two words
+	// that carry it, or nothing at all — never "read-only · no setting…".
+	for _, width := range []int{120, 80, 62, 44, 32, 16} {
+		narrow := resize(t, monitor(observation()), width, 20)
+		bar := strings.TrimRight(frameLines(narrow)[narrow.geom.Keys.Y], " ")
+		at := strings.Index(bar, "read-")
+		if at < 0 {
+			continue
+		}
+		if rest := bar[at:]; rest != readOnlyTag && rest != readOnlyTagShort {
+			t.Errorf("%d columns: the promise is clipped: %q", width, rest)
+		}
+	}
+}
+
+// Under twenty rows the banner gives its rule back to the body: on a short
 // TestTheShortTerminalCollapsesTheBanner checks the one band allowed to shrink.
 //
 // Under twenty rows the banner gives its rule back to the body: on a short
@@ -422,7 +554,7 @@ func TestTheLoadingStateSaysWhatItWaitsFor(t *testing.T) {
 	}
 	// The chrome is drawn in the state as well: the frame must not reflow when
 	// the first reading lands.
-	if !strings.Contains(got, "free-ai-router") || !strings.Contains(got, "addresses") {
+	if !strings.Contains(got, "free-ai-router") || !strings.Contains(got, "dashboard") {
 		t.Errorf("the chrome is missing from the loading state:\n%s", got)
 	}
 }
@@ -468,7 +600,7 @@ func TestTheEmptyStateNamesTheWayOut(t *testing.T) {
 // provider's anonymous tier is limited per address, so the address — not the key,
 // not the total — has to be a row.
 func TestTheAddressRowCarriesItsOwnCounters(t *testing.T) {
-	m := press(t, monitor(observation()), "2")
+	m := monitor(observation())
 	got := draw(m)
 
 	if !strings.Contains(got, "213.14.43.234") {
@@ -494,7 +626,7 @@ func TestTheAddressRowCarriesItsOwnCounters(t *testing.T) {
 // TestAModelRowSitsUnderItsAddress checks the nesting, which is what makes the
 // matrix readable: the model rows belong to the address above them.
 func TestAModelRowSitsUnderItsAddress(t *testing.T) {
-	got := frameLines(press(t, monitor(observation()), "2"))
+	got := frameLines(monitor(observation()))
 
 	first := indexOfLine(got, "213.14.43.234")
 	model := indexOfLine(got, "mimo-v2.6-flash")
@@ -520,7 +652,7 @@ func TestAModelRowSitsUnderItsAddress(t *testing.T) {
 // TestTheSortKeyReordersTheMatrix checks that the sort key is real: the counters
 // are unchanged, only their order is.
 func TestTheSortKeyReordersTheMatrix(t *testing.T) {
-	m := press(t, monitor(observation()), "2")
+	m := monitor(observation())
 	before := strings.Join(frameLines(m), "\n")
 	if indexOfLine(frameLines(m), "213.14.43.234") > indexOfLine(frameLines(m), "2a00:1450:4001:80e::200e") {
 		t.Fatalf("the default sort does not put the busiest address first:\n%s", before)
@@ -549,10 +681,10 @@ func TestTheSortKeyReordersTheMatrix(t *testing.T) {
 	}
 }
 
-// TestTheKeyBlockNamesTheActiveKey checks the key section: the pool, the active
-// key, and the counters that explain why the active one is the active one.
+// TestTheKeyBlockNamesTheActiveKey checks the provider tiles: the pool, the
+// active key, and the counters that explain why the active one is the active one.
 func TestTheKeyBlockNamesTheActiveKey(t *testing.T) {
-	m := press(t, monitor(observation()), "1")
+	m := monitor(observation())
 	got := draw(m)
 
 	if !strings.Contains(got, "opencode") {
@@ -602,8 +734,8 @@ func TestTheKeyBlockNamesTheActiveKey(t *testing.T) {
 				c.title, at, heading, head)
 		}
 	}
-	if !strings.Contains(got, "2 keys") {
-		t.Errorf("the frame's summary does not count the pool:\n%s", got)
+	if !strings.Contains(got, "1 provider · 2 addresses") {
+		t.Errorf("the frame's summary does not count what is inside it:\n%s", got)
 	}
 }
 
@@ -644,6 +776,37 @@ func TestNoKeysIsExplained(t *testing.T) {
 	}
 }
 
+// TestTheDashboardTilesShareARowWhileTheyFit checks the tile row: two tiles side
+// by side while the width allows it, stacked when it does not.
+//
+// THE TILES ARE WHAT MAKES THE DASHBOARD READABLE at a glance: the reader takes
+// in the day's counters, the daemon's shape, the pools and the matrix as four
+// separate things rather than as one column of key-values.
+func TestTheDashboardTilesShareARowWhileTheyFit(t *testing.T) {
+	wide := frameLines(resize(t, monitor(observation()), 120, 40))
+	if today, daemon := indexOfLine(wide, "─ today ─"), indexOfLine(wide, "─ daemon ─"); today != daemon {
+		t.Errorf("today opens on row %d and daemon on %d, want one row:\n%s",
+			today, daemon, strings.Join(wide, "\n"))
+	}
+
+	// A narrow terminal stacks them rather than clipping the second one, which
+	// would hide the daemon's whole tile behind the day's counters.
+	narrow := frameLines(resize(t, monitor(observation()), 62, 18))
+	today, daemon := indexOfLine(narrow, "─ today ─"), indexOfLine(narrow, "─ daemon ─")
+	if today < 0 || daemon <= today {
+		t.Errorf("the tiles did not stack at 62 columns: today %d, daemon %d:\n%s",
+			today, daemon, strings.Join(narrow, "\n"))
+	}
+
+	// Every tile names itself: a frame with nothing written in its heading is a
+	// box the reader has to guess at.
+	for _, want := range []string{"today", "daemon", "opencode", "addresses"} {
+		if !strings.Contains(draw(monitor(observation())), want) {
+			t.Errorf("the %s tile is missing:\n%s", want, draw(monitor(observation())))
+		}
+	}
+}
+
 // TestAnEmptyMatrixSaysWhy checks the section that is empty by design in local
 // mode: the matrix only fills in server mode, and that is a fact about the
 // deployment rather than a fault.
@@ -651,7 +814,7 @@ func TestAnEmptyMatrixSaysWhy(t *testing.T) {
 	obs := observation()
 	obs.Addresses = nil
 
-	got := draw(press(t, monitor(obs), "2"))
+	got := draw(monitor(obs))
 	if !strings.Contains(got, "no address has served") {
 		t.Errorf("an empty matrix is not explained:\n%s", got)
 	}
@@ -664,7 +827,7 @@ func TestAnEmptyMatrixSaysWhy(t *testing.T) {
 // TestTheFilterNarrowsTheJournal checks that the filter is applied, that what it
 // matched is highlighted, and that the frame says how much it hid.
 func TestTheFilterNarrowsTheJournal(t *testing.T) {
-	m := press(t, monitor(journalObs(50)), "3")
+	m := press(t, monitor(journalObs(50)), "2")
 	m = pressAll(t, m, "/", "4", "2", "enter")
 
 	if len(m.filtered) != 1 {
@@ -682,7 +845,7 @@ func TestTheFilterNarrowsTheJournal(t *testing.T) {
 // was in force, because the editor applies the draft live and a reader would
 // otherwise have no way back from a typo.
 func TestTheFilterIsTypedAndCancelled(t *testing.T) {
-	m := pressAll(t, monitor(journalObs(50)), "3", "/", "4", "2")
+	m := pressAll(t, monitor(journalObs(50)), "2", "/", "4", "2")
 	if len(m.filtered) != 1 {
 		t.Fatalf("the draft was not applied live: %d lines", len(m.filtered))
 	}
@@ -703,7 +866,7 @@ func TestTheFilterIsTypedAndCancelled(t *testing.T) {
 // still be moved through while the filter is being typed: that is how a reader
 // checks what they typed landed where they meant.
 func TestTheFilterEditorKeepsTheMovementKeys(t *testing.T) {
-	m := pressAll(t, monitor(journalObs(200)), "3", "/", "1", "0")
+	m := pressAll(t, monitor(journalObs(200)), "2", "/", "1", "0")
 
 	if !m.editing {
 		t.Fatal("the editor closed on its own")
@@ -753,7 +916,7 @@ func TestWrapChangesHowManyLinesTheJournalTakes(t *testing.T) {
 	obs := journalObs(1)
 	obs.Logs = []string{strings.Repeat("long ", 60)}
 
-	m := press(t, monitor(obs), "3")
+	m := press(t, monitor(obs), "2")
 	if !m.Wrap {
 		t.Fatal("wrapping is off by default, which is not what the frame claims")
 	}
@@ -780,7 +943,7 @@ func TestWrapChangesHowManyLinesTheJournalTakes(t *testing.T) {
 // reader at a blank section with no way to tell why.
 func TestTheScrollStopsAtTheEnd(t *testing.T) {
 	m := resize(t, monitor(journalObs(200)), 100, 20)
-	m = pressAll(t, m, "3", "G")
+	m = pressAll(t, m, "2", "G")
 
 	limit := m.scrollLimit(BlockLogs)
 	if limit == 0 {
@@ -798,7 +961,7 @@ func TestTheScrollStopsAtTheEnd(t *testing.T) {
 	if m.Scroll[BlockLogs] != limit {
 		t.Errorf("scrolling past the end moved the offset to %d, want %d", m.Scroll[BlockLogs], limit)
 	}
-	if got := len(m.sectionOf(contentWidth(m.geom.Body.W)).body); got == 0 {
+	if got := len(m.sectionOf(contentWidth(m.geom.Body.W))); got == 0 {
 		t.Error("the journal is empty after scrolling, so the frame would show nothing")
 	}
 
@@ -814,7 +977,7 @@ func TestTheScrollStopsAtTheEnd(t *testing.T) {
 // TestScrollingReleasesTheFollowPin checks that a reader who scrolls away keeps
 // their place: snapping back on the next reading would undo the move.
 func TestScrollingReleasesTheFollowPin(t *testing.T) {
-	m := pressAll(t, monitor(journalObs(60)), "3", "g")
+	m := pressAll(t, monitor(journalObs(60)), "2", "g")
 	if m.Follow {
 		t.Fatal("scrolling to the top did not release the follow pin")
 	}
@@ -838,8 +1001,8 @@ func TestScrollingReleasesTheFollowPin(t *testing.T) {
 // screen: a selection the reader has scrolled past would make the details key
 // open a line that is not drawn.
 func TestTheSelectionStaysVisible(t *testing.T) {
-	m := pressAll(t, monitor(journalObs(200)), "3", "g")
-	page := m.pageSize(BlockLogs)
+	m := pressAll(t, monitor(journalObs(200)), "2", "g")
+	page := m.pageSize()
 	if page < 3 {
 		t.Fatalf("the page is %d lines, too short to test the reveal", page)
 	}
@@ -879,7 +1042,7 @@ func TestTheSelectionStaysVisible(t *testing.T) {
 // geometry: the row is measured from the body's rectangle, so a click lands on
 // the line that is drawn there.
 func TestAClickSelectsTheJournalEntryUnderThePointer(t *testing.T) {
-	m := pressAll(t, monitor(journalObs(40)), "3", "g")
+	m := pressAll(t, monitor(journalObs(40)), "2", "g")
 
 	// The third drawn row of the journal, addressed through the frame's own
 	// geometry rather than by guessing where the body starts.
@@ -930,7 +1093,7 @@ func TestTheClickChoosesTheTabItLandsOn(t *testing.T) {
 }
 
 // TestTheTabKeysMoveBetweenSections checks every way the sections are reached:
-// the cycle, the letters, the digits and the arrows all land on the same three.
+// the cycle, the letters, the digits and the arrows all land on the same two.
 func TestTheTabKeysMoveBetweenSections(t *testing.T) {
 	m := resize(t, monitor(observation()), 120, 40)
 
@@ -938,16 +1101,16 @@ func TestTheTabKeysMoveBetweenSections(t *testing.T) {
 		keys []string
 		want Block
 	}{
-		{[]string{"tab"}, BlockMatrix},
-		{[]string{"l"}, BlockMatrix},
-		{[]string{"right"}, BlockMatrix},
+		{[]string{"tab"}, BlockLogs},
+		{[]string{"l"}, BlockLogs},
+		{[]string{"right"}, BlockLogs},
 		{[]string{"shift+tab"}, BlockLogs},
 		{[]string{"h"}, BlockLogs},
 		{[]string{"left"}, BlockLogs},
-		{[]string{"tab", "tab", "tab"}, BlockKeys},
-		{[]string{"1"}, BlockKeys},
-		{[]string{"2"}, BlockMatrix},
-		{[]string{"3"}, BlockLogs},
+		{[]string{"tab", "tab"}, BlockDashboard},
+		{[]string{"1"}, BlockDashboard},
+		{[]string{"d"}, BlockDashboard},
+		{[]string{"2"}, BlockLogs},
 	} {
 		if got := pressAll(t, m, tc.keys...).Focus; got != tc.want {
 			t.Errorf("%v focused %v, want %v", tc.keys, got, tc.want)
@@ -959,13 +1122,13 @@ func TestTheTabKeysMoveBetweenSections(t *testing.T) {
 // rather than the pointer: a wheel that scrolled whatever it happened to be over
 // would move a section the reader did not choose.
 func TestTheWheelScrollsTheFocusedSection(t *testing.T) {
-	m := pressAll(t, monitor(journalObs(200)), "3", "g")
+	m := pressAll(t, monitor(journalObs(200)), "2", "g")
 
 	got := wheel(t, m, tea.MouseWheelDown)
 	if got.Scroll[BlockLogs] != wheelStep {
 		t.Errorf("the wheel moved the journal to %d, want %d", got.Scroll[BlockLogs], wheelStep)
 	}
-	if got.Scroll[BlockMatrix] != 0 {
+	if got.Scroll[BlockDashboard] != 0 {
 		t.Errorf("the wheel moved a section that does not have the focus")
 	}
 
@@ -982,7 +1145,7 @@ func TestTheWheelScrollsTheFocusedSection(t *testing.T) {
 // TestTheDetailsModalOpensOnTheSelectedLine checks the modal against the journal:
 // it shows the line the reader pointed at, in full, with its neighbours.
 func TestTheDetailsModalOpensOnTheSelectedLine(t *testing.T) {
-	m := pressAll(t, monitor(journalObs(40)), "3", "g", "down", "down", "enter")
+	m := pressAll(t, monitor(journalObs(40)), "2", "g", "down", "down", "enter")
 
 	if m.overlay == nil || m.overlay.kind != overlayDetails {
 		t.Fatalf("the details modal did not open: %+v", m.overlay)
@@ -1001,7 +1164,7 @@ func TestTheDetailsModalOpensOnTheSelectedLine(t *testing.T) {
 // TestTheDetailsModalShowsContext checks that the modal answers "what happened
 // around this line", which is what the reader stopped for.
 func TestTheDetailsModalShowsContext(t *testing.T) {
-	m := pressAll(t, monitor(journalObs(40)), "3", "g", "down", "down", "down", "enter")
+	m := pressAll(t, monitor(journalObs(40)), "2", "g", "down", "down", "down", "enter")
 
 	got := draw(m)
 	idx := m.overlay.index
@@ -1318,7 +1481,7 @@ func TestAReadingFailureIsShownAndTheFrameSurvives(t *testing.T) {
 // move anything the reader set: a monitor that reset the filter or the sort every
 // two seconds would be unusable.
 func TestTheReadingsKeepTheReadersPlace(t *testing.T) {
-	m := pressAll(t, monitor(journalObs(200)), "3", "/", "1", "0", "enter", "s")
+	m := pressAll(t, monitor(journalObs(200)), "2", "/", "1", "0", "enter", "s")
 
 	next, _ := m.Update(readMsg{obs: journalObs(200)})
 	after, ok := next.(Model)
@@ -1391,7 +1554,10 @@ func TestAnUnknownKeyChangesNothing(t *testing.T) {
 // strip shortens rather than losing its tail, because the section that falls off
 // the end is always the journal.
 func TestTheNarrowTerminalKeepsTheSectionsReachable(t *testing.T) {
-	for _, width := range []int{16, 24, 44, 80} {
+	// The width at which "dashboard  log" stops fitting, and the labels with it.
+	const fits = len("dashboard") + tabGap + len("log")
+
+	for _, width := range []int{8, 14, 16, 24, 44, 80} {
 		m := resize(t, monitor(observation()), width, 16)
 
 		labels := m.tabLabels(m.geom.Tabs.W)
@@ -1401,16 +1567,19 @@ func TestTheNarrowTerminalKeepsTheSectionsReachable(t *testing.T) {
 		if got := lipgloss.Width(m.tabsStrip(m.geom.Tabs.W)); got > m.geom.Tabs.W {
 			t.Errorf("%d columns: the strip is %d wide, the band is %d", width, got, m.geom.Tabs.W)
 		}
-		if width < 24 {
-			for i, label := range labels {
-				if lipgloss.Width(label) != 1 {
-					t.Errorf("%d columns: tab %d is %q, want a single letter", width, i, label)
-				}
+		// The labels give way exactly when the full names no longer fit, and
+		// never before: a strip of single letters on a terminal that could have
+		// named the sections is a waste of the one line it has.
+		wantShort := width < fits
+		for i, label := range labels {
+			if short := lipgloss.Width(label) == 1; short != wantShort {
+				t.Errorf("%d columns: tab %d is %q, short=%v want %v",
+					width, i, label, short, wantShort)
 			}
 		}
 
 		// Every section is still reachable, whatever the strip had to give up.
-		for i, b := range []Block{BlockKeys, BlockMatrix, BlockLogs} {
+		for i, b := range []Block{BlockDashboard, BlockLogs} {
 			got := press(t, m, itoa(i+1))
 			if got.Focus != b {
 				t.Errorf("%d columns: the section key focused %v, want %v", width, got.Focus, b)

@@ -9,15 +9,22 @@
 // monitor would look permanent and be gone at the next activation, because the
 // configuration file belongs to the host's manager.
 //
-// So the monitor answers four questions, in four blocks:
+// So the monitor answers its questions on two screens:
 //
-//   - WHICH KEY IS IN USE, and whether key rotation is on.
-//   - HOW MUCH EACH ADDRESS HAS SPENT, per model — the matrix. This is the block
-//     that exists: the provider's anonymous tier is limited per address rather
-//     than per key, so a single total cannot tell a spent address from a spent
-//     key, and the address is the only row key that can.
-//   - WHAT HAPPENED — the journal, scrollable, filterable, wrap togglable.
-//   - WHAT THE DAEMON IS — the axes in effect and where each value came from.
+//   - THE DASHBOARD — the whole deployment as tiles. What the day's traffic came
+//     to; what the daemon is and where each of its settings came from; which
+//     providers exist, under which credential, with which keys and whether a
+//     refusal rotates them; and how much every egress address has spent, per
+//     model. The address matrix is the part that exists for a reason: the
+//     provider's anonymous tier is limited per address rather than per key, so a
+//     single total cannot tell a spent address from a spent key, and the address
+//     is the only row key that can.
+//   - THE JOURNAL — what happened, scrollable, filterable, wrap togglable.
+//
+// The keys used to have a screen of their own. They do not any more: a key is a
+// property of a provider, the reader who asks about a key is asking about the
+// provider it belongs to, and a separate screen made the reader hold the two
+// halves of one answer in their head.
 //
 // WHY IT IS BUILT IN rather than a script: an external wrapper may be absent,
 // may need other people's programs, and may disagree with the binary about the
@@ -44,21 +51,22 @@ import (
 type Block int
 
 const (
-	// BlockKeys is the key block: the pool, the active key, the rotation state.
-	BlockKeys Block = iota
-	// BlockMatrix is the per-address, per-model matrix.
-	BlockMatrix
+	// BlockDashboard is the deployment as tiles: the day's counters, the daemon's
+	// axes, the providers with their keys, and the address matrix.
+	BlockDashboard Block = iota
 	// BlockLogs is the journal.
 	BlockLogs
 )
 
 // String returns the block name.
+//
+// The name is what the tab strip draws and what the frame's own title repeats,
+// so it is also the name the reader will use when describing what they were
+// looking at.
 func (b Block) String() string {
 	switch b {
-	case BlockKeys:
-		return "keys"
-	case BlockMatrix:
-		return "addresses"
+	case BlockDashboard:
+		return "dashboard"
 	case BlockLogs:
 		return "log"
 	default:
@@ -67,7 +75,7 @@ func (b Block) String() string {
 }
 
 // blockCount is how many blocks the monitor has.
-const blockCount = 3
+const blockCount = 2
 
 // DataSource supplies a reading of the daemon's state.
 //
@@ -84,6 +92,13 @@ type DataSource interface {
 type Observation struct {
 	// At is the moment of the reading.
 	At time.Time
+	// Uptime is how long the daemon has been up, and zero when that is not
+	// known — no daemon is running, or its start could not be established.
+	//
+	// It is a reading of the deployment rather than of the frame, so it is
+	// reported here and not measured in the view: the monitor is a separate
+	// process, and how long IT has been running says nothing about the daemon.
+	Uptime time.Duration
 	// Daemon describes the deployment: the axes in effect, with their sources.
 	Daemon []Row
 	// Providers are the providers, their credentials and their key pools.

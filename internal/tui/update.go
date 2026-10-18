@@ -48,8 +48,7 @@ func tick() tea.Cmd {
 type keyMap struct {
 	NextSection key.Binding
 	PrevSection key.Binding
-	SectionKeys key.Binding
-	SectionGrid key.Binding
+	SectionDash key.Binding
 	SectionLog  key.Binding
 
 	Up       key.Binding
@@ -89,17 +88,13 @@ func newKeyMap() keyMap {
 			key.WithKeys("shift+tab", "h", "left"),
 			key.WithHelp("⇧tab h ←", "previous section"),
 		),
-		SectionKeys: key.NewBinding(
-			key.WithKeys("1"),
-			key.WithHelp("1", "keys and providers"),
-		),
-		SectionGrid: key.NewBinding(
-			key.WithKeys("2"),
-			key.WithHelp("2", "addresses and models"),
+		SectionDash: key.NewBinding(
+			key.WithKeys("1", "d"),
+			key.WithHelp("1 d", "the dashboard"),
 		),
 		SectionLog: key.NewBinding(
-			key.WithKeys("3"),
-			key.WithHelp("3", "the journal"),
+			key.WithKeys("2"),
+			key.WithHelp("2", "the journal"),
 		),
 
 		Up: key.NewBinding(
@@ -187,7 +182,7 @@ type keyGroup struct {
 func (k keyMap) groups() []keyGroup {
 	return []keyGroup{
 		{name: "moving", bindings: []key.Binding{
-			k.NextSection, k.PrevSection, k.SectionKeys, k.SectionGrid, k.SectionLog,
+			k.NextSection, k.PrevSection, k.SectionDash, k.SectionLog,
 		}},
 		{name: "scrolling", bindings: []key.Binding{
 			k.Up, k.Down, k.PageUp, k.PageDown, k.Top, k.Bottom,
@@ -420,12 +415,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.Focus = (m.Focus + blockCount - 1) % blockCount
 		return m, nil
 
-	case key.Matches(msg, m.keys.SectionKeys):
-		m.Focus = BlockKeys
-		return m, nil
-
-	case key.Matches(msg, m.keys.SectionGrid):
-		m.Focus = BlockMatrix
+	case key.Matches(msg, m.keys.SectionDash):
+		m.Focus = BlockDashboard
 		return m, nil
 
 	case key.Matches(msg, m.keys.SectionLog):
@@ -440,12 +431,12 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.read()
 
 	case key.Matches(msg, m.keys.Sort):
-		// Sorting only applies to the matrix, but the key is not gated on the
-		// matrix being on screen: the order is a property of the reading, not of
-		// what is being looked at, and a reader who sorts and then returns to the
-		// matrix should find it sorted.
+		// Sorting only applies to the matrix tile, but the key is not gated on
+		// the dashboard being on screen: the order is a property of the reading,
+		// not of what is being looked at, and a reader who sorts and then returns
+		// to the dashboard should find it sorted.
 		m.sort = m.sort.next()
-		m.Scroll[BlockMatrix] = 0
+		m.Scroll[BlockDashboard] = 0
 		return m, nil
 
 	case key.Matches(msg, m.keys.Wrap):
@@ -486,11 +477,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.PageUp):
-		m.scrollBy(-m.pageSize(m.Focus))
+		m.scrollBy(-m.pageSize())
 		return m, nil
 
 	case key.Matches(msg, m.keys.PageDown):
-		m.scrollBy(m.pageSize(m.Focus))
+		m.scrollBy(m.pageSize())
 		return m, nil
 
 	case key.Matches(msg, m.keys.Top):
@@ -639,18 +630,19 @@ func (m Model) entryAt(y int) (int, bool) {
 // bodyInset is how many rows of a block's rectangle the border takes.
 const bodyInset = 1
 
-// pageSize is how many content lines a block can show: the body's height, its
-// border and the block's fixed head excluded.
+// pageSize is how many content lines the body can show: its height with its
+// border excluded.
 //
-// PER BLOCK, not per section. A reading moves the journal to its end even while
-// the reader is looking at the keys, and that needs the journal's page rather
-// than the page of whatever happens to be on screen.
-func (m Model) pageSize(b Block) int {
-	head := 0
-	if b == BlockMatrix {
-		head = tableHeadLines
-	}
-	return max(1, m.geom.Body.H-2-head)
+// IT DOES NOT DEPEND ON THE BLOCK. The address table's column titles used to be a
+// fixed head that took rows off the page, and the one table on the screen is now
+// a tile inside the dashboard, scrolling with everything else.
+//
+// A page is still asked for on behalf of a block — a reading moves the journal to
+// its end even while the reader is looking at the dashboard — but that is a
+// question about which section's content is being moved, not about how tall a
+// page is.
+func (m Model) pageSize() int {
+	return max(1, m.geom.Body.H-2)
 }
 
 // lineCount is how many content lines a block has.
@@ -661,19 +653,16 @@ func (m Model) pageSize(b Block) int {
 // and wrap change, which is four places to get wrong. If it ever shows up in a
 // profile, the cache goes here.
 func (m Model) lineCount(b Block) int {
-	switch b {
-	case BlockKeys:
-		return len(m.keysSection(contentWidth(m.geom.Body.W)))
-	case BlockMatrix:
-		return len(m.addressesSection(contentWidth(m.geom.Body.W)).body)
-	default:
-		return len(m.journalSection(contentWidth(m.geom.Body.W)).body)
+	inner := contentWidth(m.geom.Body.W)
+	if b == BlockLogs {
+		return len(m.journalSection(inner))
 	}
+	return len(m.dashboardSection(inner))
 }
 
 // scrollLimit is the furthest a block can scroll.
 func (m Model) scrollLimit(b Block) int {
-	return max(0, m.lineCount(b)-m.pageSize(b))
+	return max(0, m.lineCount(b)-m.pageSize())
 }
 
 // scrollBy moves the focused block.
@@ -764,7 +753,7 @@ func (m *Model) revealSelection() {
 		return
 	}
 
-	page := m.pageSize(BlockLogs)
+	page := m.pageSize()
 
 	if start < m.Scroll[BlockLogs] {
 		m.Scroll[BlockLogs] = start

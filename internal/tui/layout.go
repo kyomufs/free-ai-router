@@ -205,3 +205,63 @@ func repeat(s string, n int) string {
 	}
 	return strings.Repeat(s, n)
 }
+
+// justify lays cells out across exactly width cells, spreading the free space
+// evenly between them.
+//
+// WHAT IT IS FOR. The frame's own bars are the only full-width lines on the
+// screen, and a row of short cells gathered at the left of one reads as a line
+// that stopped rendering. Spread out, the same cells read as a bar, and the
+// first and last land on the frame's own edges — which is also how the reader
+// can tell the frame is exact at a glance.
+//
+// THE REMAINDER GOES TO THE LEFTMOST GAPS. Dividing the free space evenly leaves
+// up to gaps-1 cells over, and putting them in the last gap would leave the
+// right edge a cell or two short of the frame — the one thing the layout
+// promises to keep exact. Cells are laid out at their own widths, so nothing
+// here needs to know what is in them: an empty cell is dropped and the rest
+// close ranks.
+func justify(cells []string, width int) string {
+	kept := make([]string, 0, len(cells))
+	for _, c := range cells {
+		if c != "" {
+			kept = append(kept, c)
+		}
+	}
+	if width < 1 {
+		return ""
+	}
+	if len(kept) == 0 {
+		return repeat(" ", width)
+	}
+
+	used := 0
+	for _, c := range kept {
+		used += lipgloss.Width(c)
+	}
+	if len(kept) == 1 {
+		return kept[0]
+	}
+
+	free := width - used
+	if free < len(kept)-1 {
+		// No room to space them: the cells would have to be cut to be spread,
+		// and a cut counter is worse than a crowded bar.
+		return clip(strings.Join(kept, " "), width)
+	}
+
+	base, extra := free/(len(kept)-1), free%(len(kept)-1)
+	var b strings.Builder
+	for i, c := range kept {
+		b.WriteString(c)
+		if i == len(kept)-1 {
+			break
+		}
+		gap := base
+		if i < extra {
+			gap++
+		}
+		b.WriteString(repeat(" ", gap))
+	}
+	return b.String()
+}

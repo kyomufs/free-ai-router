@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"time"
 
@@ -77,6 +78,7 @@ func (s *tuiSource) Observe() (tui.Observation, error) {
 	}
 
 	obs.LogPath = cfg.Paths.LogFile
+	obs.Uptime = daemonUptime(cfg.Paths.PIDFile)
 
 	// The counters. A state file that cannot be opened is a note rather than a
 	// failure: the monitor still has the configuration and the journal to show,
@@ -108,6 +110,32 @@ func (s *tuiSource) Observe() (tui.Observation, error) {
 // a reading happens every couple of seconds, and a longer tail would be redrawn
 // over and over for no one's benefit.
 const tailLines = 500
+
+// daemonUptime is how long the daemon has been running.
+//
+// THE PID FILE'S AGE IS THE UPTIME. The daemon writes it once at startup and
+// removes it on the way out, so the file's modification time is the moment it
+// took over the port — a stamp no other artifact in the deployment carries.
+//
+// The age is only reported when the process the file names is still alive, and
+// only when it is in the past: an unclean shutdown leaves the file behind, and
+// the age of that leftover is a number about a period during which nothing was
+// running. Zero means "not known", which the monitor draws as a placeholder
+// rather than as a daemon that started this instant.
+func daemonUptime(path string) time.Duration {
+	pid, err := findDaemonPID(path)
+	if err != nil || pid == 0 {
+		return 0
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	if d := time.Since(info.ModTime()); d > 0 {
+		return d
+	}
+	return 0
+}
 
 // readSnapshot reads the counters.
 func readSnapshot(path string) (*state.Snapshot, error) {

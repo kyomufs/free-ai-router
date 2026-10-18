@@ -202,20 +202,26 @@ func equalRunes(a, b []rune) bool {
 // the section frame
 // ---------------------------------------------------------------------------
 
-// boxTop builds the top border of a section: the corner, the title, a run of
-// dashes, the summary, and the closing corner — exactly width cells.
+// borderTop builds the top border of a framed box: the corner, the title, a run
+// of dashes, the summary, and the closing corner — exactly width cells.
 //
 // THE SUMMARY IS DROPPED BEFORE THE TITLE. The title says which section this is,
 // and a frame whose sections are indistinguishable is worse than one that has
 // stopped reporting its line count. Dropping the title to keep a count would be
 // the wrong trade in the same way.
-func (m Model) boxTop(title, summary string, width int) string {
+//
+// The frame and the title are passed in because the screen has two levels of
+// them — the section's, in the accent, and the tiles inside it, in the neutral
+// border — and the arithmetic of fitting a heading into a border is the same for
+// both. It is written once here so that a change to it cannot fix one level and
+// leave the other wrong.
+func (m Model) borderTop(frame, title lipgloss.Style, heading, summary string, width int) string {
 	if width < 4 {
-		return clip(title, width)
+		return clip(heading, width)
 	}
 
 	inner := width - 2
-	titleCell := " " + m.pal.accentStyle().Render(title) + " "
+	titleCell := " " + title.Render(heading) + " "
 
 	summaryCell := ""
 	if summary != "" {
@@ -233,156 +239,115 @@ func (m Model) boxTop(title, summary string, width int) string {
 		fill = max(0, width-3-lipgloss.Width(titleCell))
 	}
 
-	return m.pal.borderColor().Render("╭─") +
+	return frame.Render("╭─") +
 		titleCell +
-		m.pal.borderColor().Render(repeat("─", fill)) +
+		frame.Render(repeat("─", fill)) +
 		summaryCell +
-		m.pal.borderColor().Render("╮")
+		frame.Render("╮")
+}
+
+// borderBottom is the closing border of a framed box.
+func borderBottom(frame lipgloss.Style, width int) string {
+	if width < 2 {
+		return ""
+	}
+	return frame.Render("╰" + repeat("─", width-2) + "╯")
+}
+
+// borderRow is one content row of a framed box, clipped and padded to the frame.
+func borderRow(frame lipgloss.Style, line string, width int) string {
+	inner := width - 4
+	if inner < 1 {
+		return frame.Render("│") + clip(line, max(0, width-1))
+	}
+	return frame.Render("│") + " " +
+		padTo(clip(line, inner), inner) + " " +
+		frame.Render("│")
+}
+
+// boxTop is the top border of a section.
+func (m Model) boxTop(title, summary string, width int) string {
+	return m.borderTop(m.pal.borderColor(), m.pal.accentStyle(), title, summary, width)
 }
 
 // boxBottom is the closing border of a section.
 func (m Model) boxBottom(width int) string {
-	if width < 2 {
-		return ""
-	}
-	return m.pal.borderColor().Render("╰" + repeat("─", width-2) + "╯")
+	return borderBottom(m.pal.borderColor(), width)
 }
 
-// boxRow is one content row of a section, clipped and padded to the frame.
+// boxRow is one content row of a section.
 func (m Model) boxRow(line string, width int) string {
-	inner := width - 4
-	if inner < 1 {
-		return m.pal.borderColor().Render("│") + clip(line, max(0, width-1))
-	}
-	return m.pal.borderColor().Render("│") + " " +
-		padTo(clip(line, inner), inner) + " " +
-		m.pal.borderColor().Render("│")
+	return borderRow(m.pal.borderColor(), line, width)
 }
 
 // ---------------------------------------------------------------------------
 // sections
 // ---------------------------------------------------------------------------
 
-// sectionView is what a section contributes to the frame.
+// sectionOf builds the active section: its content, one entry per rendered line,
+// in the order it should be read.
 //
-// The head is fixed and the body scrolls: a table's column titles that scrolled
-// away with the data would leave the reader counting columns, and the journal
-// has no head at all. Splitting them here is what lets one scroll offset serve
-// both without either knowing which section is on screen.
-type sectionView struct {
-	// head is drawn above the body and never scrolls.
-	head []string
-	// body is the scrollable content, one entry per rendered line.
-	body []string
-}
-
-// sectionOf builds the active section.
+// A SECTION HAS NO FIXED HEAD. The dashboard is a grid of tiles and the journal
+// is prose, and the one table on the screen is a tile inside the grid — a fixed
+// head belongs to a screen that is one table and nothing else, and a section
+// whose one table is a tile among several has nowhere to pin it.
 //
-// The page height is not passed in: a section reports all of its content and the
-// frame does the windowing. A section that could only produce a screenful would
-// have to know the frame's height, and then the scroll offset and the page would
-// be two numbers describing the same view from two places.
-func (m Model) sectionOf(inner int) sectionView {
-	switch m.Focus {
-	case BlockKeys:
-		return sectionView{body: m.keysSection(inner)}
-	case BlockMatrix:
-		return m.addressesSection(inner)
-	default:
+// The page height is not passed in either: a section reports all of its content
+// and the frame does the windowing. A section that could only produce a screenful
+// would have to know the frame's height, and then the scroll offset and the page
+// would be two numbers describing the same view from two places.
+func (m Model) sectionOf(inner int) []string {
+	if m.Focus == BlockLogs {
 		return m.journalSection(inner)
 	}
+	return m.dashboardSection(inner)
 }
 
-// tableHeadLines is how many fixed lines a table draws before its first row: the
-// column titles and the rule under them.
+// ---------------------------------------------------------------------------
+// the key table
+// ---------------------------------------------------------------------------
+
+// keyRow is one key: the active marker, its fingerprint, its counters and its
+// share of successful requests.
 //
-// It is a constant because the scroll handlers need the number without building
-// the table. Both table sections construct their head with exactly these two
-// entries, and the two are next to each other in this file on purpose: a third
-// line added to one of them has to be added here as well, and this is where
-// someone will be reading when they do it.
-const tableHeadLines = 2
-
-// --- keys -------------------------------------------------------------------
-
-// keysSection renders the providers and their key pools.
-//
-// ONE CARD PER PROVIDER, separated by a blank line rather than by a rule: a rule
-// between every provider on a screen with four of them is more horizontal ink
-// than content, and the card's own marker already says where one begins.
-func (m Model) keysSection(inner int) []string {
-	if len(m.obs.Providers) == 0 {
-		return []string{
-			m.pal.Dim.Render("no providers are configured"),
-			m.pal.Hint.Render("the daemon serves nothing until one is declared"),
-		}
+// The active key is marked twice — the arrow in the margin and the fingerprint in
+// the accent — because it is the one value in the pool that decides where the
+// traffic goes. The arrow says which row, the colour says it again for a reader
+// who is looking at the pool rather than reading it.
+func (m Model) keyRow(k KeyState, active bool, c keyCols) string {
+	marker := "  "
+	fpStyle := m.pal.Value
+	if active {
+		marker = m.pal.accentStyle().Render("▸") + " "
+		fpStyle = m.pal.accentStyle().Bold(true)
 	}
 
-	out := make([]string, 0, len(m.obs.Providers)*6)
-	for i, p := range m.obs.Providers {
-		if i > 0 {
-			out = append(out, "")
-		}
-		out = append(out, m.providerCard(p, inner)...)
+	fp := padTo(fpStyle.Render(clip(k.Fingerprint, c.fp)), c.fp)
+	ok := padTo(m.pal.SuccessText.Render(itoa(k.OK)), c.ok)
+	err := padTo(m.pal.ErrorText.Render(itoa(k.Refused)), c.err)
+
+	if c.bar == 0 {
+		return marker + fp + ok + err
 	}
-	return out
+
+	total := k.OK + k.Refused
+	frac := 0.0
+	if total > 0 {
+		frac = float64(k.OK) / float64(total)
+	}
+	bar := m.barCell(frac, c.bar)
+
+	share := m.pal.Dim.Render(fmt.Sprintf("%*.0f%%", c.share-1, frac*100))
+	if total == 0 {
+		share = m.pal.Dim.Render(padLeft("—", c.share))
+	}
+
+	return marker + fp + ok + err + bar + share
 }
 
-// providerCard is one provider: its header, its state, and its keys.
-func (m Model) providerCard(p ProviderState, inner int) []string {
-	marker := m.pal.accentStyle().Render("▌") + " "
-	id := m.pal.Value.Bold(true).Render(p.ID)
-
-	// The credential and the pool size sit on the right of the header, because
-	// they are the two facts that decide whether the pool is even consulted.
-	right := m.pal.Label.Render("credential ") + m.pal.Value.Render(p.Credential)
-	right += m.pal.Dim.Render("  ·  ")
-	right += m.pal.Label.Render("keys ") + m.pal.Value.Render(itoa(len(p.Keys)))
-
-	head := marker + id
-	pad := inner - lipgloss.Width(head) - lipgloss.Width(right)
-	if pad < 2 {
-		return []string{head, "  " + right, m.rotationLine(p)}
-	}
-
-	out := []string{
-		head + repeat(" ", pad) + right,
-		m.rotationLine(p),
-	}
-
-	if len(p.Keys) == 0 {
-		// An anonymous provider has no pool by design, and an account provider
-		// without keys could not have started. Both are stated rather than left
-		// as an empty gap, because an empty gap reads as a rendering failure.
-		if p.Credential == "anonymous" {
-			out = append(out, m.pal.Dim.Render("  no keys — an anonymous credential presents none"))
-		} else {
-			out = append(out, m.pal.WarningText.Render("  no keys in the pool"))
-		}
-		return out
-	}
-
-	// The key rows, pinned to the columns the counters and the bar sit in.
-	// The header names each column over the cells that carry it, the bar column
-	// included: a title that stopped before the bar would sit on top of the last
-	// value in the row instead of over its own.
-	okW, errW, barW, shareW := 7, 7, 14, 5
-	head0 := "  " + m.pal.Label.Render(padTo("key", 14))
-	head0 += m.pal.Label.Render(padTo("OK", okW))
-	head0 += m.pal.Label.Render(padTo("REFUSED", errW))
-	head0 += m.pal.Label.Render(padTo("", barW))
-	head0 += m.pal.Label.Render(padTo("share", shareW))
-	out = append(out, head0)
-
-	for _, k := range p.Keys {
-		out = append(out, m.keyRow(k, k.Fingerprint == p.Active, okW, errW, barW, shareW))
-	}
-	return out
-}
-
-// rotationLine states whether rotation is on and, when it is, which key is in
-// use. Rotation off is said out loud: it is the difference between a pool that
-// spreads load and a pool that is decoration.
+// rotationLine states whether rotation is on. Rotation off is said out loud: it
+// is the difference between a pool that spreads load and a pool that is
+// decoration.
 func (m Model) rotationLine(p ProviderState) string {
 	state := m.pal.Dim.Render("rotate " + onOff(p.RotationOn))
 	if !p.RotationOn {
@@ -391,41 +356,7 @@ func (m Model) rotationLine(p ProviderState) string {
 	if p.Credential == "anonymous" {
 		state = m.pal.Dim.Render("rotate n/a — anonymous credential")
 	}
-	return "  " + state
-}
-
-// keyRow is one key: the active marker, its fingerprint, its counters and its
-// share of successful requests.
-//
-// The active key is marked twice — the arrow in the margin and the fingerprint in
-// the accent — because it is the one value in this section that decides where the
-// traffic goes. The arrow says which row, the colour says it again for a reader
-// who is looking at the pool rather than reading it.
-func (m Model) keyRow(k KeyState, active bool, okW, errW, barW, shareW int) string {
-	marker := "  "
-	fpStyle := m.pal.Value
-	if active {
-		marker = m.pal.accentStyle().Render("▸") + " "
-		fpStyle = m.pal.accentStyle().Bold(true)
-	}
-
-	fp := padTo(fpStyle.Render(clip(k.Fingerprint, 14)), 14)
-	ok := padTo(m.pal.SuccessText.Render(itoa(k.OK)), okW)
-	err := padTo(m.pal.ErrorText.Render(itoa(k.Refused)), errW)
-
-	total := k.OK + k.Refused
-	frac := 0.0
-	if total > 0 {
-		frac = float64(k.OK) / float64(total)
-	}
-	bar := m.barCell(frac, barW)
-
-	share := m.pal.Dim.Render(fmt.Sprintf("%*.0f%%", shareW-1, frac*100))
-	if total == 0 {
-		share = m.pal.Dim.Render(padLeft("—", shareW))
-	}
-
-	return marker + fp + ok + err + bar + share
+	return state
 }
 
 // barCell is a share bar: filled cells in a tone that follows the ratio.
@@ -460,7 +391,7 @@ func (m Model) barCell(frac float64, width int) string {
 		m.pal.Dim.Render(repeat("░", width-filled))
 }
 
-// --- addresses --------------------------------------------------------------
+// --- the address matrix -----------------------------------------------------
 
 // tableCol is one column of the address table.
 type tableCol struct {
@@ -471,37 +402,6 @@ type tableCol struct {
 
 // colGap is the space between two columns of the address table.
 const colGap = 2
-
-// addressesSection renders the per-address, per-model matrix.
-func (m Model) addressesSection(inner int) sectionView {
-	rows := m.sortedAddresses()
-	if len(rows) == 0 {
-		return sectionView{body: []string{
-			m.pal.Dim.Render("no address has served a request yet"),
-			m.pal.Hint.Render("the matrix fills in as the daemon forwards traffic"),
-		}}
-	}
-
-	cols := addressCols(rows, inner)
-	head := []string{
-		renderCells(colTitles(cols), cols),
-		m.pal.Rule.Render(repeat("─", min(inner, colsWidth(cols)))),
-	}
-
-	body := make([]string, 0, len(rows)*3)
-	for i, r := range rows {
-		if i > 0 {
-			// A rule between address groups rather than a zebra stripe: the rows
-			// nest one level, and a nested zebra reads as a rendering fault.
-			body = append(body, m.pal.Rule.Render(repeat("·", min(inner, colsWidth(cols)))))
-		}
-		body = append(body, m.addressRow(r, cols))
-		for _, mr := range r.Models {
-			body = append(body, m.modelRow(r, mr, cols))
-		}
-	}
-	return sectionView{head: head, body: body}
-}
 
 // sortedAddresses returns the matrix rows in the order the sort mode asks for.
 //
@@ -723,18 +623,18 @@ func (m Model) journalLayout(inner int) []journalRow {
 // No fixed head: a log line carries its own timestamp and level, so a row of
 // column titles above it would be a second, weaker copy of what is already in
 // every line.
-func (m Model) journalSection(inner int) sectionView {
+func (m Model) journalSection(inner int) []string {
 	if len(m.obs.Logs) == 0 {
-		return sectionView{body: []string{
+		return []string{
 			m.pal.Dim.Render("the journal is empty"),
 			m.pal.Hint.Render("the daemon writes to " + m.obs.LogPath),
-		}}
+		}
 	}
 	if len(m.filtered) == 0 {
-		return sectionView{body: []string{
+		return []string{
 			m.pal.Dim.Render("nothing matches " + m.filter),
 			m.pal.Hint.Render("esc clears the filter"),
-		}}
+		}
 	}
 
 	rows := m.journalLayout(inner)
@@ -742,7 +642,7 @@ func (m Model) journalSection(inner int) sectionView {
 	for _, r := range rows {
 		body = append(body, r.text)
 	}
-	return sectionView{body: body}
+	return body
 }
 
 // journalSpan is the range of rendered lines one filtered entry occupies.

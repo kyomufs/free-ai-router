@@ -4,6 +4,7 @@ import (
 	"image/color"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/exp/charmtone"
 
 	"free-ai-router/internal/tui/presets"
 )
@@ -17,9 +18,21 @@ import (
 // dark through lipgloss.LightDark, so the monitor is readable on both without
 // this file knowing which one it is on.
 //
-// THE ACCENT IS OVERRIDDEN, and it is the only colour overridden. A monitor has
-// to look like the thing it monitors, and the router's own accent is what the
-// rest of the project already uses; every other role stays as the preset set it.
+// THE ACCENT FAMILY IS OVERRIDDEN, and it is the only thing overridden. The
+// preset's own accent is a violet, and a router wants a cooler, more electric
+// hue: the frame reads as wiring rather than as a document. Everything else
+// stays as the preset set it, so the semantic colours keep the contrast they
+// were chosen for.
+//
+// THE TWO ACCENTS ARE ONE FAMILY, deliberately: a petrol teal on a light
+// terminal and a bright cyan on a dark one, with an azure as the second step of
+// the same gradient. A monitor needs its chrome to recede, and a second,
+// unrelated hue in the chrome would compete with the counters — which are the
+// only thing on the screen allowed to raise their voice.
+//
+// CYAN IS KEPT CLEAR OF THE SEMANTIC HUES. Success is a green, danger a coral,
+// warning a yellow: none of them is a shade of the accent, so "this went
+// through" and "this is the frame" are never the same colour at a glance.
 //
 // Nothing is signalled by colour alone. Every state the palette distinguishes
 // also carries a word — OK, ERROR, ABORT, on, off, live — because a monitor read
@@ -41,6 +54,16 @@ type palette struct {
 	Toast lipgloss.Style
 	// ToastWarn is the same line for a reading that failed.
 	ToastWarn lipgloss.Style
+
+	// TileFrame is the border of a dashboard tile, and TileTitle its heading.
+	//
+	// Tiles are drawn INSIDE the section frame, so they are deliberately the
+	// quieter of the two: the outer frame carries the accent and names the
+	// section, the tiles inside it are separated by the neutral border and their
+	// headings are neither bold nor coloured. Two levels of accent inside one
+	// another would read as four frames rather than as one screen with tiles.
+	TileFrame lipgloss.Style
+	TileTitle lipgloss.Style
 }
 
 // newPalette builds the styles for a background.
@@ -48,8 +71,11 @@ func newPalette(dark bool) palette {
 	t := presets.Charm(dark)
 	pick := lipgloss.LightDark(dark)
 
-	// The accent. A monitor has to look like the thing it monitors.
-	t.Accent = pick(lipgloss.Color("#0B5FFF"), lipgloss.Color("#7AA2F7"))
+	// The accent family: petrol teal in the light, cyan in the dark, with the
+	// azure of the same ramp as the second accent.
+	t.Accent = pick(charmtone.Damson, charmtone.Turtle)
+	t.AccentAlt = pick(charmtone.Oceania, charmtone.Malibu)
+	t.Info = t.AccentAlt
 	t.BorderFocus = t.Accent
 
 	// Everything derived from the accent is rebuilt rather than left at the
@@ -71,6 +97,8 @@ func newPalette(dark bool) palette {
 		TabIdlePill:   plain.Foreground(t.Muted),
 		Toast:         plain.Bold(true).Foreground(t.Success),
 		ToastWarn:     plain.Bold(true).Foreground(t.Warning),
+		TileFrame:     plain.Foreground(t.Border),
+		TileTitle:     plain.Foreground(t.Muted),
 	}
 }
 
