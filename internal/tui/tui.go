@@ -36,7 +36,7 @@ package tui
 import (
 	"time"
 
-	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -208,6 +208,14 @@ type Model struct {
 	err error
 	// loaded is whether a reading has arrived.
 	loaded bool
+	// manual marks that the reading in flight was asked for by the reader, so
+	// that it is confirmed when it lands.
+	//
+	// A reading the reader asked for and an automatic one are the same message by
+	// the time they arrive, and only the first deserves a toast: a reading that
+	// was asked for has to say it happened, because the frame may be identical to
+	// the one before it.
+	manual bool
 
 	// Focus is the block that receives the movement keys.
 	Focus Block
@@ -232,10 +240,43 @@ type Model struct {
 	// pal is the style set, rebuilt when the terminal reports its background.
 	pal palette
 
+	// spinner animates the loading state. It is the one widget the monitor owns
+	// that is not interactive: it exists so that a wait is visible as a wait.
+	spinner spinner.Model
+
 	// width and height are the terminal size.
 	width, height int
 	// quitting marks that an exit has been requested.
 	quitting bool
+
+	// geom is where every band of the frame sits at the current size.
+	//
+	// Computed once per resize and read by both the view and the hit tests. That
+	// sharing is the point: the click handler used to recompute the layout by
+	// adding up the heights of the elements above the blocks, so every new
+	// element silently moved the thing a click landed on.
+	geom Geometry
+
+	// overlay is the modal in front of the frame, nil when there is none.
+	//
+	// A pointer rather than a boolean plus a field: the modal carries its own
+	// content — which line was opened — and two fields that must agree are two
+	// fields that can disagree.
+	overlay *overlay
+
+	// sort is the order the address matrix is shown in.
+	sort sortMode
+
+	// toast is the transient confirmation shown in place of the metrics, nil
+	// when there is nothing to confirm.
+	toast *toast
+	// toastSeq numbers the confirmations raised, so that an expiring one can be
+	// told from the one that replaced it.
+	toastSeq int
+
+	// selected is the index into the filtered journal of the line the details
+	// key would open. -1 means nothing is selected.
+	selected int
 
 	// Scrollback keeps the output in the terminal's scrollback instead of taking
 	// the alternate screen.
@@ -246,10 +287,128 @@ type Model struct {
 	// the exit. Neither is more correct, so the choice is explicit.
 	Scrollback bool
 
-	// help renders the key hints at the bottom of the frame.
-	help help.Model
+	// now is the clock the frame is drawn with.
+	//
+	// Held in the model rather than read from the clock inside View: a view that
+	// calls time.Now is not a function of the state, and the banner's clock is
+	// exactly the kind of thing a test would otherwise be unable to assert on.
+	// It is advanced by the refresh tick, which is why the clock is never more
+	// than one tick behind.
+	now time.Time
+
 	// keys declares what the monitor binds.
 	keys keyMap
+}
+
+// overlayKind is which modal is open.
+type overlayKind int
+
+const (
+	// overlayDetails is the journal line the reader opened.
+	overlayDetails overlayKind = iota
+	// overlayAxes is the full list of the deployment's axes.
+	overlayAxes
+	// overlayHelp is the full list of the monitor's bindings.
+	overlayHelp
+)
+
+// overlay is the open modal.
+//
+// It carries what it needs to render rather than pointing back at the model: the
+// details modal is opened on a line whose position in the filtered journal is not
+// the position it has in the log, and the index is resolved once, when the modal
+// opens, instead of being re-derived on every frame from two lists that may have
+// moved apart since.
+type overlay struct {
+	// kind is which modal this is.
+	kind overlayKind
+	// index is the opened line's position in the unfiltered journal, for
+	// overlayDetails.
+	index int
+}
+
+// sortMode is the order of the address matrix.
+type sortMode int
+
+const (
+	// sortTraffic is the default: most requests first. The address that has
+	// carried the most traffic is the one the reader is usually looking for, and
+	// the rows that did nothing collect at the bottom where they are out of the
+	// way.
+	sortTraffic sortMode = iota
+	// sortErrors puts the addresses that refuse first — the question "is
+	// anything broken" is the other one worth asking of a matrix.
+	sortErrors
+	// sortRecent puts the most recently used first, which is how a spent
+	// credential or a rotated address is spotted.
+	sortRecent
+	// sortAddress is alphabetical, for finding a known address among many.
+	sortAddress
+	// sortModeCount is how many modes there are.
+	sortModeCount
+)
+
+// String is the mode's name, as the frame shows it.
+func (s sortMode) String() string {
+	switch s {
+	case sortErrors:
+		return "errors"
+	case sortRecent:
+		return "recent"
+	case sortAddress:
+		return "address"
+	default:
+		return "traffic"
+	}
+}
+
+// next is the following mode, wrapping around.
+func (s sortMode) next() sortMode { return (s + 1) % sortModeCount }
+
+// toast is a transient confirmation.
+//
+// It is shown in place of the metrics line rather than beside them, and it is
+// what the refresh key answers with: a key that re-reads the daemon must say
+// that it did, or the reader cannot tell a refresh from a key that did nothing.
+// The timestamp is captured with the message so that the text does not change
+// while it is on screen.
+type toast struct {
+	// text is the message.
+	text string
+	// err marks a failure rather than a confirmation.
+	err bool
+	// at is the moment the message was raised.
+	at time.Time
+	// seq identifies this toast.
+	//
+	// A counter rather than the timestamp, which was what this used: the clock
+	// here is the READING's clock, and two confirmations raised inside one
+	// reading — a refresh pressed twice, an automatic read landing in between —
+	// would share a stamp, so the first one's timer would dismiss the second one
+	// almost immediately.
+	seq int
+}
+
+// toastMsg dismisses the toast whose sequence number is seq.
+//
+// The number is compared rather than the toast being dropped unconditionally: a
+// second toast raised before the first one's timer fires must not be cut short
+// by the first one's expiry.
+type toastMsg struct {
+	seq int
+}
+
+// toastFor is how long a confirmation stays on screen.
+const toastFor = 3 * time.Second
+
+// raiseToast returns the model with a toast raised and the command that will
+// clear it.
+func (m Model) raiseToast(text string, err bool) (Model, tea.Cmd) {
+	m.toastSeq++
+	t := &toast{text: text, err: err, at: m.now, seq: m.toastSeq}
+	m.toast = t
+	seq := t.seq
+	return m, tea.Tick(toastFor, func(time.Time) tea.Msg { return toastMsg{seq: seq} })
 }
 
 // logLine is a filtered log line with its position in the source list.
@@ -260,28 +419,50 @@ type logLine struct {
 	index int
 }
 
+// defaultWidth and defaultHeight are the size assumed until the terminal
+// reports its own.
+//
+// A guess is needed because the first frame may be drawn before the size
+// message arrives, and a geometry of zero is a blank screen. 80×24 is the
+// terminal that always fits.
+const (
+	defaultWidth  = 80
+	defaultHeight = 24
+)
+
 // New creates the monitor.
 func New(source DataSource) Model {
-	h := help.New()
-	// More keys than there is room for on one line: pressing ? is what shows the
-	// rest, and the bar says so rather than hiding them silently.
-	h.ShowAll = false
+	// The dark palette until the terminal says otherwise: that is what a terminal
+	// normally is, and the answer arrives in the first exchange.
+	pal := newPalette(true)
 
-	return Model{
+	m := Model{
 		Source: source,
 		Follow: true,
 		Wrap:   true,
-		// The dark palette until the terminal says otherwise: that is what a
-		// terminal normally is, and the answer arrives in the first exchange.
-		pal:  newPalette(true),
-		help: h,
-		keys: newKeyMap(),
+		pal:    pal,
+		// The spinner is themed here rather than left at its default: an
+		// unstyled spinner is the one element on the loading screen that would
+		// not belong to the palette.
+		spinner: pal.NewSpinner(),
+		// Nothing is selected until the reader selects it: the details key must
+		// not open something the reader never pointed at.
+		selected: -1,
+		keys:     newKeyMap(),
+		now:      time.Now(),
 	}
+
+	// The geometry is built here rather than left for the first resize: View may
+	// run before the size message arrives, and it reads the geometry to draw.
+	m.width, m.height = defaultWidth, defaultHeight
+	m.geom = geometry(m.width, m.height, false)
+
+	return m
 }
 
 // Init implements tea.Model.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.read(), tea.RequestBackgroundColor)
+	return tea.Batch(m.read(), m.spinner.Tick, tea.RequestBackgroundColor)
 }
 
 // read returns the command that performs a reading.
