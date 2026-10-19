@@ -26,6 +26,7 @@ package gateway
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -43,6 +44,15 @@ import (
 // and memory is not infinite.
 const (
 	maxBodyBytes = 4 << 20 // 4 MiB
+
+	// refusalExcerpt is how much of a refusal body reaches the log.
+	//
+	// The counters cannot tell refusals apart: "the free tier is for the app
+	// only", "abusive traffic from this IP" and "the address is out of quota" are
+	// all a 403. Which one it was decides what fixes it — a client identity, a
+	// different uplink, or waiting — and by the time anyone asks, the client's
+	// own output is long gone.
+	refusalExcerpt = 300
 )
 
 // Handler is the HTTP handler of the OpenAI surface.
@@ -758,6 +768,18 @@ func (h *Handler) wait(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// excerpt renders at most n bytes of a body as a single log-safe line.
+func excerpt(body []byte, n int) string {
+	if len(body) > n {
+		body = body[:n]
+	}
+	s := strings.TrimSpace(strings.Join(strings.Fields(string(body)), " "))
+	if s == "" {
+		return "(empty)"
+	}
+	return s
+}
+
 // writeRefusal passes the refusal to the client VERBATIM.
 //
 // This is where the package's central rule lives. Neither the status, nor the
@@ -782,7 +804,8 @@ func (h *Handler) writeRefusal(w http.ResponseWriter, resp *http.Response, body 
 	_, _ = w.Write(body)
 
 	h.recordRefusal(model.ID, address, h.fingerprint(key))
-	h.warn("provider %q: refusal %d, key rejected: %t", p.ID(), failure.Status, failure.KeyRejected)
+	h.warn("provider %q: refusal %d from %s, key rejected: %t: %s",
+		p.ID(), failure.Status, address, failure.KeyRejected, excerpt(body, refusalExcerpt))
 }
 
 // do performs the request through the gateway's transport.
@@ -796,7 +819,7 @@ func (h *Handler) do(req *http.Request, p provider.Provider) (*http.Response, er
 	if local, ok := p.(provider.Local); ok {
 		if rt := local.RoundTripper(); rt != nil {
 			client.Transport = rt
-			return client.Do(req)
+			return decode(client.Do(req))
 		}
 	}
 
@@ -805,7 +828,71 @@ func (h *Handler) do(req *http.Request, p provider.Provider) (*http.Response, er
 			client.Transport = rt
 		}
 	}
-	return client.Do(req)
+	return decode(client.Do(req))
+}
+
+// decode undoes the compression the provider asked for.
+//
+// The provider sets Accept-Encoding itself, as the reference client does, and a
+// Go transport decodes only what it negotiated itself: an explicit header
+// switches that off. So a compressed body arrives as bytes nobody here can
+// read, and the consequences are not cosmetic. A refusal is classified by the
+// `error.type` inside its body, so a compressed one is classified blind — the
+// key is blamed for the wrong reason, or nothing is blamed at all. The body is
+// also the thing handed to the client VERBATIM, and it was being handed octets
+// of gzip under `content-type: application/json` with the content-encoding
+// header dropped: the client shows the client binary garbage instead of the
+// message the provider wrote.
+//
+// The reference service compresses its JSON, refusals included, so this is the
+// ordinary path and not an edge case.
+func decode(resp *http.Response, err error) (*http.Response, error) {
+	if err != nil {
+		return nil, err
+	}
+
+	encoding := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
+	if encoding == "" || encoding == "identity" {
+		return resp, nil
+	}
+
+	// Only gzip is ever offered, so any other value means a header this package
+	// did not write reached the provider. Passing it through undecoded would
+	// hand the client compressed octets labelled as plain text, which is worse
+	// than a failure the caller can see.
+	if encoding != "gzip" {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("unsupported content-encoding %q", encoding)
+	}
+
+	zr, zerr := gzip.NewReader(resp.Body)
+	if zerr != nil {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("content-encoding gzip: %w", zerr)
+	}
+
+	// The compressed reader closes over the body, so the two are closed as one:
+	// closing the gzip reader alone would leave the connection to the provider
+	// open.
+	resp.Body = &decodedBody{Reader: zr, gzip: zr, body: resp.Body}
+	resp.Header.Del("Content-Encoding")
+	resp.Header.Del("Content-Length")
+	resp.ContentLength = -1
+	resp.Uncompressed = true
+	return resp, nil
+}
+
+// decodedBody is a decompressed upstream body. Closing it releases both the
+// reader that decompresses and the connection underneath.
+type decodedBody struct {
+	io.Reader
+	gzip *gzip.Reader
+	body io.ReadCloser
+}
+
+func (b *decodedBody) Close() error {
+	_ = b.gzip.Close()
+	return b.body.Close()
 }
 
 // passThroughStream passes the stream to the client.

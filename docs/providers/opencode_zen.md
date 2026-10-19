@@ -84,8 +84,14 @@ Condition 3 is decided by the **shape**, not the value: `ses_test`, a bare UUID
 and `ses_` followed by 64 zeros are all refused, while any well-formed identifier
 is admitted. A client with its own naming convention fails every call. The
 provider derives a conforming identifier when the caller's is malformed
-(`internal/provider/opencode/sessionids.go`); the gateway derives nothing, so a
-service that ignores these headers takes the client's values unchanged.
+(`internal/provider/opencode/sessionids.go`) and then keeps it for the whole
+conversation (`internal/provider/opencode/sessioncache.go`): a fresh identifier
+per request is well-formed and still wrong, because the vendor asks for one
+session per conversation and a client that never repeats one is not a client.
+The key is the conversation — system prompt plus first user message — so a
+compacted conversation may look new and lose affinity, which costs a cache hit
+and never correctness. An identifier the caller supplied is never rewritten: the
+caller knows its own conversation better than a fingerprint does.
 
 Condition 4, the `User-Agent`, is checked for "looks like an OpenCode build"
 (`packages/core/src/app.ts`). Measured with the other conditions held constant:
@@ -153,6 +159,42 @@ all; measured JA3: client `8f1d483d7c5fba63a9170d6e4dd66f93`, Go
 three admitted while the lane was open, so the fingerprint is not a condition
 today.
 
+## What the vendor asks of a client it does not ship
+
+The published client requirements are the closest thing to an admission policy
+the free lane has, and this gateway meets them where it can. From
+`services/www/src/docs/content/console/go.mdx:74-113` (live at
+`/docs/console/go`): send typical coding agent traffic; identify the client with
+its own user agent rather than a generic SDK or HTTP-library name; send a stable
+session id in `x-opencode-session` — stable across the turns, tool calls and
+retries of one conversation, and never one fixed value per installation. The same
+page adds the one sentence of policy that exists at all: "Traffic is monitored for
+abuse that degrades the experience for other users" (`:77`).
+
+| requirement | this gateway |
+| --- | --- |
+| typical coding agent traffic | the caller's traffic; the model list is polled every 15 min, not per request |
+| its own user agent | **not met on purpose** — see below |
+| a stable session id per conversation | met: derived once per conversation and reused (`sessioncache.go`) |
+
+The session id is not free-form. Since 2026-09-16 the free lane validates its
+shape for anonymous requests, and third-party proxies had to copy the format to
+stay admitted (`linux.do/t/topic/2914307`, `6Kmfi6HP/opencode2api#43`):
+`ses_` + 12 hex + 14 base62 — 30 characters — where the hex part is the *inverted*
+millisecond timestamp, so identifiers decrease over time. `identifiers.go`
+implements `packages/schema/src/identifier.ts` verbatim for this reason: a
+plausible-looking random id is not the same as a well-formed one.
+
+On the user agent the honest answer is that the requirements conflict with the
+lane. Identifying as this gateway is what the docs ask; the free lane admits only
+what looks like the shipped client, and a relay is refused by design (#56662:
+"relayed requests are expected to be rejected… this is intended"). The provider
+therefore sends the client's user agent, which is a deliberate imitation and
+should be read as one. The paid lane (`credential: account`) is where a client is
+free to identify itself: it is an ordinary OpenAI-compatible endpoint
+(`docs/console/api/inference.mdx:10-22`), and the whole free-lane admission
+question disappears there.
+
 ## Response
 
 An event stream of `data: ` lines, each carrying one chunk; the last two are the
@@ -174,13 +216,45 @@ tokens from a stream has nowhere else to read them.
 is never treated as a bad key.
 
 Upstream reports of the address-level refusal — `anomalyco/opencode` #56965,
-#56874, #56916, and the in-client variant #56324, #55435, #52917 — are open. The
-vendor's answer in #56965: the flag "comes from the free model gateway's abuse
-detection… only the team can review the flag, tell you whether it expires, or
-lift it". A refused request counts against the address, so a burst of refusals
-extends the block; one observed burst was 21 refusals in a minute and 8 in four
-seconds, produced by a client retrying a request that the shape conditions above
-would have prevented (measured 2026-10-19, `~/.local/state/free-ai-router/app.log`).
+#56874, #56916, #56762, #56853 — are closed as not planned. The vendor's answer
+in #56965: the flag "comes from the free model gateway's abuse detection… only
+the team can review the flag, tell you whether it expires, or lift it". The flag
+is not about the request, and it is not about the account either: "This isn't
+related to your account".
+
+Measured 2026-10-19, `~/.local/state/free-ai-router/app.log`: one burst was 21
+refusals in a minute and 8 in four seconds. The bursts were this gateway
+repeating a request, not the provider counting them — the repeat is the client's
+mistake, and it is why the client-side retry policy below matters.
+
+## Why an address gets flagged
+
+Everything known about the flag comes from the vendor's own triage and from the
+docs, not from the code: the admission and abuse backend is a separate service
+(`opencode-inference-<stage>`) that is neither in the vendor tree nor described
+anywhere.
+
+| fact | where it comes from |
+| --- | --- |
+| the flag is scoped to the client **address**, and to the network **prefix**: changing the IPv6 inside a flagged prefix did not help, a mobile hotspot did | #56965, #56762, #56853 |
+| shared, carrier-grade-NAT and VPN addresses get flagged "because of other people's traffic" | #56916 |
+| the message names the remedy it believes in: "If you're on a VPN or proxy, turn it off and try again" | the refusal body itself |
+| automation is a trigger: looping the CLI at extraction work earned this exact flag for a residential address, and it held for hours | #56853 |
+| no published threshold, no published duration, no self-service: the only channel is `help@anoma.ly` | #56965, and the absence of any abuse or fair-use page in the docs |
+| relaying free models through a gateway is refused **by design**, separately from the flag | #56662, #56702 |
+
+Two consequences for this gateway, and both are the reason for what it does and
+does not do:
+
+- Repeating a refused request cannot help and is not a signal the provider asks
+  for. The vendor's own client classifies 403 as `AuthenticationError` and does
+  not retry it (`packages/ai/src/provider-error.ts`), which is the behaviour this
+  gateway copies.
+- The address is a resource with a reputation, and the gateway cannot repair it
+  from inside a request. What it can do is not look like a farm: one stable
+  session per conversation, a model list polled four times an hour instead of
+  twelve, and a request payload that is the client's own.
+
 
 ## Free models
 
@@ -243,6 +317,8 @@ curl -sN http://127.0.0.1:8787/v1/chat/completions \
 | `internal/provider/opencode/contract.go` | the four conditions, the wire-shape table, the budgets |
 | `internal/provider/opencode/classify.go` | refusal classification, the quota and auth code sets |
 | `internal/provider/opencode/sessionids.go` | session identifier derivation, the shape the check admits |
+| `internal/provider/opencode/sessioncache.go` | one session per conversation, bounded |
+| `internal/provider/opencode/identifiers.go` | the identifier formula of the shipped client, reproduced |
 | `internal/gateway/collect.go` | event stream merged into one body for a non-streaming caller |
 | `internal/transport/direct.go` | egress: HTTP/1.1, ALPN, no proxy of its own |
 
@@ -256,8 +332,16 @@ Vendor tree, `~/Projects/opencode` (branch `dev`):
 | `packages/core/src/app.ts` | the `User-Agent` format |
 | `packages/core/src/session/system-prompt.ts` | the system prompt assembled from tool names |
 | `packages/ai/src/provider-error.ts` | `classifyProviderFailure`, the quota and auth code sets |
+| `packages/schema/src/identifier.ts` | the identifier formula: inverted timestamp, 12 hex + 14 base62 |
+| `packages/core/src/session/model-request.ts` | the header set of a live request, `x-opencode-client` included |
+| `services/www/src/docs/content/console/go.mdx` | the published client requirements, the abuse sentence |
+| `services/www/src/docs/content/console/api/inference.mdx` | the paid lane as a plain OpenAI-compatible endpoint |
 
 The inference service itself is not in the repository: the console reads its
 address from `SST_RESOURCE_*` bindings
 (`packages/console/resource/resource.cloudflare.ts`), so the admission rules above
-are measured, not read.
+are measured, not read. The abuse detection in particular lives behind that
+binding — no file and no commit in the vendor tree carries its message, and
+`sst.config.ts` deploys no inference worker — so its thresholds are not knowable
+from the code, only from the vendor's triage in the issues.
+

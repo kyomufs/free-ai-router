@@ -42,7 +42,15 @@ const (
 	// poll interval every client request would turn into a network request to
 	// the service, and the gateway would burn quota enumerating what it already
 	// knows.
-	listTTL = 5 * time.Minute
+	//
+	// A quarter of an hour, not five minutes: the poll leaves from the same
+	// address as the requests that matter, and a service that counts what it
+	// sees from an address cannot tell a client polling a list from a client
+	// working. Three hundred polls a day is a pattern no interactive client
+	// produces, while the cost of the longer interval is one model retirement
+	// noticed a quarter of an hour later — and a retired model answers with a
+	// refusal that names the model, which is diagnosable.
+	listTTL = 15 * time.Minute
 
 	// firstRetryDelay is how soon the poller asks again after a failure.
 	//

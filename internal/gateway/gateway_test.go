@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -226,6 +228,12 @@ func TestAnonymousRefusalDoesNotBlameTheKey(t *testing.T) {
 	if !strings.Contains(string(raw), "key rejected: false") {
 		t.Fatalf("the log claims a key was rejected in anonymous mode:\n%s", raw)
 	}
+
+	// The body is the only place the reason of a refusal exists, and every
+	// refusal is a 403 whether the cause is the client's shape or the uplink.
+	if !strings.Contains(string(raw), "Forbidden") {
+		t.Fatalf("the refusal body did not reach the log:\n%s", raw)
+	}
 }
 
 // TestEgressAddressReachesTheCounters — the per-address matrix is drawn from the
@@ -325,6 +333,63 @@ func TestRefusalPassesThroughVerbatim(t *testing.T) {
 	snap := st.Snapshot()
 	if len(snap.Days) != 1 || snap.Days[0].Refused != 1 {
 		t.Fatalf("the refusal was not counted: %+v", snap.Days)
+	}
+}
+
+// A refusal that the provider compressed must reach the client readable.
+//
+// The reference service compresses its JSON — measured, a `GET /models` with
+// `accept-encoding: gzip` answers `content-encoding: gzip` — and the provider
+// sets that header itself, which is exactly the case where a Go transport does
+// NOT decompress. Forwarding the body unchanged handed the client gzip octets
+// labelled `application/json`, so the message the provider wrote arrived as
+// binary garbage.
+func TestCompressedRefusalIsDecoded(t *testing.T) {
+	const body = `{"error":{"type":"FreeTierError","code":"free_tier","message":"from the inside only"}}`
+
+	var compressed bytes.Buffer
+	zw := gzip.NewWriter(&compressed)
+	if _, err := io.WriteString(zw, body); err != nil {
+		t.Fatalf("compress: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("compress: %v", err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.Header().Set("content-encoding", "gzip")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write(compressed.Bytes())
+	}))
+	defer upstream.Close()
+
+	h, p, _ := newTestHandler(t, upstream)
+
+	// The classifier reads the body to tell one refusal from another, so this is
+	// also where a compressed body did its other damage: classified blind, a
+	// refusal loses the reason it was refused.
+	var classified []byte
+	p.classif = func(resp *http.Response, b []byte) provider.Failure {
+		classified = b
+		return provider.Failure{Status: resp.StatusCode, Body: b, Headers: resp.Header}
+	}
+
+	rec := postChat(t, h, `{"model":"test/model","messages":[{"role":"user","content":"hello"}]}`)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	if got := rec.Body.String(); got != body {
+		t.Fatalf("body is not the decoded refusal:\n got %q\nwant %q", got, body)
+	}
+	if got := string(classified); got != body {
+		t.Fatalf("classified body is not the decoded refusal:\n got %q\nwant %q", got, body)
+	}
+
+	// The client is told the truth about what it receives: the reply is plain.
+	if got := rec.Header().Get("content-encoding"); got != "" {
+		t.Fatalf("content-encoding = %q, want it dropped once the body is decoded", got)
 	}
 }
 

@@ -61,6 +61,7 @@ func sessionIDs(r *http.Request) provider.SessionIDs {
 
 	if ids.Session == "" || !isSessionID(ids.Session) {
 		ids.Session = newSessionID()
+		ids.SessionMinted = true
 	}
 	if ids.Parent != "" && !isSessionID(ids.Parent) {
 		// A parent of the wrong shape is dropped rather than replaced: it only

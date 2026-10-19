@@ -130,6 +130,9 @@ type Provider struct {
 	clientName   string
 	// catalog is the model catalog obtained from the service.
 	catalog *modelcat.Catalog
+	// sessions keeps the session identifier of each conversation whose client
+	// sends none, so that its turns share one session on the service side.
+	sessions *sessionCache
 }
 
 // New creates a provider from configuration.
@@ -177,6 +180,7 @@ func New(cfg Config) (*Provider, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	p.sessions = newSessionCache(defaultSessionCacheSize)
 	p.catalog = modelcat.New(
 		p.baseURL, liveModelsPath, httpClient, p.applyHeaders,
 		&metaSource{http: httpClient, url: cfg.MetaURL},
@@ -234,7 +238,7 @@ func (p *Provider) Build(req provider.Request) (provider.Prepared, error) {
 		return provider.Prepared{}, fmt.Errorf("opencode: encoding body: %w", err)
 	}
 
-	headers := p.buildHeaders(req.Session)
+	headers := p.buildHeaders(p.stableSession(req))
 
 	return provider.Prepared{
 		URL:     p.baseURL + "/chat/completions",

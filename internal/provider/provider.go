@@ -188,6 +188,11 @@ type SessionIDs struct {
 	Message string
 	// Parent is the identifier of the parent session, empty for a flat one.
 	Parent string
+	// SessionMinted reports that Session was minted locally rather than taken
+	// from the client: the client sent nothing, or sent a shape the service
+	// refuses. A provider whose service tracks sessions may want to make such
+	// an identifier stable, and this flag is how it tells the two apart.
+	SessionMinted bool
 }
 
 // Prepared is the result of building a request.
