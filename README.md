@@ -678,7 +678,7 @@ model capabilities from this catalog.
 | `--listen` | the address to listen on |
 | `--token` | the token for server mode |
 | `--transport` | `direct` |
-| `--upstream` | default address for providers |
+| `--upstream` | address for providers that do not name their own (empty: none) |
 | `--family` | `auto` \| `v4` \| `v6` |
 | `--credential` | `anonymous` \| `account` |
 | `--rotate` | `on` \| `off` |

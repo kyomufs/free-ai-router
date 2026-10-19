@@ -70,8 +70,10 @@ const DefaultUserAgent = "opencode/1.19.2 ai-sdk/provider-utils/4.0.23 runtime/b
 //     when it carries anything else — `ses_test`, a bare UUID, `ses_` followed
 //     by 64 zeros. This is the condition that is easy to lose without noticing:
 //     the value is copied from the client, so a client with its own naming
-//     convention fails every call. The gateway therefore replaces a value of the
-//     wrong shape with a derived one (internal/gateway/parse.go).
+//     convention fails every call. The provider therefore replaces a value of
+//     the wrong shape with a derived one (sessionids.go). The gateway derives
+//     nothing of its own: a service that ignores these headers takes the
+//     client's values unchanged.
 //
 // Condition 1 is the one this proxy used to lose: a client that did not ask for
 // a stream was passed through with "stream": false and refused, which is exactly

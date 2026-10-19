@@ -39,8 +39,6 @@ type Builder func(id string, cfg config.ProviderConfig, defaults Defaults) (prov
 // They are passed separately so that a provider need not re-read the whole
 // configuration for the sake of one line.
 type Defaults struct {
-	// Upstream — the default address for providers that did not name their own.
-	Upstream string
 	// HTTP — the client for catalog requests.
 	//
 	// One for all providers: catalogs are requested rarely, and giving each
@@ -98,7 +96,6 @@ func Build(cfg *config.Config) (*provider.Registry, error) {
 // obscure the calls that do have one.
 func BuildWithLog(cfg *config.Config, log func(format string, args ...any)) (*provider.Registry, error) {
 	defaults := Defaults{
-		Upstream:             cfg.Upstream.Val,
 		Log:                  log,
 		FirstEventTimeout:    cfg.FirstEventTimeout.Val,
 		IdleTimeout:          cfg.IdleTimeout.Val,

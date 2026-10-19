@@ -297,7 +297,9 @@ const (
 	DefaultMode      = ModeLocal
 	DefaultListen    = "127.0.0.1:8787"
 	DefaultTransport = "direct"
-	DefaultUpstream  = "https://opencode.ai"
+	// DefaultUpstream is empty: there is no single service the daemon forwards
+	// to, so each provider names its own address and the axis only reports it.
+	DefaultUpstream = ""
 
 	DefaultFirstEventTimeout    = 30 * time.Second
 	DefaultIdleTimeout          = 120 * time.Second

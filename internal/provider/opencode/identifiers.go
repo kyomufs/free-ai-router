@@ -1,4 +1,4 @@
-package wire
+package opencode
 
 import (
 	"crypto/rand"
@@ -35,6 +35,12 @@ import (
 //
 // SessionID additionally gets the "ses_" prefix (session-id.ts), a message id
 // gets "msg_" (session-message.ts).
+//
+// It lives here, beside the check that needs it, and not in a shared package:
+// the identifier formula is one service's convention, and a provider whose
+// check does not read these headers takes the client's values unchanged
+// (sessionids.go). A copy in the core would make one service's naming the
+// convention of all of them.
 const (
 	// idTotalLength is the total length of the part following the prefix:
 	// 12 hex of time plus 14 base62.
@@ -54,11 +60,11 @@ const (
 	idTimeMask = 0xFFFFFFFFFFFF
 )
 
-// SessionIDPrefix is the prefix every session id carries.
-const SessionIDPrefix = "ses_"
+// sessionIDPrefix is the prefix every session id carries.
+const sessionIDPrefix = "ses_"
 
-// MessageIDPrefix is the prefix every message id carries.
-const MessageIDPrefix = "msg_"
+// messageIDPrefix is the prefix every message id carries.
+const messageIDPrefix = "msg_"
 
 // canonicalSessionPattern recognises an already canonical session id, so as not
 // to rebuild it. It matches session-id.ts in shape: "ses_" + 12 hex + 14 base62.
@@ -73,37 +79,37 @@ var idState struct {
 	counter   int64
 }
 
-// NewSessionID returns a new session id built by the client's formula.
-func NewSessionID() string { return NewSessionIDAt(time.Now().UnixMilli()) }
+// newSessionID returns a new session id built by the client's formula.
+func newSessionID() string { return newSessionIDAt(time.Now().UnixMilli()) }
 
-// NewSessionIDAt is NewSessionID with an injected clock, so tests can pin the
+// newSessionIDAt is newSessionID with an injected clock, so tests can pin the
 // arithmetic without freezing time process-wide.
-func NewSessionIDAt(nowMillis int64) string {
-	return SessionIDPrefix + newIDAt(nowMillis)
+func newSessionIDAt(nowMillis int64) string {
+	return sessionIDPrefix + newIDAt(nowMillis)
 }
 
-// NewMessageID returns a new message id (the "msg_" prefix).
-func NewMessageID() string { return NewMessageIDAt(time.Now().UnixMilli()) }
+// newMessageID returns a new message id (the "msg_" prefix).
+func newMessageID() string { return newMessageIDAt(time.Now().UnixMilli()) }
 
-// NewMessageIDAt is NewMessageID with an injected clock.
-func NewMessageIDAt(nowMillis int64) string {
-	return MessageIDPrefix + newIDAt(nowMillis)
+// newMessageIDAt is newMessageID with an injected clock.
+func newMessageIDAt(nowMillis int64) string {
+	return messageIDPrefix + newIDAt(nowMillis)
 }
 
-// CanonicalSessionID accepts an already canonical id unchanged, and otherwise
+// sessionID accepts an already canonical id unchanged, and otherwise
 // mints a new one.
 //
 // A separate function is needed because the client may send a ready-made id: it
 // must not be rebuilt, it is part of the session history.
-func CanonicalSessionID(id string) string {
+func sessionID(id string) string {
 	if canonicalSessionPattern.MatchString(id) {
 		return id
 	}
-	return NewSessionID()
+	return newSessionID()
 }
 
-// IsCanonicalSessionID reports whether id already has the admitted form.
-func IsCanonicalSessionID(id string) bool { return canonicalSessionPattern.MatchString(id) }
+// isSessionID reports whether id already has the admitted form.
+func isSessionID(id string) bool { return canonicalSessionPattern.MatchString(id) }
 
 // newIDAt is the deterministic core of the formula, returning the part without
 // the prefix.
@@ -148,7 +154,7 @@ func randomBase62(width int) string {
 		// crypto/rand does not refuse in practice; we will not replace the
 		// panic with a math/rand-like fallback — that would hide a serious
 		// environment problem.
-		panic(fmt.Sprintf("wire: crypto/rand unavailable: %v", err))
+		panic(fmt.Sprintf("opencode: crypto/rand unavailable: %v", err))
 	}
 	out := make([]byte, width)
 	for i, b := range buf {
@@ -157,7 +163,7 @@ func randomBase62(width int) string {
 	return string(out)
 }
 
-// DecodeSessionTimestamp extracts the moment in time encoded in a session id.
+// decodeSessionTimestamp extracts the moment in time encoded in a session id.
 //
 // A NOTE ON PRECISION. The six-byte field stores 48 bits, while
 // `timestamp * 4096` takes up 53 bits, so the top five bits of the value are
@@ -169,24 +175,24 @@ func randomBase62(width int) string {
 //
 // The function is therefore good for diagnosing the shape and for tests, but
 // not as an assertion "the request time is in here". The canonicity of an id is
-// determined by its shape (§IsCanonicalSessionID), not by whether the time
+// determined by its shape (§isSessionID), not by whether the time
 // inside reads back.
-func DecodeSessionTimestamp(id string) (time.Time, error) {
-	at, _, err := DecodeSessionTimestampCheck(id)
+func decodeSessionTimestamp(id string) (time.Time, error) {
+	at, _, err := decodeSessionTimestampCheck(id)
 	return at, err
 }
 
-// DecodeSessionTimestampCheck additionally returns the counter from the low
+// decodeSessionTimestampCheck additionally returns the counter from the low
 // bits — it is needed by the tests that check the counter reset when the
 // millisecond changes.
-func DecodeSessionTimestampCheck(id string) (time.Time, int64, error) {
+func decodeSessionTimestampCheck(id string) (time.Time, int64, error) {
 	if !canonicalSessionPattern.MatchString(id) {
-		return time.Time{}, 0, fmt.Errorf("wire: %q is not a canonical session id", id)
+		return time.Time{}, 0, fmt.Errorf("opencode: %q is not a canonical session id", id)
 	}
-	timePart := id[len(SessionIDPrefix) : len(SessionIDPrefix)+idTimeLength]
+	timePart := id[len(sessionIDPrefix) : len(sessionIDPrefix)+idTimeLength]
 	raw, err := hex.DecodeString(timePart)
 	if err != nil || len(raw) != 6 {
-		return time.Time{}, 0, fmt.Errorf("wire: session id %q has an undecodable time part", id)
+		return time.Time{}, 0, fmt.Errorf("opencode: session id %q has an undecodable time part", id)
 	}
 
 	var value uint64
@@ -212,7 +218,7 @@ func base62Value(c byte) (int, bool) {
 
 // timeFieldOf reproduces exactly what identifier.ts does with the time field —
 // including the loss of the top bits. It exists so that the reference value for
-// the tests is produced by the same code the gateway uses, and a divergence
+// the tests is produced by the same code the provider uses, and a divergence
 // from the client implementation is visible at once.
 func timeFieldOf(millis, counter uint64) string {
 	value := (^(millis<<idCounterBits + counter)) & idTimeMask

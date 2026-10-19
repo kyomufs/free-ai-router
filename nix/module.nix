@@ -280,8 +280,8 @@ in
 
     upstream = mkOption {
       type = types.str;
-      default = "https://opencode.ai";
-      description = "The default address for providers that do not name their own.";
+      default = "";
+      description = "The default address for providers that do not name their own. Empty by default: each provider names its own address.";
     };
 
     firstEventTimeout = mkOption {

@@ -1,4 +1,4 @@
-package wire
+package opencode
 
 import (
 	"strings"
@@ -10,12 +10,12 @@ import (
 // shape is derived from identifier.ts.
 func TestSessionIDShape(t *testing.T) {
 	for i := 0; i < 50; i++ {
-		id := NewSessionID()
+		id := newSessionID()
 
-		if !strings.HasPrefix(id, SessionIDPrefix) {
-			t.Fatalf("id %q lacks the %q prefix", id, SessionIDPrefix)
+		if !strings.HasPrefix(id, sessionIDPrefix) {
+			t.Fatalf("id %q lacks the %q prefix", id, sessionIDPrefix)
 		}
-		body := id[len(SessionIDPrefix):]
+		body := id[len(sessionIDPrefix):]
 		if len(body) != idTotalLength {
 			t.Fatalf("id %q has body length %d, want %d", id, len(body), idTotalLength)
 		}
@@ -27,18 +27,18 @@ func TestSessionIDShape(t *testing.T) {
 				t.Fatalf("id %q: tail char %q is outside the base62 alphabet", id, c)
 			}
 		}
-		if !IsCanonicalSessionID(id) {
+		if !isSessionID(id) {
 			t.Fatalf("id %q is not recognised as canonical", id)
 		}
 	}
 }
 
 func TestMessageIDShape(t *testing.T) {
-	id := NewMessageID()
-	if !strings.HasPrefix(id, MessageIDPrefix) {
-		t.Fatalf("id %q lacks the %q prefix", id, MessageIDPrefix)
+	id := newMessageID()
+	if !strings.HasPrefix(id, messageIDPrefix) {
+		t.Fatalf("id %q lacks the %q prefix", id, messageIDPrefix)
 	}
-	if body := id[len(MessageIDPrefix):]; len(body) != idTotalLength {
+	if body := id[len(messageIDPrefix):]; len(body) != idTotalLength {
 		t.Fatalf("id %q has body length %d, want %d", id, len(body), idTotalLength)
 	}
 }
@@ -51,8 +51,8 @@ func TestTimestampRoundTripWithinField(t *testing.T) {
 
 	for _, ts := range []uint64{0, 1, 1000, 1 << 20, 1 << 30, hi - 1, hi} {
 		for _, counter := range []uint64{1, 5, 4095} {
-			id := SessionIDPrefix + timeFieldOf(ts, counter) + strings.Repeat("0", 14)
-			at, err := DecodeSessionTimestamp(id)
+			id := sessionIDPrefix + timeFieldOf(ts, counter) + strings.Repeat("0", 14)
+			at, err := decodeSessionTimestamp(id)
 			if err != nil {
 				t.Fatalf("ts=%d: %v", ts, err)
 			}
@@ -67,7 +67,7 @@ func TestTimestampRoundTripWithinField(t *testing.T) {
 // real-time timestamp (41 bits) does not fit in the six-byte field, the top bits
 // are discarded on write, and invertibility is lost.
 //
-// This is not a defect of the gateway but a property of the client's format.
+// This is not a defect of this code but a property of the client's format.
 // The test is written so that the boundary is not taken for a bug and the
 // formula is not "fixed" in the convenient direction: the shape must match the
 // client's.
@@ -75,8 +75,8 @@ func TestTimestampAboveFieldIsTruncated(t *testing.T) {
 	const hi = uint64(idTimeMask >> idCounterBits)
 
 	// Checking exactly at the boundary: hi+1 no longer fits.
-	id := SessionIDPrefix + timeFieldOf(hi+1, 1) + strings.Repeat("0", 14)
-	at, err := DecodeSessionTimestamp(id)
+	id := sessionIDPrefix + timeFieldOf(hi+1, 1) + strings.Repeat("0", 14)
+	at, err := decodeSessionTimestamp(id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,11 +94,11 @@ func TestTimestampAboveFieldIsTruncated(t *testing.T) {
 func TestLiveTimestampIsRepresentable(t *testing.T) {
 	const live = 1_792_000_000_000
 
-	id := NewSessionIDAt(live)
-	if !IsCanonicalSessionID(id) {
+	id := newSessionIDAt(live)
+	if !isSessionID(id) {
 		t.Fatalf("a live timestamp produced non-canonical id %q", id)
 	}
-	if _, err := DecodeSessionTimestamp(id); err != nil {
+	if _, err := decodeSessionTimestamp(id); err != nil {
 		t.Fatalf("live id %q does not decode: %v", id, err)
 	}
 }
@@ -119,9 +119,9 @@ func TestIDsDescend(t *testing.T) {
 
 	// And the same on real identifiers.
 	const base int64 = 1_700_000_000_000
-	first := NewSessionIDAt(base)
-	second := NewSessionIDAt(base + 1)
-	field := func(id string) string { return id[len(SessionIDPrefix) : len(SessionIDPrefix)+idTimeLength] }
+	first := newSessionIDAt(base)
+	second := newSessionIDAt(base + 1)
+	field := func(id string) string { return id[len(sessionIDPrefix) : len(sessionIDPrefix)+idTimeLength] }
 	if field(second) >= field(first) {
 		t.Fatalf("later id must sort lower: first=%s second=%s", field(first), field(second))
 	}
@@ -133,18 +133,18 @@ func TestIDsDescend(t *testing.T) {
 func TestCounterResetsPerMillisecond(t *testing.T) {
 	const milli int64 = 1_750_000_000_000
 
-	_, c1, err := DecodeSessionTimestampCheck(NewSessionIDAt(milli))
+	_, c1, err := decodeSessionTimestampCheck(newSessionIDAt(milli))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, c2, err := DecodeSessionTimestampCheck(NewSessionIDAt(milli))
+	_, c2, err := decodeSessionTimestampCheck(newSessionIDAt(milli))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c2 != c1+1 {
 		t.Fatalf("same-millisecond counter: got %d after %d, want an increment", c2, c1)
 	}
-	_, c3, err := DecodeSessionTimestampCheck(NewSessionIDAt(milli + 1))
+	_, c3, err := decodeSessionTimestampCheck(newSessionIDAt(milli + 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,8 +156,8 @@ func TestCounterResetsPerMillisecond(t *testing.T) {
 // TestCanonicalSessionIDKeepsValidID: a ready-made canonical id is not rebuilt.
 // It is part of the session history, and substituting it would break that.
 func TestCanonicalSessionIDKeepsValidID(t *testing.T) {
-	original := NewSessionID()
-	if got := CanonicalSessionID(original); got != original {
+	original := newSessionID()
+	if got := sessionID(original); got != original {
 		t.Fatalf("a canonical id must pass through: got %q, want %q", got, original)
 	}
 }
@@ -175,8 +175,8 @@ func TestCanonicalSessionIDReplacesInvalid(t *testing.T) {
 		"msg_" + strings.Repeat("a", 26),
 	}
 	for _, in := range cases {
-		got := CanonicalSessionID(in)
-		if !IsCanonicalSessionID(got) {
+		got := sessionID(in)
+		if !isSessionID(got) {
 			t.Fatalf("input %q produced non-canonical %q", in, got)
 		}
 		if got == in {
@@ -188,7 +188,7 @@ func TestCanonicalSessionIDReplacesInvalid(t *testing.T) {
 // TestDecodeRejectsForeignID: a foreign string is not decoded silently.
 func TestDecodeRejectsForeignID(t *testing.T) {
 	for _, in := range []string{"", "ses_x", "msg_" + strings.Repeat("a", 26), "random"} {
-		if _, err := DecodeSessionTimestamp(in); err == nil {
+		if _, err := decodeSessionTimestamp(in); err == nil {
 			t.Fatalf("input %q decoded without error", in)
 		}
 	}
@@ -199,7 +199,7 @@ func TestDecodeRejectsForeignID(t *testing.T) {
 func TestCounterBitsBound(t *testing.T) {
 	const milli int64 = 1_760_000_000_000
 	for i := 0; i < (1<<idCounterBits)+5; i++ {
-		_, counter, err := DecodeSessionTimestampCheck(NewSessionIDAt(milli))
+		_, counter, err := decodeSessionTimestampCheck(newSessionIDAt(milli))
 		if err != nil {
 			t.Fatal(err)
 		}

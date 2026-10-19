@@ -83,8 +83,9 @@ still sent, because a deeper check is the obvious next move for the lane.
 Condition 3 is decided by the **shape**, not the value: `ses_test`, a bare UUID
 and `ses_` followed by 64 zeros are all refused, while any well-formed identifier
 is admitted. A client with its own naming convention fails every call. The
-gateway derives a conforming identifier when the caller's is malformed
-(`internal/gateway/parse.go`, `sessionIDs`).
+provider derives a conforming identifier when the caller's is malformed
+(`internal/provider/opencode/sessionids.go`); the gateway derives nothing, so a
+service that ignores these headers takes the client's values unchanged.
 
 Condition 4, the `User-Agent`, is checked for "looks like an OpenCode build"
 (`packages/core/src/app.ts`). Measured with the other conditions held constant:
@@ -241,7 +242,7 @@ curl -sN http://127.0.0.1:8787/v1/chat/completions \
 | `internal/provider/opencode/provider.go` | request assembly, headers, forced stream, path |
 | `internal/provider/opencode/contract.go` | the four conditions, the wire-shape table, the budgets |
 | `internal/provider/opencode/classify.go` | refusal classification, the quota and auth code sets |
-| `internal/gateway/parse.go` | session identifier derivation |
+| `internal/provider/opencode/sessionids.go` | session identifier derivation, the shape the check admits |
 | `internal/gateway/collect.go` | event stream merged into one body for a non-streaming caller |
 | `internal/transport/direct.go` | egress: HTTP/1.1, ALPN, no proxy of its own |
 

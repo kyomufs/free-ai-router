@@ -25,9 +25,9 @@
 // the copies.
 //
 // The converse holds too: whatever is specific must stay with the provider. The
-// set of mandatory tools, the shape of the system prompt, the form of the
-// session headers are properties of a particular check, not of the general
-// nature of things.
+// set of mandatory tools, the shape of the system prompt, the shape of the
+// identifiers and the form of the session headers are properties of a
+// particular check, not of the general nature of things.
 package provider
 
 import (
@@ -309,6 +309,21 @@ type Polling interface {
 	Start(ctx context.Context)
 	// Stop ends the refresher.
 	Stop() error
+}
+
+// IdentifierSource is what a provider implements when the service it talks to
+// validates the shape of the identifiers a client sends in its headers.
+//
+// Optional, on the same reasoning as Local and Polling: a service that ignores
+// those headers must not be made to answer for them. The gateway asks this
+// interface and hands an empty set to a provider that does not implement it —
+// it derives nothing on its own, because a value minted centrally would carry
+// one service's naming convention into every other one, and the next service
+// with a different convention could not be expressed at all.
+type IdentifierSource interface {
+	// SessionIDs derives the identifiers for one request from the client's own
+	// headers, replacing the values the service would refuse.
+	SessionIDs(r *http.Request) SessionIDs
 }
 
 // Registry is the set of available providers, assembled from configuration.

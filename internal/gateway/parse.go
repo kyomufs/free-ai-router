@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"free-ai-router/internal/provider"
-	"free-ai-router/internal/wire"
 )
 
 // Parsing the client request into the neutral form.
@@ -247,92 +246,17 @@ func systemFrom(body map[string]any) string {
 	return strings.Join(parts, "\n")
 }
 
-// sessionIDs derives the session identifiers by the contract.
+// identifiers asks the provider for the session identifiers of this request.
 //
-// The client may send its own identifiers in the headers; if it did, they are
-// respected. If not, they are derived by the formula, because the providers
-// that have a check expect an identifier of the right shape.
-func (h *Handler) sessionIDs(r *http.Request, body map[string]any) provider.SessionIDs {
-	ids := provider.SessionIDs{
-		Session:  firstNonEmpty(r.Header.Get("x-opencode-session-id"), r.Header.Get("x-session-id")),
-		Affinity: firstNonEmpty(r.Header.Get("x-opencode-session"), r.Header.Get("x-session-affinity")),
-		Project:  r.Header.Get("x-opencode-project"),
-		Message:  r.Header.Get("x-opencode-request"),
-		Parent:   firstNonEmpty(r.Header.Get("x-opencode-parent-session-id"), r.Header.Get("x-parent-session-id")),
+// The rules behind them belong to the service's admission check — which header
+// names it reads, which shapes it refuses, whether it reads them at all — so the
+// derivation is the provider's, reached through provider.IdentifierSource. A
+// provider that does not implement it gets an empty set: nothing is invented
+// here, because a value minted by the gateway would encode one service's naming
+// convention for everyone.
+func identifiers(p provider.Provider, r *http.Request) provider.SessionIDs {
+	if src, ok := p.(provider.IdentifierSource); ok {
+		return src.SessionIDs(r)
 	}
-
-	if ids.Session == "" || !wire.IsCanonicalSessionID(ids.Session) {
-		// The free lane refuses the whole call when a session header carries an
-		// id of the wrong shape: measured on 2026-10-19, a request that differs
-		// only in `x-opencode-session: ses_test` gets FreeTierError, while the
-		// same request with `ses_` + 12 hex + 14 base62 is answered. The client
-		// always mints ids of that shape, so a value that does not match came
-		// from someone else's naming convention, and forwarding it would fail a
-		// call over a header the model never sees.
-		ids.Session = wire.NewSessionID()
-	}
-	if ids.Parent != "" && !wire.IsCanonicalSessionID(ids.Parent) {
-		// A parent of the wrong shape is dropped rather than replaced: it only
-		// feeds the affinity below, and deriving a parent would invent a
-		// hierarchy the client never described.
-		ids.Parent = ""
-	}
-	if ids.Affinity == "" || !wire.IsCanonicalSessionID(ids.Affinity) {
-		// Without a parent, affinity equals the session identifier — that is
-		// what the client does too.
-		ids.Affinity = firstNonEmpty(ids.Parent, ids.Session)
-	}
-	if ids.Message == "" || isRejectedRequestID(ids.Message) {
-		// The header wants the identifier of the MESSAGE being answered and
-		// refuses a per-request one. A client that sent a `req_` value was
-		// following the naming convention of a different identifier, so the
-		// value is replaced rather than forwarded: the prefix alone fails the
-		// whole call, and failing it over a header nobody reads is worse than
-		// deriving a proper one.
-		ids.Message = wire.NewMessageID()
-	}
-	if ids.Project == "" || isRejectedProjectID(ids.Project) {
-		// Outside a git project the client sends the literal "global", and a
-		// `prj_`-prefixed value is refused regardless of what follows it. The
-		// project identifier belongs in the request body or path, never here.
-		ids.Project = "global"
-	}
-	return ids
-}
-
-// Prefixes the upstream refuses to see in these two headers.
-//
-// MEASURED, one header at a time against the live service:
-//
-//	x-opencode-project: prj_f698f87ea99d390458196363 -> refused
-//	x-opencode-project: global                       -> admitted
-//	x-opencode-project: <absent>                     -> admitted
-//	x-opencode-request: req_2cb728ee0be94ed0c7b20920b21fde87 -> refused
-//	x-opencode-request: msg_13b2d53f2001ia66lVkDLegkmV       -> admitted
-//	x-opencode-request: <absent>                             -> admitted
-//
-// What is refused is the PREFIX, not the value: any `prj_`-prefixed string is
-// rejected regardless of what follows it. The check is therefore on the marker
-// rather than on the contents.
-const (
-	rejectedProjectPrefix = "prj_"
-	rejectedRequestPrefix = "req_"
-)
-
-// isRejectedProjectID reports whether a project header value carries the
-// refused marker.
-func isRejectedProjectID(v string) bool { return strings.HasPrefix(v, rejectedProjectPrefix) }
-
-// isRejectedRequestID reports whether a request header value carries the
-// refused marker.
-func isRejectedRequestID(v string) bool { return strings.HasPrefix(v, rejectedRequestPrefix) }
-
-// firstNonEmpty returns the first non-empty argument.
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
+	return provider.SessionIDs{}
 }

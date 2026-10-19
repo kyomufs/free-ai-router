@@ -462,7 +462,7 @@ func (h *Handler) buildRequest(r *http.Request, body map[string]any, p provider.
 		return provider.Request{}, err
 	}
 
-	ids := h.sessionIDs(r, body)
+	ids := identifiers(p, r)
 
 	req := provider.Request{
 		Model:    model,

@@ -188,7 +188,7 @@ func Catalog(r Registries) []Axis {
 			Env:          config.EnvUpstream,
 			ConfigKey:    "upstream",
 			InConfigFile: true,
-			Description:  "the service the daemon forwards to",
+			Description:  "the service the daemon forwards to; empty when each provider names its own",
 		},
 		{
 			Name:         "family",
