@@ -18,29 +18,31 @@ const jsonSchemaDialect = "https://json-schema.org/draft/2020-12/schema"
 // `opencode/unknown/unknown/opencode` when the parts are unset — which is what
 // this constant used to say.
 //
-// That default is NOT what the free lane admits. The lane applies a
-// client-attestation check to the User-Agent, and the check is a substring
-// conjunction: the string must carry an `opencode` token AND a `bun` token.
-// Measured against the live service, one header changed at a time:
+// The lane checks the User-Agent, but only for "does this look like an OpenCode
+// build", not for a version. Measured on 2026-10-19, canonical session ids and
+// the mandatory tools held constant, one header changed at a time:
 //
 //	opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14 -> admitted
-//	opencode/1.18.35 bun                                            -> admitted
-//	opencode/1.18.34                                                -> refused
-//	opencode/1.18.35                                                -> refused
-//	opencode/unknown/unknown/opencode                               -> refused
-//	bun                                                             -> refused
-//	node bun                                                        -> refused
+//	opencode/1.19.2                                              -> admitted
+//	opencode/stable/2.0.32/opencode                              -> admitted
+//	opencode/unknown/unknown/opencode                            -> refused
+//	bun                                                          -> refused
+//	node bun                                                     -> refused
+//	(no User-Agent header)                                       -> refused
 //
-// Version, order and the rest of the string are ignored; only the two tokens
-// matter. The previous value carried `opencode` and no `bun`, so it failed the
-// second half of the conjunction on every request.
+// Version digits and the suffix are ignored: the 1.x form and the 2.x form are
+// both admitted, and so is a bare `opencode/<version>`. A refused shape is one
+// that does not resolve to an OpenCode release at all. The value below is the
+// User-Agent of the build installed on this host, so the header names a build
+// that exists.
 //
 // WARNING about the method, not the result: never isolate a wire-shape
 // condition on an egress address whose quota is spent. 403s are then produced
 // by the exhausted quota rather than by the request, and every reading in the
 // batch is noise. Fresh sessions per batch are what make the table above
-// meaningful.
-const DefaultUserAgent = "opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+// meaningful — and an earlier batch on this same lane, whose session headers
+// happened to be malformed, produced a UA table that no longer reproduces.
+const DefaultUserAgent = "opencode/1.19.2 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 
 // The free-lane admission conditions, measured one request at a time.
 //
@@ -54,23 +56,43 @@ const DefaultUserAgent = "opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/
 //     it on its own — with the canonical tools, with the canonical prompt, on
 //     HTTP/1.1 and on HTTP/2 alike.
 //
-//  2. The request carries EITHER the mandatory tool set (shell and read, name,
-//     description and schema compared in full) OR the recognised system prompt,
-//     verbatim. The two are alternatives, not requirements: canonical tools with
-//     an arbitrary or absent system message are admitted, and the canonical
-//     prompt with no tools is admitted. Anything less than one of them in full
-//     is refused — 26 characters of it, the real prompt minus its examples, and
-//     a foreign prompt all fail.
+//  2. The request carries the mandatory tool set: a `read` tool AND a `shell`
+//     or `bash` tool, by name. Only the names are decisive — the same request
+//     with the canonical definitions replaced by `{"name":"shell","description":
+//     "run shell",...}` is admitted too, which was measured on 2026-10-19. The
+//     names are still sent with the client's own descriptions and schemas
+//     because a deeper check is the obvious next move for the lane, and the cost
+//     of the text is a few thousand tokens of a prompt that is cached.
+//
+//  3. The request carries a session header whose value is an identifier of the
+//     client's shape: `^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`. A request that is
+//     otherwise admitted is refused when the header is missing, and refused
+//     when it carries anything else — `ses_test`, a bare UUID, `ses_` followed
+//     by 64 zeros. This is the condition that is easy to lose without noticing:
+//     the value is copied from the client, so a client with its own naming
+//     convention fails every call. The gateway therefore replaces a value of the
+//     wrong shape with a derived one (internal/gateway/parse.go).
 //
 // Condition 1 is the one this proxy used to lose: a client that did not ask for
 // a stream was passed through with "stream": false and refused, which is exactly
 // the non-conforming traffic that gets an egress address flagged. Condition 2 is
-// why the mandatory tools are injected unconditionally: they are the cheapest
-// half of the disjunction, and they are needed for the request to work at all.
+// why the mandatory tools are injected unconditionally: they are needed for the
+// request to work at all.
 //
-// The User-Agent is NOT part of these two conditions, and the version digits are
-// not part of the substring test either: opencode/1.19.2 with the same suffix
-// was admitted everywhere opencode/1.18.35 was, in the same batch.
+// A refusal costs more than the answer: the lane counts refused requests against
+// the egress address, and a burst of them turns into the address-level
+// "we've detected abusive traffic from this IP address" refusal, which no
+// request shape can undo. That is why every condition here is enforced on our
+// side rather than left to the caller.
+//
+// The system prompt is not a condition of its own: with the tools present and
+// the session headers canonical, a request whose only message is the user's is
+// admitted. Whether the recognised prompt alone, with no tools, is still enough
+// was not re-measured after the session-header condition surfaced, and nothing
+// here relies on it.
+//
+// The User-Agent is not one of these conditions either — it is checked, but only
+// for "looks like an OpenCode build"; see DefaultUserAgent.
 
 // Stream budgets. The numbers are the contract's own: the client holds its own
 // timeouts, and a budget shorter than the client's would make the gateway break

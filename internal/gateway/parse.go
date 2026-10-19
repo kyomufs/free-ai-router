@@ -261,10 +261,23 @@ func (h *Handler) sessionIDs(r *http.Request, body map[string]any) provider.Sess
 		Parent:   firstNonEmpty(r.Header.Get("x-opencode-parent-session-id"), r.Header.Get("x-parent-session-id")),
 	}
 
-	if ids.Session == "" {
+	if ids.Session == "" || !wire.IsCanonicalSessionID(ids.Session) {
+		// The free lane refuses the whole call when a session header carries an
+		// id of the wrong shape: measured on 2026-10-19, a request that differs
+		// only in `x-opencode-session: ses_test` gets FreeTierError, while the
+		// same request with `ses_` + 12 hex + 14 base62 is answered. The client
+		// always mints ids of that shape, so a value that does not match came
+		// from someone else's naming convention, and forwarding it would fail a
+		// call over a header the model never sees.
 		ids.Session = wire.NewSessionID()
 	}
-	if ids.Affinity == "" {
+	if ids.Parent != "" && !wire.IsCanonicalSessionID(ids.Parent) {
+		// A parent of the wrong shape is dropped rather than replaced: it only
+		// feeds the affinity below, and deriving a parent would invent a
+		// hierarchy the client never described.
+		ids.Parent = ""
+	}
+	if ids.Affinity == "" || !wire.IsCanonicalSessionID(ids.Affinity) {
 		// Without a parent, affinity equals the session identifier — that is
 		// what the client does too.
 		ids.Affinity = firstNonEmpty(ids.Parent, ids.Session)

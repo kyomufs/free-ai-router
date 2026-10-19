@@ -13,6 +13,7 @@ import (
 
 	"free-ai-router/internal/provider"
 	"free-ai-router/internal/state"
+	"free-ai-router/internal/wire"
 )
 
 // stubProvider is a provider stand-in.
@@ -453,6 +454,57 @@ func TestAdmissibleHeaderValuesSurvive(t *testing.T) {
 	}
 	if ids.Message != "msg_13b2d53f2001ia66lVkDLegkmV" {
 		t.Errorf("Message = %q, want the caller value preserved", ids.Message)
+	}
+}
+
+// TestForeignSessionIdsAreReplaced — session identifiers of someone else's shape
+// do not reach the upstream.
+//
+// The admission check reads the session headers too: two requests that differ
+// only in the session id were measured on 2026-10-19, and the one carrying
+// `ses_test` got a FreeTierError while the one carrying `ses_` + 12 hex + 14
+// base62 was answered. A client with its own naming convention (a bare UUID, a
+// prefixed counter) therefore fails every call for a reason nobody can see, so
+// the value is replaced by an id of the client's own shape.
+func TestForeignSessionIdsAreReplaced(t *testing.T) {
+	h := &Handler{}
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	r.Header.Set("x-session-id", "3f2a1c9e-0b44-4d7a-9d21-8b1f2c3d4e5f")
+	r.Header.Set("x-opencode-session", "ses_test")
+	r.Header.Set("x-parent-session-id", "conversation-42")
+
+	ids := h.sessionIDs(r, nil)
+
+	if !wire.IsCanonicalSessionID(ids.Session) {
+		t.Errorf("Session = %q, want an id of the client's shape", ids.Session)
+	}
+	if !wire.IsCanonicalSessionID(ids.Affinity) {
+		t.Errorf("Affinity = %q, want an id of the client's shape", ids.Affinity)
+	}
+	if ids.Parent != "" {
+		t.Errorf("Parent = %q, want it dropped instead of forwarded", ids.Parent)
+	}
+	if ids.Affinity != ids.Session {
+		t.Errorf("Affinity = %q, want the session %q when there is no parent", ids.Affinity, ids.Session)
+	}
+}
+
+// TestClientSessionIdsSurvive — an id the client minted itself is the session
+// for the upstream, so it travels unchanged; that is also what keeps prefix
+// caching on the same conversation across requests.
+func TestClientSessionIdsSurvive(t *testing.T) {
+	h := &Handler{}
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	r.Header.Set("x-opencode-session-id", "ses_1a2b3c4d5e6fABCDEFGHIJKLMN")
+	r.Header.Set("x-opencode-session", "ses_6f5e4d3c2b1aZYXWVUTSRQPONB")
+
+	ids := h.sessionIDs(r, nil)
+
+	if ids.Session != "ses_1a2b3c4d5e6fABCDEFGHIJKLMN" {
+		t.Errorf("Session = %q, want the caller value preserved", ids.Session)
+	}
+	if ids.Affinity != "ses_6f5e4d3c2b1aZYXWVUTSRQPONB" {
+		t.Errorf("Affinity = %q, want the caller value preserved", ids.Affinity)
 	}
 }
 
