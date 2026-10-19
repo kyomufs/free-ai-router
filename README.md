@@ -418,6 +418,11 @@ with the service and is learned by asking: a copy in the configuration would go
 stale the day the service changed. Only `stub` declares its catalog, because
 there is no service to ask.
 
+What a service demands on the wire belongs with the service, not with this
+README: [`docs/providers/`](docs/providers/) holds one file per provider.
+[`opencode_zen.md`](docs/providers/opencode_zen.md) records the request shape the
+`opencode` lane admits, the refusals it returns, and its free model list.
+
 ## Debugging without a rebuild
 
 On NixOS the module rewrites `config.json` on every activation, so anything you
