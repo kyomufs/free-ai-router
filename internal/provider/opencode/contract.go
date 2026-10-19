@@ -93,6 +93,50 @@ const DefaultUserAgent = "opencode/1.19.2 ai-sdk/provider-utils/4.0.23 runtime/b
 //
 // The User-Agent is not one of these conditions either — it is checked, but only
 // for "looks like an OpenCode build"; see DefaultUserAgent.
+//
+// HOW OUR REQUEST COMPARES TO THE CLIENT'S OWN, captured 2026-10-19 by running
+// the installed client through a TLS-terminating proxy (mitmproxy, its CA in
+// NODE_EXTRA_CA_CERTS) and reading the request off the wire. The list is kept
+// because "the shape is close enough" is a claim that ages badly:
+//
+//	field            the client                    this proxy
+//	---------------- ------------------------------ ------------------------------
+//	protocol         HTTP/1.1, ALPN "http/1.1"     HTTP/1.1 (transport/direct.go)
+//	path             /inference/openai/v1/chat/…   /inference/v1/chat/completions
+//	headers          Content-Type, User-Agent,     the same set, the same spelling
+//	                 x-opencode-client,            (the custom names lowercase, as
+//	                 x-opencode-project,           the client writes them)
+//	                 x-opencode-request,
+//	                 x-opencode-session,
+//	                 x-opencode-session-id,
+//	                 Connection: keep-alive,
+//	                 Accept: *∕*
+//	header order     as listed above               alphabetical, Host first
+//	Accept-Encoding  gzip, deflate, br, zstd       gzip
+//	body             max_tokens, tool_choice also  only what the caller sent
+//	                 present
+//
+// The differences that remain are deliberate or out of reach:
+//
+//   - The path is the vendor's other public route for the same handler; both are
+//     answered 200 with this shape, and the model list lives under the one used
+//     here.
+//   - The order is Go's: net/http writes Host first and sorts the rest. Matching
+//     the client's order needs a hand-written HTTP/1.1 writer, and the order is
+//     not decisive — curl, whose order differs from both, is admitted.
+//   - gzip alone, because a Go transport decodes only what it negotiated itself.
+//   - max_tokens and tool_choice are the caller's: this proxy is not the client
+//     and must not invent a token budget for it.
+//   - The TLS ClientHello cannot be matched from crypto/tls at all. Measured
+//     JA3: the client's runtime 8f1d483d7c5fba63a9170d6e4dd66f93, Go
+//     96458b3de39df5d47bc5c4a9f10f8f26, curl 0659743d0a8904909448456a6dfa4b06.
+//     On an open lane all three are admitted, so the fingerprint is not a
+//     condition today; closing it would take a hand-built ClientHello.
+//
+// The lesson of the same measurement, which is why the table is not a to-do
+// list: the SAME bytes from the same address were answered 403 at 21:23 and 200
+// at 21:28 with nothing changed. The verdict is not a function of the request.
+// No amount of shape fidelity removes a refusal the lane issues by address.
 
 // Stream budgets. The numbers are the contract's own: the client holds its own
 // timeouts, and a budget shorter than the client's would make the gateway break

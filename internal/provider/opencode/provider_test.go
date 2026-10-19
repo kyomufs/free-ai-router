@@ -180,16 +180,18 @@ func TestSessionAndAffinityAreDistinct(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := prep.Headers.Get("x-opencode-session-id")
+	// The outbound names are spelled as the reference client spells them, so the
+	// lookup is a map key and not Get, which canonicalises the name first.
+	got := header(prep.Headers, "x-opencode-session-id")
 	want := "ses_000000000000AAAAAAAAAAAAAA"
 	if got != want {
 		t.Fatalf("x-opencode-session-id = %q, want %q", got, want)
 	}
-	if got := prep.Headers.Get("x-opencode-session"); got == want {
-		t.Fatalf("x-opencode-session must carry the affinity, not the session id")
+	if got := header(prep.Headers, "x-opencode-session"); got != "ses_000000000000BBBBBBBBBBBBBB" {
+		t.Fatalf("x-opencode-session = %q, want the affinity", got)
 	}
-	if got := prep.Headers.Get("x-session-affinity"); got != "ses_000000000000BBBBBBBBBBBBBB" {
-		t.Fatalf("x-session-affinity = %q, want the affinity", got)
+	if got := header(prep.Headers, "x-session-affinity"); got != "" {
+		t.Fatalf("x-session-affinity = %q, but the reference client sends no such header", got)
 	}
 }
 
@@ -205,11 +207,8 @@ func TestParentHeadersOnlyForNestedSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if flat.Headers.Get("x-opencode-parent-session-id") != "" {
+	if header(flat.Headers, "x-opencode-parent-session-id") != "" {
 		t.Fatalf("a flat session must not carry x-opencode-parent-session-id")
-	}
-	if flat.Headers.Get("x-parent-session-id") != "" {
-		t.Fatalf("a flat session must not carry x-parent-session-id")
 	}
 
 	nested, err := p.Build(provider.Request{
@@ -222,11 +221,8 @@ func TestParentHeadersOnlyForNestedSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := nested.Headers.Get("x-opencode-parent-session-id"); got != "ses_000000000000DDDDDDDDDDDDDD" {
+	if got := header(nested.Headers, "x-opencode-parent-session-id"); got != "ses_000000000000DDDDDDDDDDDDDD" {
 		t.Fatalf("x-opencode-parent-session-id = %q, want the parent", got)
-	}
-	if got := nested.Headers.Get("x-parent-session-id"); got != "ses_000000000000DDDDDDDDDDDDDD" {
-		t.Fatalf("x-parent-session-id = %q, want the parent", got)
 	}
 }
 
@@ -243,7 +239,7 @@ func TestProjectHeaderForwarded(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := prep.Headers.Get("x-opencode-project"); got != project {
+		if got := header(prep.Headers, "x-opencode-project"); got != project {
 			t.Fatalf("x-opencode-project = %q, want %q", got, project)
 		}
 	}
@@ -768,5 +764,67 @@ func TestNoEmbeddedCatalog(t *testing.T) {
 	// first return to a constant in the code.
 	if p.catalog == nil {
 		t.Fatal("no catalog: models are not taken from the service")
+	}
+}
+
+// header reads an outbound header by the spelling it is written in.
+//
+// Not Get: the names go out in the reference client's spelling — the custom
+// ones in lowercase — and Get canonicalises the lookup key, which would miss
+// them. Reading the map directly is what keeps the test honest about the wire
+// form.
+func header(h http.Header, name string) string {
+	if v, ok := h[name]; ok && len(v) > 0 {
+		return v[0]
+	}
+	return ""
+}
+
+// TestHeaderSetMatchesReferenceClient — the outbound set is the one the client
+// we imitate actually sends, measured from its live request.
+//
+// The property under test is not "the headers are present" but "the headers are
+// exactly these": an extra header is as much a divergence as a missing one, and
+// `x-session-affinity` is listed explicitly because it used to be sent and the
+// client never sends it.
+func TestHeaderSetMatchesReferenceClient(t *testing.T) {
+	p := newTestProvider(t)
+
+	prep, err := p.Build(provider.Request{
+		Model: provider.Model{ID: "x"},
+		Session: provider.SessionIDs{
+			Session:  "ses_000000000000AAAAAAAAAAAAAA",
+			Affinity: "ses_000000000000AAAAAAAAAAAAAA",
+			Project:  "global",
+			Message:  "msg_000000000000CCCCCCCCCCCCCC",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]string{
+		"Content-Type":          "application/json",
+		"Accept-Encoding":       "gzip",
+		"User-Agent":            p.userAgent,
+		"Accept":                "*/*",
+		"Connection":            "keep-alive",
+		"x-opencode-client":     p.clientName,
+		"x-opencode-project":    "global",
+		"x-opencode-request":    "msg_000000000000CCCCCCCCCCCCCC",
+		"x-opencode-session":    "ses_000000000000AAAAAAAAAAAAAA",
+		"x-opencode-session-id": "ses_000000000000AAAAAAAAAAAAAA",
+	}
+	for name, value := range want {
+		if got := header(prep.Headers, name); got != value {
+			t.Fatalf("%s = %q, want %q", name, got, value)
+		}
+	}
+	if got := len(prep.Headers); got != len(want) {
+		names := make([]string, 0, got)
+		for name := range prep.Headers {
+			names = append(names, name)
+		}
+		t.Fatalf("headers = %v, want exactly the %d names of the reference client", names, len(want))
 	}
 }

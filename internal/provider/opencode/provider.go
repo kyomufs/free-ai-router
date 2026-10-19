@@ -594,42 +594,50 @@ func (p *Provider) gateTools() []gateTool {
 
 // buildHeaders assembles the request headers.
 //
-// The separation of session and affinity is no detail: the client puts the
-// session identifier into `x-opencode-session-id` and the affinity, i.e. the
-// group root for cache routing, into `x-opencode-session`. For a flat session
-// the values coincide, for a nested one they diverge.
+// THE SET AND THE SPELLING are those of the reference client, captured from its
+// live request rather than guessed: `Content-Type`, `User-Agent`,
+// `x-opencode-client`, `x-opencode-project`, `x-opencode-request`,
+// `x-opencode-session`, `x-opencode-session-id`, `Connection: keep-alive`,
+// `Accept: */*` — and nothing else. The client sends no separate affinity
+// header: the value of `x-opencode-session` is the affinity (the group root for
+// cache routing) and the value of `x-opencode-session-id` is the session itself,
+// so for a flat session the two coincide and for a nested one they diverge.
+//
+// The names are written into the map in the client's spelling, because
+// http.Header.Set canonicalises them and a canonicalised name is an observable
+// difference from the client being imitated. The consequence is internal:
+// within this package the outbound names are read as map keys, not through Get,
+// which canonicalises the lookup key.
 //
 // The parent headers are added ONLY when there is a parent: a flat session never
 // has one, and they must not always be sent.
 func (p *Provider) buildHeaders(ids provider.SessionIDs) http.Header {
 	h := make(http.Header)
+	set := func(name, value string) {
+		if value != "" {
+			h[name] = []string{value}
+		}
+	}
 
-	h.Set("content-type", "application/json")
+	set("Content-Type", "application/json")
+	// gzip only, deliberately. The reference client also offers br and zstd, but
+	// a Go transport decodes only the encodings it negotiated itself, so asking
+	// for one it cannot undo would turn every answer into unparsed bytes.
+	set("Accept-Encoding", "gzip")
+	set("User-Agent", p.userAgent)
+	set("Accept", "*/*")
+	set("Connection", "keep-alive")
+
 	// The permanent headers are applied by a shared function: the catalog uses
 	// the same names, and a divergence would make the client unrecognisable to
 	// the service on one of the two paths.
 	p.applyHeaders(h)
 
-	if ids.Session != "" {
-		h.Set("x-opencode-session-id", ids.Session)
-	}
-	if ids.Session != "" || ids.Affinity != "" {
-		h.Set("x-opencode-session", nonEmpty(ids.Affinity, ids.Session))
-		h.Set("x-session-affinity", nonEmpty(ids.Affinity, ids.Session))
-		h.Set("X-Session-Id", nonEmpty(ids.Affinity, ids.Session))
-	}
-	if ids.Message != "" {
-		h.Set("x-opencode-request", ids.Message)
-	}
-	if ids.Project != "" {
-		h.Set("x-opencode-project", ids.Project)
-	}
-
-	// Parent headers — only for nested sessions.
-	if ids.Parent != "" {
-		h.Set("x-opencode-parent-session-id", ids.Parent)
-		h.Set("x-parent-session-id", ids.Parent)
-	}
+	set("x-opencode-project", ids.Project)
+	set("x-opencode-request", ids.Message)
+	set("x-opencode-session", nonEmpty(ids.Affinity, ids.Session))
+	set("x-opencode-session-id", ids.Session)
+	set("x-opencode-parent-session-id", ids.Parent)
 
 	return h
 }
@@ -642,8 +650,8 @@ func (p *Provider) buildHeaders(ids provider.SessionIDs) http.Header {
 // catalog would drift from this one, and the service would get two mismatching
 // representations of one client.
 func (p *Provider) applyHeaders(h http.Header) {
-	h.Set("user-agent", p.userAgent)
-	h.Set("x-opencode-client", p.clientName)
+	h["User-Agent"] = []string{p.userAgent}
+	h["x-opencode-client"] = []string{p.clientName}
 }
 
 // nonEmpty returns the first non-empty argument.

@@ -68,15 +68,24 @@ func buildDirectTransport(family string) *http.Transport {
 		}
 	}
 
+	// HTTP/1.1 only, and the ALPN list says so.
+	//
+	// MEASURED against the reference client of the only service this transport
+	// is used for: its requests go out over HTTP/1.1 with ALPN "http/1.1", while
+	// a Go transport with h2 enabled negotiates "h2" against the same endpoint.
+	// The protocol is visible to the service and is one of the few differences
+	// left once the headers match, so it is closed here. Nothing is lost: an
+	// HTTP/1.1 connection is what every endpoint of both providers accepts.
 	return &http.Transport{
 		DialContext:           dial,
-		ForceAttemptHTTP2:     true,
+		ForceAttemptHTTP2:     false,
+		TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{},
 		MaxIdleConns:          maxIdleConns,
 		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
 		IdleConnTimeout:       idleConnTimeout,
 		TLSHandshakeTimeout:   tlsHandshakeTimeout,
 		ExpectContinueTimeout: time.Second,
-		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}},
 	}
 }
 
