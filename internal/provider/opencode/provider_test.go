@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -393,6 +394,47 @@ func TestEmptyAssistantDropped(t *testing.T) {
 		if m["role"] == "assistant" {
 			t.Fatalf("an empty assistant turn reached the wire: %v", m)
 		}
+	}
+}
+
+// TestStreamIsAlwaysRequested is a contract property measured against the live
+// service: an otherwise perfect request with "stream": false is refused with
+// FreeTierError, and the same request with "stream": true is answered.
+//
+// The client's own shape is not lost: the flag on the prepared request tells the
+// gateway that the wire is streamed, and it collects the events into one body
+// when the client asked for a single response.
+func TestStreamIsAlwaysRequested(t *testing.T) {
+	p := newTestProvider(t)
+
+	for _, want := range []bool{false, true} {
+		t.Run("client asked stream="+strconv.FormatBool(want), func(t *testing.T) {
+			prep, err := p.Build(provider.Request{
+				Model:  provider.Model{ID: "mimo-v2.6-flash-free"},
+				Stream: want,
+			})
+			if err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+
+			var body map[string]any
+			if err := json.Unmarshal(prep.Body, &body); err != nil {
+				t.Fatalf("unmarshal body: %v", err)
+			}
+			if stream, ok := body["stream"].(bool); !ok || !stream {
+				t.Fatalf("stream = %v, want the stream form on the wire", body["stream"])
+			}
+			options, ok := body["stream_options"].(map[string]any)
+			if !ok {
+				t.Fatalf("stream_options missing: %s", prep.Body)
+			}
+			if include, _ := options["include_usage"].(bool); !include {
+				t.Fatalf("the usage counters are not requested: %v", options)
+			}
+			if !prep.StreamsUpstream {
+				t.Fatal("the gateway was not told the wire is streamed")
+			}
+		})
 	}
 }
 

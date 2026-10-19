@@ -94,7 +94,7 @@ func TestKeyRejectionRotatesAndSucceeds(t *testing.T) {
 			return
 		}
 		w.Header().Set("content-type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n")
 	}))
 	defer upstream.Close()
 
@@ -198,7 +198,7 @@ func TestRetryableRefusalIsRepeated(t *testing.T) {
 			return
 		}
 		w.Header().Set("content-type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n")
 	}))
 	defer upstream.Close()
 
@@ -389,7 +389,7 @@ func TestStreamFlagFollowsTheClient(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("content-type", "text/event-stream")
-				_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\n")
+				_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n")
 			}))
 			defer upstream.Close()
 
@@ -471,6 +471,6 @@ func (localTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"content-type": []string{"text/event-stream"}},
-		Body:       io.NopCloser(strings.NewReader("data: {\"choices\":[]}\n\n")),
+		Body:       io.NopCloser(strings.NewReader("data: {\"choices\":[]}\n\ndata: [DONE]\n\n")),
 	}, nil
 }

@@ -46,7 +46,7 @@ func recordingUpstream(t *testing.T) (*httptest.Server, func() []string) {
 		mu.Unlock()
 
 		w.Header().Set("content-type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"choices\":[]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[]}\n\ndata: [DONE]\n\n"))
 	}))
 
 	return srv, func() []string {

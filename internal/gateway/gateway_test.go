@@ -236,7 +236,7 @@ func TestAnonymousRefusalDoesNotBlameTheKey(t *testing.T) {
 func TestEgressAddressReachesTheCounters(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n")
 	}))
 	defer upstream.Close()
 
@@ -265,7 +265,7 @@ func TestEgressAddressReachesTheCounters(t *testing.T) {
 func TestUnknownAddressStillCounts(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n")
 	}))
 	defer upstream.Close()
 
@@ -332,7 +332,7 @@ func TestRefusalPassesThroughVerbatim(t *testing.T) {
 func TestSuccessIsCounted(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n")
 	}))
 	defer upstream.Close()
 
@@ -369,7 +369,7 @@ func TestStreamIsForwardedIncrementally(t *testing.T) {
 	defer upstream.Close()
 
 	h, _, _ := newTestHandler(t, upstream)
-	rec := postChat(t, h, `{"model":"test/model","messages":[{"role":"user","content":"x"}]}`)
+	rec := postChat(t, h, `{"model":"test/model","messages":[{"role":"user","content":"x"}],"stream":true}`)
 
 	if got := strings.Count(rec.Body.String(), chunk); got != 3 {
 		t.Fatalf("forwarded %d chunks, want 3", got)

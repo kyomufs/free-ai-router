@@ -240,6 +240,9 @@ func (p *Provider) Build(req provider.Request) (provider.Prepared, error) {
 		URL:     p.baseURL + "/chat/completions",
 		Headers: headers,
 		Body:    raw,
+		// The body always asks for a stream, so the gateway has to know that
+		// even a client that wanted one body will receive events.
+		StreamsUpstream: true,
 		// The reasoning band holds longer pauses than an ordinary stream,
 		// because the model can stay silent for several minutes while still
 		// working. Splitting the budgets is part of the contract, not a setting;
@@ -259,15 +262,22 @@ func (p *Provider) buildBody(req provider.Request) (map[string]any, error) {
 	body := map[string]any{
 		"model":    req.Model.ID,
 		"messages": messages,
-		"stream":   req.Stream,
+		// The stream form is mandatory on the wire, whatever the client asked
+		// for.
+		//
+		// MEASURED against the live service: an otherwise perfect request with
+		// "stream": false is answered 403 FreeTierError, and the same request
+		// with "stream": true is answered 200. Nothing else in the body flips
+		// the verdict. The gateway collects the events into a single response
+		// when the client asked for one, so the shape the client sees stays the
+		// one it requested.
+		"stream": true,
 	}
 
-	// stream_options asks for the usage counters in a final chunk, and that
-	// only means anything inside a stream. Sent next to stream: false it is at
-	// best ignored and at worst rejected, so it follows the flag.
-	if req.Stream {
-		body["stream_options"] = map[string]any{"include_usage": true}
-	}
+	// stream_options asks for the usage counters in a final chunk. The counters
+	// cannot be recovered from the events otherwise, and a client that asked for
+	// a single response expects them in the merged answer.
+	body["stream_options"] = map[string]any{"include_usage": true}
 
 	if req.MaxTokens > 0 {
 		body["max_tokens"] = req.MaxTokens

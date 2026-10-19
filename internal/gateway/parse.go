@@ -35,6 +35,14 @@ func parseMessages(raw any) ([]provider.Message, error) {
 		if err != nil {
 			return nil, fmt.Errorf("messages[%d]: %w", i, err)
 		}
+		// System messages are delivered to the provider SEPARATELY, as the
+		// system part (see systemFrom). Keeping them in the history as well
+		// would hand the provider the same instruction twice: the system part is
+		// rendered in front of the messages, so the wire carried two identical
+		// system entries and the model was billed for both.
+		if msg.Role == "system" {
+			continue
+		}
 		out = append(out, msg)
 	}
 	return out, nil

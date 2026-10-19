@@ -66,6 +66,15 @@ var quotaText = regexp.MustCompile(`(?i)insufficient[-_\s]?(?:quota|balance)|quo
 // authText are the text signals of a key refusal.
 var authText = regexp.MustCompile(`(?i)incorrect api key|invalid api key|api key is invalid|unauthenticated`)
 
+// freeLaneRefusal are the text signals of a refusal that concerns the free lane
+// itself rather than the account or the key.
+//
+// The wording is reproduced from live responses: the first is the attestation
+// refusal a non-conforming request gets, the second is the address-level flag an
+// operator sees after abusive traffic has been detected from their egress
+// address. Neither can be answered by another key.
+var freeLaneRefusal = regexp.MustCompile(`(?i)can only be used from within opencode|detected abusive traffic|free models aren't available from your current network`)
+
 // Classify implements provider.Provider.
 //
 // The decision about the key is made from the totality of signals, because
@@ -112,6 +121,20 @@ func (p *Provider) Classify(resp *http.Response, body []byte) provider.Failure {
 	}
 	if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusPaymentRequired) && quotaText.MatchString(lower) {
 		f.KeyRejected = true
+	}
+
+	// A free-lane access refusal is NOT a credential problem, whatever the status
+	// says.
+	//
+	// Both of these arrive as 403 and both are about the REQUEST, not the key: the
+	// first says the request did not look like it came from the client (the
+	// admission conditions are in contract.go), the second says the egress address
+	// is flagged. Rotating a pool over them achieves nothing except a pool's worth
+	// of additional refused requests from an address that is already suspect,
+	// which is the worst possible thing to spend it on.
+	if resp.StatusCode == http.StatusForbidden && freeLaneRefusal.MatchString(lower) {
+		f.KeyRejected = false
+		f.Retryable = false
 	}
 
 	// Is a repeat worth it?

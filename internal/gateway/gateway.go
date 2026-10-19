@@ -572,7 +572,11 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Pro
 		// silence before them is already evidence that something is wrong. A
 		// single response sends nothing until it is complete, so the only thing
 		// that can be bounded there is the answer itself.
-		if req.Stream {
+		//
+		// What counts is the shape ON THE WIRE, not the one the client asked
+		// for: a provider may require the stream form regardless, and then the
+		// headers do arrive at once.
+		if req.Stream || prepared.StreamsUpstream {
 			wd.arm(firstEvent, errFirstEvent)
 		} else {
 			wd.arm(idle, errNoAnswer)
@@ -636,7 +640,11 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Pro
 		wd.arm(idle, errSilence)
 
 		if resp.StatusCode < 400 {
-			h.passThroughStream(w, resp, wd, idle)
+			if req.Stream {
+				h.passThroughStream(w, resp, wd, idle)
+			} else {
+				h.answerOnce(w, resp, wd, idle)
+			}
 			wd.stop()
 			resp.Body.Close()
 			if cause := wd.fired(); cause != nil {

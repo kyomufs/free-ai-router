@@ -202,6 +202,15 @@ type Prepared struct {
 	Headers http.Header
 	// Body is the serialized body.
 	Body []byte
+	// StreamsUpstream marks that the body asks for an event stream even when
+	// the client asked for a single response.
+	//
+	// It exists because a provider's check can require the stream form on the
+	// wire while the client is entitled to the shape it requested (measured on
+	// opencode: a body with stream: false is refused with FreeTierError before
+	// the model is even chosen). The gateway honours the flag by collecting the
+	// events into one response, so the client still gets what it asked for.
+	StreamsUpstream bool
 	// IdleTimeout is the stream silence budget for this request. Zero means the
 	// gateway-wide budget.
 	IdleTimeout time.Duration

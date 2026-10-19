@@ -25,7 +25,7 @@ func TestAnIssuedKeyReachesTheUpstream(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = append(got, r.Header.Get("authorization"))
 		w.Header().Set("content-type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"choices\":[]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[]}\n\ndata: [DONE]\n\n"))
 	}))
 	defer upstream.Close()
 
@@ -53,7 +53,7 @@ func TestNoKeyMeansTheAnonymityMarker(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = append(got, r.Header.Get("authorization"))
 		w.Header().Set("content-type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"choices\":[]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[]}\n\ndata: [DONE]\n\n"))
 	}))
 	defer upstream.Close()
 
@@ -82,7 +82,7 @@ func TestThePoolIsRotatedAcrossRequests(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = append(got, strings.TrimPrefix(r.Header.Get("authorization"), "Bearer "))
 		w.Header().Set("content-type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"choices\":[]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[]}\n\ndata: [DONE]\n\n"))
 	}))
 	defer upstream.Close()
 
@@ -113,7 +113,7 @@ func TestTheProviderChoosesTheHeaderShape(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = append(got, r.Header.Get("x-api-key"))
 		w.Header().Set("content-type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"choices\":[]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[]}\n\ndata: [DONE]\n\n"))
 	}))
 	defer upstream.Close()
 
@@ -137,7 +137,7 @@ func TestAProviderThatUsesNoCredentialGetsNoHeader(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawHeader = append(sawHeader, r.Header.Get("authorization"))
 		w.Header().Set("content-type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"choices\":[]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[]}\n\ndata: [DONE]\n\n"))
 	}))
 	defer upstream.Close()
 

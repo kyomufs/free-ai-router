@@ -185,7 +185,7 @@ func TestDeadConnectionIsRetriedOnAFreshOne(t *testing.T) {
 			return
 		}
 		w.Header().Set("content-type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n")
 	}))
 	defer upstream.Close()
 
@@ -223,7 +223,7 @@ func TestSilentStreamIsRetriedOnce(t *testing.T) {
 			return
 		}
 		w.Header().Set("content-type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n")
 	}))
 	defer func() {
 		close(release)

@@ -39,11 +39,30 @@ func TestClassifyOnRecordedRefusal(t *testing.T) {
 		t.Fatalf("status = %d, want 403", failure.Status)
 	}
 
-	// An access refusal means that, if a key is available, it makes sense to try
-	// another one: the service answers that way also for an exhausted access
-	// right.
+	// The recorded refusal is the FREE-LANE ATTESTATION one, and it is not about
+	// the credential: no key makes a non-conforming request acceptable. Rotation
+	// over it would only add refused requests from the same address, so the
+	// decision must be "do not switch and do not repeat".
+	if failure.KeyRejected {
+		t.Fatal("the attestation refusal must not be blamed on the credential")
+	}
+	if failure.Retryable {
+		t.Fatal("the attestation refusal must not be repeated")
+	}
+}
+
+// TestAKeyRefusalIsStillBlamedOnTheKey — the read above is narrowed to the
+// free-lane wording, not to 403 as a whole.
+//
+// A 403 that names a permission problem IS caused by the credentials, and there
+// another key is worth trying: that is the branch the narrowing must not eat.
+func TestAKeyRefusalIsStillBlamedOnTheKey(t *testing.T) {
+	body := []byte(`{"type":"error","error":{"type":"PermissionError","code":"permission_error","message":"This key is not allowed to use this model."}}`)
+	resp := &http.Response{StatusCode: http.StatusForbidden, Header: make(http.Header)}
+
+	failure := newTestProvider(t).Classify(resp, body)
 	if !failure.KeyRejected {
-		t.Fatal("403 must be treated as a reason to try another credential")
+		t.Fatal("a permission 403 must still be treated as a reason to try another key")
 	}
 }
 

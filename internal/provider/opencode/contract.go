@@ -42,6 +42,36 @@ const jsonSchemaDialect = "https://json-schema.org/draft/2020-12/schema"
 // meaningful.
 const DefaultUserAgent = "opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
 
+// The free-lane admission conditions, measured one request at a time.
+//
+// A request is admitted when BOTH of these hold, and refused with 403
+// FreeTierError otherwise — the refusal arrives before a model is chosen, so it
+// says nothing about the account, the key or the quota:
+//
+//  1. The body is in the stream form: "stream": true. Everything else in the
+//     body can be subtracted (stream_options, max_tokens, temperature,
+//     reasoning_effort) without changing the verdict, and "stream": false fails
+//     it on its own — with the canonical tools, with the canonical prompt, on
+//     HTTP/1.1 and on HTTP/2 alike.
+//
+//  2. The request carries EITHER the mandatory tool set (shell and read, name,
+//     description and schema compared in full) OR the recognised system prompt,
+//     verbatim. The two are alternatives, not requirements: canonical tools with
+//     an arbitrary or absent system message are admitted, and the canonical
+//     prompt with no tools is admitted. Anything less than one of them in full
+//     is refused — 26 characters of it, the real prompt minus its examples, and
+//     a foreign prompt all fail.
+//
+// Condition 1 is the one this proxy used to lose: a client that did not ask for
+// a stream was passed through with "stream": false and refused, which is exactly
+// the non-conforming traffic that gets an egress address flagged. Condition 2 is
+// why the mandatory tools are injected unconditionally: they are the cheapest
+// half of the disjunction, and they are needed for the request to work at all.
+//
+// The User-Agent is NOT part of these two conditions, and the version digits are
+// not part of the substring test either: opencode/1.19.2 with the same suffix
+// was admitted everywhere opencode/1.18.35 was, in the same batch.
+
 // Stream budgets. The numbers are the contract's own: the client holds its own
 // timeouts, and a budget shorter than the client's would make the gateway break
 // a connection the client still expects to be alive. They are therefore the
