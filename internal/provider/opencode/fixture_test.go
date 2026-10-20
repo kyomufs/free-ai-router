@@ -66,6 +66,35 @@ func TestAKeyRefusalIsStillBlamedOnTheKey(t *testing.T) {
 	}
 }
 
+// TestUpstreamUnavailableIsNotAboutTheKey — the provider's own edge could not
+// reach the model host, and the status it says so under is not fixed.
+//
+// The same recorded body arrived as 503, 403 and 429 within one hour on
+// 2026-10-20 (see testdata/README.md). A status reading would split one
+// condition into three verdicts, and the 403 one would blame the credential —
+// which, with a key pool, spends keys on a model that cannot reach its own host.
+func TestUpstreamUnavailableIsNotAboutTheKey(t *testing.T) {
+	body := readFixture(t, "refusal-upstream-unavailable.json")
+
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusForbidden, http.StatusTooManyRequests} {
+		resp := &http.Response{StatusCode: status, Header: make(http.Header)}
+		failure := newTestProvider(t).Classify(resp, body)
+
+		if failure.KeyRejected {
+			t.Fatalf("%d: an upstream outage must not be blamed on the key", status)
+		}
+		if !failure.Retryable {
+			t.Fatalf("%d: an upstream outage must not be treated as final", status)
+		}
+		if !failure.UpstreamUnavailable {
+			t.Fatalf("%d: an upstream outage must be named as one", status)
+		}
+		if string(failure.Body) != string(body) {
+			t.Fatalf("%d: the refusal body was altered", status)
+		}
+	}
+}
+
 // TestRecordedRefusalKeepsClientSignals checks that the signals by which the
 // client makes its decision survive all the way to it.
 //

@@ -210,6 +210,54 @@ tokens from a stream has nowhere else to read them.
 | 403 | `{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building."}}` | request shape | the four conditions above |
 | 403 | `{"code":null,"message":"OpenCode's free models aren't available from your current network because we've detected abusive traffic from this IP address. This isn't related to your account. If you're on a VPN or proxy, turn it off and try again, or subscribe to OpenCode Go…"}` | egress address | none in the request; the vendor's team, or another address, or time |
 | 401 | `{"error":{"type":"server_error","message":"Upstream request failed: Go requires a credential"}}` | paid lane | a credential; the free lane has no equivalent |
+| 403 / 429 / 503 | `{"error":{"type":"server_error","message":"Upstream request failed: Endpoint is unavailable."}}` | the model host | another model of the same lane; the requested one answers nothing until the vendor restores it |
+
+### The status does not name this refusal
+
+The endpoint-unavailable body arrived under three different codes in one hour on
+2026-10-20, on a full client shape, from five different egress addresses:
+
+| status | model | observed |
+| --- | --- | --- |
+| `503` | `deepseek-v4.1-flash-free` | `app.log`, 65 events, hour `20:00` MSK, first `20:13:59` |
+| `403` | `nemotron-3.5-lightning-free` | live probe |
+| `429` | `glm-5.3-flash-free` | live probe |
+
+So the classification is made from the BODY (`upstream request failed` /
+`endpoint is unavailable`) and never from the status: a `403` is otherwise read
+as a key refusal twenty lines earlier in `classify.go`, and with a key pool that
+reading would spend keys on a model that cannot reach its own host.
+
+The vendor's shipped client is affected identically, which is what makes this a
+vendor-side condition rather than a property of this gateway:
+`~/.local/share/opencode/log/opencode.log` holds 14 `AI_APICallError: Upstream
+request failed: Endpoint is unavailable.` on `deepseek-v4.1-flash-free`, all
+within `2026-10-20T17` UTC — the same window, in UTC, as the entries above in
+MSK.
+
+### What the gateway does about it
+
+The request moves to another FREE model of the same provider, up to
+`modelFallbacks = 2` moves, never to one already tried and never to a paid one.
+The reason is measured: inside the outage `glm-5.3-flash-free`,
+`mimo-v2.6-flash-free`, `minimax-m3.1-flash-free` and
+`longcat-2.5-preview-free` all answered `200` in the same second in which
+`deepseek-v4.1-flash-free` answered with this body. Repeating the same request on
+the same model cannot help — the endpoint, not the request, is what is out — and
+the repeat is only the client's time.
+
+Each refused attempt is still counted as a refusal of the model that refused, and
+the answer is counted against the model that gave it: the counters describe
+attempts, and hiding a move would hide exactly the model that is degraded. When
+there is nothing left to move to, the client receives the provider's last refusal
+verbatim, as always.
+
+The target is chosen from the models the provider's own catalog offers and only
+from those the catalog marks free; the order is the catalog's, not a preference of
+this package. The free flag comes from the property catalog, so a run that has not
+read it yet has no free model to move to — the log says so in one line
+(`no untried free model to move to`) rather than leaving it to be read as a plain
+refusal.
 
 `FreeTierError` is classified as a quota code by the vendor's own classifier
 (`packages/ai/src/provider-error.ts`, `classifyProviderFailure`), which is why it
@@ -320,6 +368,7 @@ curl -sN http://127.0.0.1:8787/v1/chat/completions \
 | `internal/provider/opencode/sessioncache.go` | one session per conversation, bounded |
 | `internal/provider/opencode/identifiers.go` | the identifier formula of the shipped client, reproduced |
 | `internal/gateway/collect.go` | event stream merged into one body for a non-streaming caller |
+| `internal/gateway/gateway.go` | the rotation loop: key, repeat, and the move to another model |
 | `internal/transport/direct.go` | egress: HTTP/1.1, ALPN, no proxy of its own |
 
 ## Sources

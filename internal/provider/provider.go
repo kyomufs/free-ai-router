@@ -262,6 +262,18 @@ type Failure struct {
 	// which is the safe reading: repeating a refusal that will not change only
 	// spends the client's time.
 	Retryable bool
+	// UpstreamUnavailable marks that the provider's own edge could not reach the
+	// model host, so the model — not the key, not the request, not the address —
+	// is what is out.
+	//
+	// It is a separate judgement from Retryable because it answers a different
+	// question: a repeat of the SAME request is what Retryable allows, while this
+	// one says the same request is addressed to a model that cannot answer at
+	// all, and that moving the request to ANOTHER model is what may help. On
+	// opencode both were measured live: with one free model refusing this way,
+	// four other free models of the same provider answered 200 in the same
+	// second.
+	UpstreamUnavailable bool
 }
 
 // Provider is what a particular free-model service implements.

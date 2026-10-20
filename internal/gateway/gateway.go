@@ -543,6 +543,13 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Pro
 	// blanket refusal would ping-pong for as long as the client waits.
 	tried := make(map[string]bool)
 
+	// The models this request has already been addressed to, and how many times
+	// it has been moved. Both belong to the request rather than to the attempt:
+	// a model that failed once is not worth returning to, and the number of moves
+	// is what keeps a dead catalog from costing the client a minute.
+	triedModels := map[string]bool{model.ID: true}
+	switches := 0
+
 	// The budgets of one attempt. Both are re-armed as the attempt progresses:
 	// the first bounds the wait for the response headers, the second the silence
 	// between events.
@@ -704,6 +711,42 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Pro
 			failure.KeyRejected = false
 		}
 
+		// The model host is out, and a provider serves its free models from
+		// separate endpoints: while one model refused this way, four others of the
+		// same provider answered 200 in the same second. Repeating the same
+		// request would only wait on the same dead endpoint, so the request moves
+		// to another model — the one thing here that can end the client's wait.
+		//
+		// This goes BEFORE the rotation and the repeat below, because both of them
+		// ask about the same request and the answer would be the same: no key and
+		// no delay restores a model that cannot reach its own host.
+		if failure.UpstreamUnavailable && switches < modelFallbacks {
+			if next, ok := h.otherModel(r.Context(), p, triedModels); ok {
+				h.warn("provider %q: model %q is unavailable upstream, moving to %q",
+					p.ID(), model.ID, next.ID)
+				// The refused attempt happened, and the counters are about
+				// attempts.
+				h.recordRefusal(model.ID, address, h.fingerprint(key))
+				triedModels[next.ID] = true
+				switches++
+				model = next
+				req.Model = next
+				prepared, err = p.Build(req)
+				if err != nil {
+					h.warn("provider %q: assembling the request: %v", p.ID(), err)
+					writeError(w, http.StatusInternalServerError, "gateway error", err.Error())
+					h.recordAbort(model.ID, address, h.fingerprint(key))
+					return
+				}
+				// The budgets belong to the model, so the ones of the refused
+				// attempt do not carry over to this one.
+				firstEvent = Timeout(prepared.FirstEventTimeout, h.FirstEventTimeout)
+				idle = Timeout(prepared.IdleTimeout, h.IdleTimeout)
+				attempt = 1
+				continue
+			}
+		}
+
 		if failure.KeyRejected {
 			tried[key] = true
 			if next, ok := h.alternativeKey(p, key); ok && !tried[next] {
@@ -748,6 +791,36 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Pro
 		h.writeRefusal(w, resp, body, failure, p, model, address, key)
 		return
 	}
+}
+
+// otherModel picks a model to move the request to when the one it asked for
+// cannot answer at all.
+//
+// Free models only: the router exists to spend the free lane, and falling over
+// to a paid model would turn a refusal into a bill the client never agreed to.
+// Models already tried are skipped, so a failure that covers several of them
+// cannot cycle, and the catalog order is kept rather than sorted: it is the
+// provider's own statement of what it offers, and second-guessing it here would
+// be a preference this package has no evidence for.
+func (h *Handler) otherModel(ctx context.Context, p provider.Provider, tried map[string]bool) (provider.Model, bool) {
+	models, err := p.Models(ctx)
+	if err != nil {
+		h.warn("provider %q: the catalog is unavailable, no fallback: %v", p.ID(), err)
+		return provider.Model{}, false
+	}
+	for _, m := range models {
+		if tried[m.ID] || !m.Free {
+			continue
+		}
+		return m, true
+	}
+	// Everything the provider offers has been tried already, or nothing it
+	// offers is free. The second case is worth a line: the flag comes from the
+	// provider's property catalog, and a run that never read that catalog has no
+	// free model to move to — which looks exactly like the request simply being
+	// refused, and would be diagnosed from the wrong end.
+	h.warn("provider %q: no untried free model to move to (%d in the catalog)", p.ID(), len(models))
+	return provider.Model{}, false
 }
 
 // wait pauses for a delay, and reports whether it reached the end.

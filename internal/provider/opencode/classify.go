@@ -75,6 +75,15 @@ var authText = regexp.MustCompile(`(?i)incorrect api key|invalid api key|api key
 // address. Neither can be answered by another key.
 var freeLaneRefusal = regexp.MustCompile(`(?i)can only be used from within opencode|detected abusive traffic|free models aren't available from your current network`)
 
+// upstreamUnavailable is the text signal of the provider's edge failing to
+// reach the model host: "Upstream request failed: Endpoint is unavailable."
+//
+// It is matched by TEXT and not by status because the status is not fixed for
+// it. Measured on 2026-10-20 within one hour: 503 when the edge itself
+// answered, 403 on one free model and 429 on another. One condition, three
+// statuses, so the status would split it into three different verdicts.
+var upstreamUnavailable = regexp.MustCompile(`(?i)upstream request failed|endpoint is unavailable`)
+
 // Classify implements provider.Provider.
 //
 // The decision about the key is made from the totality of signals, because
@@ -156,6 +165,20 @@ func (p *Provider) Classify(resp *http.Response, body []byte) provider.Failure {
 		resp.StatusCode == http.StatusRequestTimeout,
 		resp.StatusCode >= 500:
 		f.Retryable = true
+	}
+
+	// The model host is out. This is applied LAST, after every other signal, so
+	// that nothing above can turn it back into a key verdict: the body is the
+	// only reliable evidence here, and a 403 carrying it was measured — a 403 is
+	// otherwise read as a key refusal two dozen lines up.
+	//
+	// Repeating the same request against the same model is pointless while the
+	// endpoint is down, so Retryable is not what carries this: UpstreamUnavailable
+	// is, and the gateway answers it by moving the request to another model.
+	if upstreamUnavailable.MatchString(lower) {
+		f.KeyRejected = false
+		f.Retryable = true
+		f.UpstreamUnavailable = true
 	}
 
 	return f

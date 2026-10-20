@@ -57,6 +57,15 @@ const (
 	// here at all: its silence budget is measured in minutes, and the provider
 	// had all of it to answer.
 	silenceAttempts = 2
+
+	// modelFallbacks is how many OTHER models one request may be moved to when
+	// the model it asked for is unavailable upstream.
+	//
+	// Two, not the whole catalog: each move is a fresh attempt on a fresh
+	// connection, and the client waits through all of them. Two is enough to
+	// survive one dead endpoint — measured, the free lane had several models out
+	// at once — while keeping the worst case a few seconds rather than a minute.
+	modelFallbacks = 2
 )
 
 // transportDelays are the pauses before the second and the following attempts.
