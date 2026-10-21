@@ -246,6 +246,15 @@ The reason is measured: inside the outage `glm-5.3-flash-free`,
 the same model cannot help — the endpoint, not the request, is what is out — and
 the repeat is only the client's time.
 
+The same move is made when the model takes the connection and never sends its
+headers. Measured 2026-10-21 03:36–03:42 MSK: the refusal on
+`deepseek-v4.1-flash-free` moved the request to `big-pickle`, which held it for the
+whole first-event budget and then for a second one, and the client got a `504`
+— while `glm-5.3-flash-free` answered in 818ms, `mimo-v2.6-flash-free` in 5.3s,
+`beam-free` in 6.2s and `longcat-2.5-preview-free` in 9.3s. So the move is tried
+before the second silence budget, and the silence is counted as an abort of the
+model that stayed quiet, not as a refusal: nothing was refused.
+
 Each refused attempt is still counted as a refusal of the model that refused, and
 the answer is counted against the model that gave it: the counters describe
 attempts, and hiding a move would hide exactly the model that is degraded. When
@@ -253,11 +262,13 @@ there is nothing left to move to, the client receives the provider's last refusa
 verbatim, as always.
 
 The target is chosen from the models the provider's own catalog offers and only
-from those the catalog marks free; the order is the catalog's, not a preference of
-this package. The free flag comes from the property catalog, so a run that has not
-read it yet has no free model to move to — the log says so in one line
-(`no untried free model to move to`) rather than leaving it to be read as a plain
-refusal.
+from those the catalog marks free. The walk starts AFTER the model that failed
+rather than at the head of the catalog: with the head-first scan every request in
+the 2026-10-21 outage landed on the same first entry, which was itself quiet, and
+the rest of a healthy catalog was never reached. The free flag comes from the
+property catalog, so a run that has not read it yet has no free model to move to —
+the log says so in one line (`no untried free model to move to`) rather than
+leaving it to be read as a plain refusal.
 
 `FreeTierError` is classified as a quota code by the vendor's own classifier
 (`packages/ai/src/provider-error.ts`, `classifyProviderFailure`), which is why it

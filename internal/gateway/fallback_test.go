@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"free-ai-router/internal/provider"
 	"free-ai-router/internal/state"
@@ -170,6 +171,41 @@ func TestFallbackIsBoundedAndNeverCycles(t *testing.T) {
 	}
 	if seen["paid"] {
 		t.Fatalf("a paid model was used: %v", p.sent)
+	}
+}
+
+// TestSilentModelMovesTheRequestToAnother — a model that takes the connection and
+// never sends its headers is handed on as well.
+//
+// Measured on 2026-10-21, in the same outage as the endpoint refusal: the request
+// moved to `big-pickle`, which held it for the whole first-event budget twice,
+// while `glm-5.3-flash-free` answered in 818ms and three more free models in five
+// to nine seconds. Waiting out the second silence budget on the model that had
+// already proved quiet is what turned that turn into a 504.
+func TestSilentModelMovesTheRequestToAnother(t *testing.T) {
+	p := &modelStub{
+		models: []provider.Model{
+			{ID: "silent", Free: true},
+			{ID: "alive", Free: true},
+		},
+	}
+
+	h, _ := newFallbackHandler(t, p, func(model string) (int, string) {
+		if model == "silent" {
+			// Longer than the budget below, and no headers before it.
+			time.Sleep(300 * time.Millisecond)
+		}
+		return http.StatusOK, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n"
+	})
+	h.FirstEventTimeout = 50 * time.Millisecond
+
+	rec := postChat(t, h, `{"model":"test/silent","stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if got := strings.Join(p.sent, ","); got != "silent,alive" {
+		t.Fatalf("the request went to %q, want \"silent,alive\"", got)
 	}
 }
 

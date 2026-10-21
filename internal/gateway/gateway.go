@@ -604,6 +604,37 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Pro
 			wd.stop()
 			cause := wd.fired()
 
+			// A model that took the connection and then never sent its headers is
+			// as unusable as one whose host is out, and the two were measured in
+			// the same outage: while `big-pickle` held the request for the whole
+			// budget, `glm-5.3-flash-free` answered in 818ms and three more models
+			// in five to nine seconds. So a move is tried BEFORE the second
+			// silence budget — waiting it out on the same model spends the
+			// client's minute on the one model that has already proved quiet.
+			//
+			// The repeat below stays for the case this one cannot serve: nowhere
+			// to move to, or the move budget spent.
+			if cause == errFirstEvent && switches < modelFallbacks {
+				next, rebuilt, moveErr := h.moveTo(r.Context(), p, &req, model, triedModels, switches)
+				if moveErr != nil {
+					writeError(w, http.StatusInternalServerError, "gateway error", moveErr.Error())
+					h.recordAbort(model.ID, address, h.fingerprint(key))
+					return
+				}
+				if next.ID != "" {
+					// Silence is not a refusal: the provider answered nothing at
+					// all, and the counters say so.
+					h.recordAbort(model.ID, address, h.fingerprint(key))
+					model, prepared = next, rebuilt
+					firstEvent = Timeout(prepared.FirstEventTimeout, h.FirstEventTimeout)
+					idle = Timeout(prepared.IdleTimeout, h.IdleTimeout)
+					switches++
+					connection = 1
+					attempt = 1
+					continue
+				}
+			}
+
 			// A retry is worth the time when the fault was in the PATH rather
 			// than in the provider's answer. Two shapes qualify: a failure on the
 			// way there, and a stream whose headers never arrived — the second is
@@ -721,27 +752,22 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Pro
 		// ask about the same request and the answer would be the same: no key and
 		// no delay restores a model that cannot reach its own host.
 		if failure.UpstreamUnavailable && switches < modelFallbacks {
-			if next, ok := h.otherModel(r.Context(), p, triedModels); ok {
-				h.warn("provider %q: model %q is unavailable upstream, moving to %q",
-					p.ID(), model.ID, next.ID)
+			next, rebuilt, moveErr := h.moveTo(r.Context(), p, &req, model, triedModels, switches)
+			if moveErr != nil {
+				writeError(w, http.StatusInternalServerError, "gateway error", moveErr.Error())
+				h.recordAbort(model.ID, address, h.fingerprint(key))
+				return
+			}
+			if next.ID != "" {
 				// The refused attempt happened, and the counters are about
 				// attempts.
 				h.recordRefusal(model.ID, address, h.fingerprint(key))
-				triedModels[next.ID] = true
-				switches++
-				model = next
-				req.Model = next
-				prepared, err = p.Build(req)
-				if err != nil {
-					h.warn("provider %q: assembling the request: %v", p.ID(), err)
-					writeError(w, http.StatusInternalServerError, "gateway error", err.Error())
-					h.recordAbort(model.ID, address, h.fingerprint(key))
-					return
-				}
+				model, prepared = next, rebuilt
 				// The budgets belong to the model, so the ones of the refused
 				// attempt do not carry over to this one.
 				firstEvent = Timeout(prepared.FirstEventTimeout, h.FirstEventTimeout)
 				idle = Timeout(prepared.IdleTimeout, h.IdleTimeout)
+				switches++
 				attempt = 1
 				continue
 			}
@@ -793,22 +819,64 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Pro
 	}
 }
 
+// moveTo rebuilds the request for another free model of the same provider, and
+// reports an empty Model when there is nowhere to move to.
+//
+// The reason is not a preference for one model over another: the model that
+// refused or stayed silent cannot serve THIS request, and a provider serves its
+// free models from separate endpoints, so another model is a different endpoint.
+// The move budget is the caller's, because the caller is the one that knows how
+// many moves the client has already waited through.
+func (h *Handler) moveTo(ctx context.Context, p provider.Provider, req *provider.Request, from provider.Model, tried map[string]bool, switches int) (provider.Model, provider.Prepared, error) {
+	if switches >= modelFallbacks {
+		return provider.Model{}, provider.Prepared{}, nil
+	}
+	next, ok := h.otherModel(ctx, p, tried, from)
+	if !ok {
+		return provider.Model{}, provider.Prepared{}, nil
+	}
+	h.warn("provider %q: model %q cannot answer, moving to %q", p.ID(), from.ID, next.ID)
+
+	tried[next.ID] = true
+	req.Model = next
+	prepared, err := p.Build(*req)
+	if err != nil {
+		h.warn("provider %q: assembling the request: %v", p.ID(), err)
+		return provider.Model{}, provider.Prepared{}, err
+	}
+	return next, prepared, nil
+}
+
 // otherModel picks a model to move the request to when the one it asked for
 // cannot answer at all.
 //
 // Free models only: the router exists to spend the free lane, and falling over
 // to a paid model would turn a refusal into a bill the client never agreed to.
 // Models already tried are skipped, so a failure that covers several of them
-// cannot cycle, and the catalog order is kept rather than sorted: it is the
-// provider's own statement of what it offers, and second-guessing it here would
-// be a preference this package has no evidence for.
-func (h *Handler) otherModel(ctx context.Context, p provider.Provider, tried map[string]bool) (provider.Model, bool) {
+// cannot cycle.
+//
+// The scan starts AFTER the model that failed rather than at the head of the
+// catalog. Measured: with the scan from the head, every request in the outage
+// landed on the first entry of the catalog, which was itself quiet, and the rest
+// of a healthy catalog was never reached. Continuing down the list from where the
+// request already is keeps the walk going instead of returning to a model that
+// just failed to answer.
+func (h *Handler) otherModel(ctx context.Context, p provider.Provider, tried map[string]bool, after provider.Model) (provider.Model, bool) {
 	models, err := p.Models(ctx)
 	if err != nil {
 		h.warn("provider %q: the catalog is unavailable, no fallback: %v", p.ID(), err)
 		return provider.Model{}, false
 	}
-	for _, m := range models {
+
+	start := 0
+	for i, m := range models {
+		if m.ID == after.ID {
+			start = i + 1
+			break
+		}
+	}
+	for i := 0; i < len(models); i++ {
+		m := models[(start+i)%len(models)]
 		if tried[m.ID] || !m.Free {
 			continue
 		}
