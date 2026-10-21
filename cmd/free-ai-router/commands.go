@@ -111,6 +111,8 @@ func cmdConfig(args []string) error {
 			"credential_source":      cfg.Credential.From,
 			"key_rotation":           cfg.KeyRotation.Val,
 			"key_rotation_source":    cfg.KeyRotation.From,
+			"model_fallback":         cfg.ModelFallback.Val,
+			"model_fallback_source":  cfg.ModelFallback.From,
 			"family":                 cfg.Family.Val,
 			"family_source":          cfg.Family.From,
 			"first_event_timeout":    cfg.FirstEventTimeout.Val.String(),

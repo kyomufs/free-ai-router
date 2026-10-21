@@ -155,6 +155,10 @@ type Config struct {
 	// around; the second is KeyRotation. A pair of them names one mechanism, and
 	// because both can be set per provider as well, two providers in one process
 	// can be worked around differently.
+	//
+	// ModelFallback is a third axis of the same family and the only one that does
+	// not concern the credential: it is about which MODEL answers, not about what
+	// is presented to reach one.
 	Credential Value[string]
 
 	// KeyRotation — whether to spend the pool on a refusal that names the key.
@@ -162,6 +166,16 @@ type Config struct {
 	// Inert under CredentialAnonymous: with no credential sent there is nothing
 	// to rotate, and a rejection is attributed to the address instead.
 	KeyRotation Value[string]
+
+	// ModelFallback — whether a model that cannot answer at all is replaced by
+	// another free model of the same provider.
+	//
+	// Off by default. The substitution is invisible in the request: the client
+	// names one model and is answered by another. That is what a client wants
+	// when it only needs any working model, and the opposite of what a client
+	// wants when it chose the model on purpose, so it is a decision and not a
+	// safety net.
+	ModelFallback Value[string]
 
 	// --- transport ---------------------------------------------------------
 
@@ -345,6 +359,29 @@ func RotationValues() []string {
 	return []string{RotationOn, RotationOff}
 }
 
+// The model fallback axis — whether a model that cannot answer at all is
+// replaced by another free model of the same provider.
+//
+// It is a separate axis rather than a fixed behaviour because the substitution is
+// invisible in the request: the client names one model and is answered by
+// another, which is fine for a client that only wants an answer and wrong for one
+// that picked the model on purpose.
+const (
+	// FallbackOn — move the request to another free model when the one it asked
+	// for cannot serve it.
+	FallbackOn = "on"
+	// FallbackOff — answer with the model the client named, or not at all.
+	//
+	// The default: the request says which model, and honouring that is the
+	// smaller surprise.
+	FallbackOff = "off"
+)
+
+// FallbackValues returns the allowed values of the model fallback axis.
+func FallbackValues() []string {
+	return []string{FallbackOn, FallbackOff}
+}
+
 // The address family axis — which address the traffic leaves from.
 const (
 	// FamilyAuto — let the system pick, in the order the resolver returns.
@@ -379,6 +416,14 @@ const (
 	// inert under CredentialAnonymous, where there is nothing to rotate.
 	DefaultKeyRotation = RotationOn
 
+	// DefaultModelFallback is off.
+	//
+	// Moving the request to another model answers it with a different model than
+	// the one named. That is a surprise to a client that chose its model on
+	// purpose, and only a convenience to one that did not care — so the default
+	// honours the name, and the convenience has to be asked for.
+	DefaultModelFallback = FallbackOff
+
 	// DefaultFamily is auto.
 	DefaultFamily = FamilyAuto
 )
@@ -396,6 +441,7 @@ func Default() *Config {
 	c.Upstream.Set(DefaultUpstream, SourceDefault)
 	c.Credential.Set(DefaultCredential, SourceDefault)
 	c.KeyRotation.Set(DefaultKeyRotation, SourceDefault)
+	c.ModelFallback.Set(DefaultModelFallback, SourceDefault)
 	c.Family.Set(DefaultFamily, SourceDefault)
 	c.FirstEventTimeout.Set(DefaultFirstEventTimeout, SourceDefault)
 	c.IdleTimeout.Set(DefaultIdleTimeout, SourceDefault)
@@ -484,6 +530,7 @@ type fileShape struct {
 	Upstream             *string                   `json:"upstream"`
 	Credential           *string                   `json:"credential"`
 	KeyRotation          *string                   `json:"key_rotation"`
+	ModelFallback        *string                   `json:"model_fallback"`
 	Family               *string                   `json:"family"`
 	FirstEventTimeout    *string                   `json:"first_event_timeout"`
 	IdleTimeout          *string                   `json:"idle_timeout"`
@@ -539,6 +586,9 @@ func (c *Config) applyFile(path string) error {
 	if shape.KeyRotation != nil {
 		c.KeyRotation.Set(*shape.KeyRotation, SourceFile)
 	}
+	if shape.ModelFallback != nil {
+		c.ModelFallback.Set(*shape.ModelFallback, SourceFile)
+	}
 	if shape.Family != nil {
 		c.Family.Set(*shape.Family, SourceFile)
 	}
@@ -580,11 +630,13 @@ const (
 	EnvToken     = "FREE_AI_ROUTER_TOKEN"
 	EnvTransport = "FREE_AI_ROUTER_TRANSPORT"
 	EnvUpstream  = "FREE_AI_ROUTER_UPSTREAM"
-	// EnvCredential, EnvRotation and EnvFamily are the two mechanism axes and
-	// the addressing axis.
-	EnvCredential = "FREE_AI_ROUTER_CREDENTIAL"
-	EnvRotation   = "FREE_AI_ROUTER_KEY_ROTATION"
-	EnvFamily     = "FREE_AI_ROUTER_FAMILY"
+	// EnvCredential and EnvRotation are the two halves of one mechanism,
+	// EnvModelFallback is the model axis of the same kind, EnvFamily is the
+	// addressing axis.
+	EnvCredential    = "FREE_AI_ROUTER_CREDENTIAL"
+	EnvRotation      = "FREE_AI_ROUTER_KEY_ROTATION"
+	EnvFamily        = "FREE_AI_ROUTER_FAMILY"
+	EnvModelFallback = "FREE_AI_ROUTER_MODEL_FALLBACK"
 	// The timeout variables. They exist so that every setting the file has can
 	// also be set without a file — the daemon has to be testable on a machine
 	// where the configuration belongs to something else.
@@ -618,6 +670,7 @@ func (c *Config) applyEnv() error {
 		{EnvCredential, &c.Credential},
 		{EnvRotation, &c.KeyRotation},
 		{EnvFamily, &c.Family},
+		{EnvModelFallback, &c.ModelFallback},
 	} {
 		if v := strings.TrimSpace(os.Getenv(e.name)); v != "" {
 			e.dst.Set(v, SourceEnv)
@@ -690,14 +743,15 @@ func ResolvePaths(base Paths, ov PathOverrides) Paths {
 // several are adjacent strings, and a mis-ordered call would compile and quietly
 // set the wrong axis.
 type FlagValues struct {
-	Mode       string
-	Listen     string
-	Token      string
-	Transport  string
-	Upstream   string
-	Credential string
-	Rotation   string
-	Family     string
+	Mode          string
+	Listen        string
+	Token         string
+	Transport     string
+	Upstream      string
+	Credential    string
+	Rotation      string
+	Family        string
+	ModelFallback string
 
 	// The timeouts arrive as strings, because that is what a command line
 	// carries. Parsing them here keeps the caller from having to know the
@@ -724,6 +778,7 @@ func (c *Config) ApplyFlags(f FlagValues) error {
 		{f.Credential, &c.Credential},
 		{f.Rotation, &c.KeyRotation},
 		{f.Family, &c.Family},
+		{f.ModelFallback, &c.ModelFallback},
 	} {
 		if a.val != "" {
 			a.dst.Set(a.val, SourceFlag)
@@ -777,6 +832,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := checkEnum("key_rotation", c.KeyRotation.Val, RotationValues()); err != nil {
+		return err
+	}
+	if err := checkEnum("model_fallback", c.ModelFallback.Val, FallbackValues()); err != nil {
 		return err
 	}
 	if err := checkEnum("family", c.Family.Val, FamilyValues()); err != nil {

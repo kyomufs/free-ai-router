@@ -109,6 +109,7 @@ func TestUnavailableModelMovesTheRequestToAnother(t *testing.T) {
 		}
 		return http.StatusOK, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n"
 	})
+	h.ModelFallback = true
 
 	rec := postChat(t, h, `{"model":"test/dead","messages":[{"role":"user","content":"hello"}]}`)
 
@@ -152,6 +153,7 @@ func TestFallbackIsBoundedAndNeverCycles(t *testing.T) {
 	h, _ := newFallbackHandler(t, p, func(string) (int, string) {
 		return http.StatusServiceUnavailable, unavailableBody
 	})
+	h.ModelFallback = true
 
 	rec := postChat(t, h, `{"model":"test/a","messages":[{"role":"user","content":"hello"}]}`)
 
@@ -159,8 +161,8 @@ func TestFallbackIsBoundedAndNeverCycles(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rec.Code)
 	}
-	if len(p.sent) != modelFallbacks+1 {
-		t.Fatalf("sent %d times (%v), want %d", len(p.sent), p.sent, modelFallbacks+1)
+	if len(p.sent) != modelFallbackLimit+1 {
+		t.Fatalf("sent %d times (%v), want %d", len(p.sent), p.sent, modelFallbackLimit+1)
 	}
 	seen := map[string]bool{}
 	for _, id := range p.sent {
@@ -198,6 +200,7 @@ func TestSilentModelMovesTheRequestToAnother(t *testing.T) {
 		return http.StatusOK, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n"
 	})
 	h.FirstEventTimeout = 50 * time.Millisecond
+	h.ModelFallback = true
 
 	rec := postChat(t, h, `{"model":"test/silent","stream":true,"messages":[{"role":"user","content":"hello"}]}`)
 
@@ -232,5 +235,74 @@ func TestUnavailableBodyIsNotBlamedOnTheKey(t *testing.T) {
 	}
 	if rec.Body.String() != unavailableBody {
 		t.Fatalf("the body was repackaged: %s", rec.Body.String())
+	}
+}
+
+// TestFallbackIsOffUnlessAsked — the default honours the model the client named.
+//
+// The move answers a request with a model other than the one in it, which is a
+// different contract from the one the client signed: an OpenAI client reads the
+// `model` field of the answer and a tool that pinned a model gets a reply from
+// another. So the switch is off unless the operator turned it on, and with it off
+// the refusal reaches the client unchanged after exactly one attempt.
+func TestFallbackIsOffUnlessAsked(t *testing.T) {
+	p := &modelStub{
+		models: []provider.Model{
+			{ID: "dead", Free: true},
+			{ID: "alive", Free: true},
+		},
+	}
+
+	h, _ := newFallbackHandler(t, p, func(model string) (int, string) {
+		if model == "dead" {
+			return http.StatusServiceUnavailable, unavailableBody
+		}
+		return http.StatusOK, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n"
+	})
+	// Deliberately not switched on: this is the shipped default.
+
+	rec := postChat(t, h, `{"model":"test/dead","messages":[{"role":"user","content":"hello"}]}`)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if got := strings.Join(p.sent, ","); got != "dead" {
+		t.Fatalf("the request went to %q, want \"dead\" only", got)
+	}
+	if rec.Body.String() != unavailableBody {
+		t.Fatalf("the body was repackaged: %s", rec.Body.String())
+	}
+}
+
+// TestSilenceIsNotHandedOnUnlessAsked — the same switch covers the silent model.
+//
+// One switch for one behaviour: an operator who turned the substitution off does
+// not want it back through the other door, and a request that is answered by a
+// model nobody named is the same surprise whichever way it was triggered.
+func TestSilenceIsNotHandedOnUnlessAsked(t *testing.T) {
+	p := &modelStub{
+		models: []provider.Model{
+			{ID: "silent", Free: true},
+			{ID: "alive", Free: true},
+		},
+	}
+
+	h, _ := newFallbackHandler(t, p, func(model string) (int, string) {
+		if model == "silent" {
+			time.Sleep(300 * time.Millisecond)
+		}
+		return http.StatusOK, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n"
+	})
+	h.FirstEventTimeout = 50 * time.Millisecond
+
+	rec := postChat(t, h, `{"model":"test/silent","stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+
+	if rec.Code != http.StatusGatewayTimeout && rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want a timeout or a refusal: %s", rec.Code, rec.Body.String())
+	}
+	for _, id := range p.sent {
+		if id != "silent" {
+			t.Fatalf("the request also went to %q: %v", id, p.sent)
+		}
 	}
 }

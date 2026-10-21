@@ -124,6 +124,16 @@ type Handler struct {
 	// client waits with it.
 	FirstEventTimeout time.Duration
 	IdleTimeout       time.Duration
+
+	// ModelFallback allows the request to be moved to another free model of the
+	// same provider when the model it asked for cannot answer at all: the host
+	// is out, or the stream never sent its headers.
+	//
+	// OFF unless the operator switches it on. The substitution is invisible in
+	// the request — the client asked for one model and would be answered by
+	// another — so it is a decision, not a safety net, and the default is the
+	// answer the client asked for or none.
+	ModelFallback bool
 }
 
 // RoundTripperFactory hands out the transport for requests.
@@ -614,7 +624,7 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Pro
 			//
 			// The repeat below stays for the case this one cannot serve: nowhere
 			// to move to, or the move budget spent.
-			if cause == errFirstEvent && switches < modelFallbacks {
+			if cause == errFirstEvent && h.ModelFallback && switches < modelFallbackLimit {
 				next, rebuilt, moveErr := h.moveTo(r.Context(), p, &req, model, triedModels, switches)
 				if moveErr != nil {
 					writeError(w, http.StatusInternalServerError, "gateway error", moveErr.Error())
@@ -751,7 +761,11 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Pro
 		// This goes BEFORE the rotation and the repeat below, because both of them
 		// ask about the same request and the answer would be the same: no key and
 		// no delay restores a model that cannot reach its own host.
-		if failure.UpstreamUnavailable && switches < modelFallbacks {
+		//
+		// Only under model_fallback=on. The substitution answers a request with a
+		// different model than the one named, so it is the operator's decision and
+		// not a safety net; with the axis off the refusal is the client's.
+		if failure.UpstreamUnavailable && h.ModelFallback && switches < modelFallbackLimit {
 			next, rebuilt, moveErr := h.moveTo(r.Context(), p, &req, model, triedModels, switches)
 			if moveErr != nil {
 				writeError(w, http.StatusInternalServerError, "gateway error", moveErr.Error())
@@ -828,7 +842,7 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Pro
 // The move budget is the caller's, because the caller is the one that knows how
 // many moves the client has already waited through.
 func (h *Handler) moveTo(ctx context.Context, p provider.Provider, req *provider.Request, from provider.Model, tried map[string]bool, switches int) (provider.Model, provider.Prepared, error) {
-	if switches >= modelFallbacks {
+	if !h.ModelFallback || switches >= modelFallbackLimit {
 		return provider.Model{}, provider.Prepared{}, nil
 	}
 	next, ok := h.otherModel(ctx, p, tried, from)

@@ -237,23 +237,31 @@ MSK.
 
 ### What the gateway does about it
 
-The request moves to another FREE model of the same provider, up to
-`modelFallbacks = 2` moves, never to one already tried and never to a paid one.
-The reason is measured: inside the outage `glm-5.3-flash-free`,
-`mimo-v2.6-flash-free`, `minimax-m3.1-flash-free` and
+**Nothing, by default.** The refusal above is the client's, verbatim: the client
+named a model, and answering it with a different one is a different contract than
+the one it asked for. The model field of an OpenAI answer is what a tool reads to
+know who replied.
+
+The move exists, off by default, under the `model_fallback` axis (`on | off`;
+`--model-fallback`, `FREE_AI_ROUTER_MODEL_FALLBACK`, `"model_fallback"` in the
+file). An operator who prefers any answer to the absence of the right one's can
+turn it on, and then the request moves to another FREE model of the same
+provider, up to `modelFallbacks = 2` moves, never to one already tried and never
+to a paid one. The reason the move is worth having at all is measured: inside the
+outage `glm-5.3-flash-free`, `mimo-v2.6-flash-free`, `minimax-m3.1-flash-free` and
 `longcat-2.5-preview-free` all answered `200` in the same second in which
 `deepseek-v4.1-flash-free` answered with this body. Repeating the same request on
 the same model cannot help — the endpoint, not the request, is what is out — and
 the repeat is only the client's time.
 
 The same move is made when the model takes the connection and never sends its
-headers. Measured 2026-10-21 03:36–03:42 MSK: the refusal on
-`deepseek-v4.1-flash-free` moved the request to `big-pickle`, which held it for the
-whole first-event budget and then for a second one, and the client got a `504`
-— while `glm-5.3-flash-free` answered in 818ms, `mimo-v2.6-flash-free` in 5.3s,
-`beam-free` in 6.2s and `longcat-2.5-preview-free` in 9.3s. So the move is tried
-before the second silence budget, and the silence is counted as an abort of the
-model that stayed quiet, not as a refusal: nothing was refused.
+headers — again only when the axis is on. Measured 2026-10-21 03:36–03:42 MSK: the
+refusal on `deepseek-v4.1-flash-free` moved the request to `big-pickle`, which
+held it for the whole first-event budget and then for a second one, and the client
+got a `504` — while `glm-5.3-flash-free` answered in 818ms, `mimo-v2.6-flash-free`
+in 5.3s, `beam-free` in 6.2s and `longcat-2.5-preview-free` in 9.3s. So the move is
+tried before the second silence budget, and the silence is counted as an abort of
+the model that stayed quiet, not as a refusal: nothing was refused.
 
 Each refused attempt is still counted as a refusal of the model that refused, and
 the answer is counted against the model that gave it: the counters describe

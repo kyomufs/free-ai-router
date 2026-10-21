@@ -153,6 +153,7 @@ func TestSettableValuesComeFromTheConfiguration(t *testing.T) {
 		{"mode", "mode", config.ModeValues()},
 		{"cred", "credential", config.CredentialValues()},
 		{"rotate", "key_rotation", config.RotationValues()},
+		{"fallback", "model_fallback", config.FallbackValues()},
 		{"family", "family", config.FamilyValues()},
 	}
 	if len(cases) != len(settableAxes()) {

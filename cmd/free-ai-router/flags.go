@@ -31,6 +31,10 @@ type flags struct {
 	rotation   string
 	family     string
 
+	// fallback is the model axis: whether a model that cannot answer at all is
+	// replaced by another free model of the same provider.
+	fallback string
+
 	// The timeouts, as written on the command line. They are parsed by the
 	// configuration, which is where the duration format is known.
 	firstEventTimeout    string
@@ -73,6 +77,7 @@ func parseFlags(args []string) (*flags, error) {
 	fs.StringVar(&f.upstream, "upstream", "", "default address for providers")
 	fs.StringVar(&f.credential, "credential", "", "what to present: anonymous | account")
 	fs.StringVar(&f.rotation, "rotate", "", "rotate the key on a refusal: on | off")
+	fs.StringVar(&f.fallback, "model-fallback", "", "answer with another free model when the one named cannot: on | off")
 	fs.StringVar(&f.family, "family", "", "address family: auto | v4 | v6")
 	fs.StringVar(&f.firstEventTimeout, "first-event-timeout", "", "wait for the first event")
 	fs.StringVar(&f.idleTimeout, "idle-timeout", "", "allowed silence between events")
@@ -107,6 +112,7 @@ func (f *flags) values() config.FlagValues {
 		Credential:           f.credential,
 		Rotation:             f.rotation,
 		Family:               f.family,
+		ModelFallback:        f.fallback,
 		FirstEventTimeout:    f.firstEventTimeout,
 		IdleTimeout:          f.idleTimeout,
 		ReasoningIdleTimeout: f.reasoningIdleTimeout,

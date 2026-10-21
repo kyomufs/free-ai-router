@@ -347,6 +347,7 @@ allowed: anonymous | account
 | `mode` | `local` \| `server` | loopback with no token check, or a reachable listener where the token is mandatory |
 | `credential` | `anonymous` \| `account` | whether a key is presented at all (counted against your address) or one is taken from the pool (counted against your account) |
 | `key_rotation` | `on` \| `off` | whether a refusal that names the key spends the next key from the pool |
+| `model_fallback` | `on` \| `off` | whether a model that cannot answer at all is replaced by another free model of the same provider — **off by default**, because the answer then names a model other than the one asked for |
 | `family` | `auto` \| `v4` \| `v6` | the address family the traffic leaves from |
 | `transport` | `direct` | how requests leave the machine |
 

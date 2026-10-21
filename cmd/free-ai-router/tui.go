@@ -80,6 +80,7 @@ func (s *tuiSource) Observe(day string) (tui.Observation, error) {
 		{Name: "upstream", Value: cfg.Upstream.Val, Source: string(cfg.Upstream.From)},
 		{Name: "credential", Value: cfg.Credential.Val, Source: string(cfg.Credential.From)},
 		{Name: "key_rotation", Value: cfg.KeyRotation.Val, Source: string(cfg.KeyRotation.From)},
+		{Name: "model_fallback", Value: cfg.ModelFallback.Val, Source: string(cfg.ModelFallback.From)},
 		{Name: "family", Value: cfg.Family.Val, Source: string(cfg.Family.From)},
 	}
 

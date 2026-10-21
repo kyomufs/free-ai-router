@@ -227,6 +227,18 @@ func Catalog(r Registries) []Axis {
 			Description:  "whether to spend the pool on a refusal that names the key; ignored under the anonymous credential, where no key is presented and there is nothing to replace",
 		},
 		{
+			Name:         "model_fallback",
+			Kind:         KindEnum,
+			Values:       config.FallbackValues(),
+			Default:      config.DefaultModelFallback,
+			Scope:        ScopeGlobal,
+			Flag:         "model-fallback",
+			Env:          config.EnvModelFallback,
+			ConfigKey:    "model_fallback",
+			InConfigFile: true,
+			Description:  "whether a model that cannot answer at all is replaced by another free model of the same provider; the answer then names a model other than the one asked for, so it is off by default",
+		},
+		{
 			Name:         "config",
 			Kind:         KindPath,
 			Default:      "",

@@ -34,6 +34,7 @@ func printEffectiveConfig(cfg *config.Config) error {
 		{"family", cfg.Family.Val, cfg.Family.From},
 		{"credential", cfg.Credential.Val, cfg.Credential.From},
 		{"key_rotation", cfg.KeyRotation.Val, cfg.KeyRotation.From},
+		{"model_fallback", cfg.ModelFallback.Val, cfg.ModelFallback.From},
 		{"first_event_timeout", cfg.FirstEventTimeout.Val.String(), cfg.FirstEventTimeout.From},
 		{"idle_timeout", cfg.IdleTimeout.Val.String(), cfg.IdleTimeout.From},
 		{"reasoning_idle_timeout", cfg.ReasoningIdleTimeout.Val.String(), cfg.ReasoningIdleTimeout.From},
@@ -158,6 +159,7 @@ One axis at a time, kept in the file:
   free-ai-router mode                     [local|server]      deployment form
   free-ai-router cred | credential        [anonymous|account] what is presented to the provider
   free-ai-router rotate | key_rotation    [on|off]            spend the pool on a refusal
+  free-ai-router fallback | model_fallback [on|off]           answer with another free model
   free-ai-router family                   [auto|v4|v6]        address family the traffic leaves from
   free-ai-router <axis>                                       without a value: what is in force, and from where
 
@@ -170,6 +172,7 @@ Startup flags:
   --family                auto | v4 | v6      address family
   --credential            anonymous | account  what is presented to the provider
   --rotate                on | off            spend the pool on a refusal naming the key
+  --model-fallback        on | off            answer with another free model
   --first-event-timeout   DURATION            wait for the first event
   --idle-timeout          DURATION            allowed silence between events
   --reasoning-idle-timeout DURATION           silence allowed while reasoning
