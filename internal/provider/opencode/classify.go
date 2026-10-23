@@ -144,6 +144,9 @@ func (p *Provider) Classify(resp *http.Response, body []byte) provider.Failure {
 	if resp.StatusCode == http.StatusForbidden && freeLaneRefusal.MatchString(lower) {
 		f.KeyRejected = false
 		f.Retryable = false
+		// Reported as its own judgement: the pool transport promotes servers by
+		// it, and it is the only verdict a different exit address can change.
+		f.AddressRejected = true
 	}
 
 	// Is a repeat worth it?

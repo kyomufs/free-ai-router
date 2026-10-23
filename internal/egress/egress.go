@@ -501,28 +501,69 @@ func (r *Resolver) resolve(ctx context.Context, family string) (string, error) {
 		url = URLFor(family)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := ObserveRequest(ctx, url)
 	if err != nil {
 		return "", err
 	}
-	// A diagnostic, not a model call: the caching layer and any intermediary must
-	// pass it through, or the answer describes the intermediary.
-	req.Header.Set("cache-control", "no-store")
 
-	client := &http.Client{
-		Transport: rt,
-		// No redirects: the address that answered is the address we asked.
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-
+	client := observeClient(rt)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	return ReadAddress(resp)
+}
+
+// Observe asks the echo service for the address the request came from.
+//
+// Exported because the pool transport measures the same thing through a tunnel:
+// the address the provider will see as the source is exactly this answer.
+func Observe(ctx context.Context, rt http.RoundTripper, target string) (string, error) {
+	if rt == nil {
+		return "", fmt.Errorf("no transport")
+	}
+	if target == "" {
+		target = DefaultURL
+	}
+	req, err := ObserveRequest(ctx, target)
+	if err != nil {
+		return "", err
+	}
+	resp, err := observeClient(rt).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return ReadAddress(resp)
+}
+
+// ObserveRequest builds the echo request. The no-store header is there because
+// this is a diagnostic, not a model call: the caching layer and any intermediary
+// must pass it through, or the answer describes the intermediary.
+func ObserveRequest(ctx context.Context, target string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("cache-control", "no-store")
+	return req, nil
+}
+
+// observeClient refuses redirects: the address that answered is the address we
+// asked.
+func observeClient(rt http.RoundTripper) *http.Client {
+	return &http.Client{
+		Transport: rt,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+// ReadAddress extracts the address from an echo response.
+func ReadAddress(resp *http.Response) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("echo answered %s", resp.Status)
 	}

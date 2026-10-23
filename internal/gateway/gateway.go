@@ -1100,46 +1100,10 @@ func streamRequested(body map[string]any) bool {
 //
 // The provider assembles the headers but does NOT know which key was issued for
 // this request: the keys are issued by the shared mechanism. That is why the
-// header is set here.
+// header is set here — and the decision of where and in what shape it goes is the
+// provider's, so the work itself is delegated.
 func (h *Handler) applyCredential(p provider.Provider, prepared provider.Prepared, key string) {
-	if prepared.Headers == nil {
-		return
-	}
-	value := credentialValue(p, key)
-	if value == "" {
-		return
-	}
-	// The header name and the prefix are part of the provider's contract, so
-	// they are taken from it rather than set here.
-	name, prefix := credentialShape(p)
-	prepared.Headers.Set(name, prefix+value)
-}
-
-// credentialScheme describes where the provider expects the credentials.
-type credentialScheme interface {
-	Credential(key string) string
-}
-
-// credentialValue asks the provider what to put in the header.
-func credentialValue(p provider.Provider, key string) string {
-	if cs, ok := p.(credentialScheme); ok {
-		return cs.Credential(key)
-	}
-	if key == "" {
-		return "public"
-	}
-	return key
-}
-
-// credentialShape returns the header name and the value prefix.
-//
-// A provider that cares about this reports the shape itself; the rest get the
-// standard one.
-func credentialShape(p provider.Provider) (name, prefix string) {
-	if shaped, ok := p.(interface{ CredentialHeader() (string, string) }); ok {
-		return shaped.CredentialHeader()
-	}
-	return "authorization", "Bearer "
+	provider.ApplyCredential(p, prepared, key)
 }
 
 // warn writes a warning to the log, if there is one.

@@ -528,3 +528,14 @@ Live check, which is the actual acceptance:
 - **Quota cost**: one minimal completion per candidate, 60 per evaluation, three
   evaluations per day. Small but not zero, and it is spent on the operator's
   behalf.
+
+## 18. One contract addition
+
+`provider.Failure` gains one boolean, `AddressRejected`. The pool's promotion
+criterion is "the provider refused this SOURCE ADDRESS", and today that judgement
+exists only inside the opencode classifier, reachable by the provider itself. The
+provider is the only party that can make that judgement — the same status carries
+different meanings at different services, which is the same argument the package
+already makes for `KeyRejected` and `Retryable`. The field is set where
+`freeLaneRefusal` matches and is inert for every other consumer, so the gateway
+behaviour is unchanged.
