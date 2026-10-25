@@ -434,40 +434,82 @@ func TestStreamIsAlwaysRequested(t *testing.T) {
 	}
 }
 
-// TestSystemPromptIsPureFunctionOfToolNames is a property from the plan: the
-// prompt is a pure function of the list of active tool names.
-func TestSystemPromptIsPureFunctionOfToolNames(t *testing.T) {
-	base := RenderSystemPrompt(nil)
-	if strings.Contains(base, "Prefer dedicated tools over shell commands") {
-		t.Fatal("guidance about shell leaked into a prompt with no shell tool")
+// TestSystemPromptCarriesTheCanonicalClient — the free lane recognises the
+// client by the canonical prompt and the environment block that follows it.
+//
+// MEASURED on 2026-10-25: the text alone, the prompt this package used to
+// render, and a generic system message were answered 429 FreeUsageLimitError;
+// this composition was answered 200. The values in the block are not checked.
+func TestSystemPromptCarriesTheCanonicalClient(t *testing.T) {
+	p := newTestProvider(t)
+	model := provider.Model{ID: "mimo-v2.6-flash-free"}
+
+	got := p.systemPrompt(model, "")
+	if !strings.HasPrefix(got, "You are opencode, an interactive CLI tool") {
+		t.Fatalf("the prompt does not start with the canonical text: %q", got[:80])
 	}
-	if !strings.Contains(base, "${OPENCODE_TOOL_GUIDANCE}") && !strings.Contains(base, "# Harness") {
-		t.Fatal("the template did not render at all")
+	if strings.Contains(got, "You are an AI agent running in OpenCode") {
+		t.Fatal("the superseded prompt is still in use")
+	}
+	wantModel := "\nYou are powered by the model named mimo-v2.6-flash-free. " +
+		"The exact model ID is opencode/mimo-v2.6-flash-free\n"
+	if !strings.Contains(got, wantModel) {
+		t.Fatalf("the model line is missing:\n%s", wantModel)
+	}
+	if !strings.Contains(got, "Here is some useful information about the environment you are running in:\n<env>\n") {
+		t.Fatal("the environment block is missing")
+	}
+	if !strings.Contains(got, "\n  Platform: ") || !strings.HasSuffix(got, "</env>") {
+		t.Fatal("the environment block is not closed")
+	}
+}
+
+// TestSystemPromptKeepsTheClientRules — the client's own system part is not
+// dropped: it follows the canonical block, an order the lane admitted too.
+func TestSystemPromptKeepsTheClientRules(t *testing.T) {
+	p := newTestProvider(t)
+	got := p.systemPrompt(provider.Model{ID: "m"}, "HARNESS RULES")
+	if !strings.HasSuffix(got, "</env>\n\nHARNESS RULES") {
+		t.Fatal("the client rules are not kept after the canonical block")
+	}
+}
+
+// TestBuildBodyPutsTheRenderedSystemFirst — whatever the client sent as the
+// system part, the wire body starts with one rendered system message.
+func TestBuildBodyPutsTheRenderedSystemFirst(t *testing.T) {
+	p := newTestProvider(t)
+	prep, err := p.Build(provider.Request{
+		Model:    provider.Model{ID: "m"},
+		System:   "HARNESS RULES",
+		Messages: []provider.Message{{Role: "user", Text: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
 	}
 
-	withShell := RenderSystemPrompt([]string{"shell"})
-	if !strings.Contains(withShell, "Prefer dedicated tools over shell commands") {
-		t.Fatal("shell guidance missing when the shell tool is active")
+	var body struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
 	}
-
-	withAll := RenderSystemPrompt([]string{"shell", "write", "edit"})
-	for _, want := range []string{
-		"Prefer dedicated tools over shell commands",
-		"Use the write tool to create files",
-		"Use the edit tool for targeted changes",
-	} {
-		if !strings.Contains(withAll, want) {
-			t.Fatalf("guidance %q missing with all tools active", want)
-		}
+	if err := json.Unmarshal(prep.Body, &body); err != nil {
+		t.Fatalf("decode body: %v", err)
 	}
-
-	// Idempotence: the same input gives the same output.
-	if RenderSystemPrompt([]string{"shell", "write", "edit"}) != withAll {
-		t.Fatal("RenderSystemPrompt is not deterministic")
+	if len(body.Messages) != 2 {
+		t.Fatalf("messages = %d, want 2", len(body.Messages))
 	}
-	// The order of the names in the input does not affect the result.
-	if RenderSystemPrompt([]string{"edit", "write", "shell"}) != withAll {
-		t.Fatal("RenderSystemPrompt depends on the order of tool names")
+	if body.Messages[0].Role != "system" {
+		t.Fatalf("first message role = %q, want system", body.Messages[0].Role)
+	}
+	if !strings.HasPrefix(body.Messages[0].Content, "You are opencode, an interactive CLI tool") {
+		t.Fatal("the first message is not the canonical prompt")
+	}
+	if !strings.HasSuffix(body.Messages[0].Content, "\n\nHARNESS RULES") {
+		t.Fatal("the client's system part is missing from the first message")
+	}
+	if body.Messages[1].Role != "user" || body.Messages[1].Content != "hi" {
+		t.Fatalf("history was changed: %+v", body.Messages[1])
 	}
 }
 

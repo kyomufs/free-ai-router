@@ -1,7 +1,6 @@
 package opencode
 
 import (
-	"strings"
 	"time"
 
 	"free-ai-router/internal/provider"
@@ -46,9 +45,16 @@ const DefaultUserAgent = "opencode/1.19.2 ai-sdk/provider-utils/4.0.23 runtime/b
 
 // The free-lane admission conditions, measured one request at a time.
 //
-// A request is admitted when BOTH of these hold, and refused with 403
-// FreeTierError otherwise — the refusal arrives before a model is chosen, so it
-// says nothing about the account, the key or the quota:
+// The lane has two different refusals, and they mean different things:
+//
+//   - 403 FreeTierError arrives before a model is chosen. It is about the SHAPE
+//     of the request; the conditions below describe it.
+//   - 429 FreeUsageLimitError is the quota refusal. On the legacy lane it means
+//     the address has spent its free requests. On the client lane it is also
+//     what traffic that does not look like the client gets: such a request is
+//     routed to the exhausted legacy bucket instead of being refused with 403.
+//
+// The 403 conditions, measured on 2026-10-19:
 //
 //  1. The body is in the stream form: "stream": true. Everything else in the
 //     body can be subtracted (stream_options, max_tokens, temperature,
@@ -75,6 +81,30 @@ const DefaultUserAgent = "opencode/1.19.2 ai-sdk/provider-utils/4.0.23 runtime/b
 //     nothing of its own: a service that ignores these headers takes the
 //     client's values unchanged.
 //
+// The 429 conditions, measured on 2026-10-25. Each one flips 429/200 with
+// everything else held constant, including the body, the headers and the
+// address:
+//
+//  4. The TLS ClientHello must be the one Bun/BoringSSL sends. The real client
+//     is a Bun binary; its hello is admitted, while crypto/tls, curl/OpenSSL
+//     and uTLS with Chrome's hello are all answered 429. A hand-built hello
+//     that follows the captured Bun one is answered 200 (transport/bunhello.go).
+//
+//  5. The chat path must be /inference/openai/v1/chat/completions. The legacy
+//     /inference/v1/chat/completions is now the exhausted lane and is answered
+//     429 even with the client's own body. The model catalog stays on
+//     /inference/v1/models.
+//
+//  6. The system message must carry the reference client's canonical prompt
+//     (opencode v1.19.3, packages/opencode/src/session/prompt/default.txt)
+//     followed by the environment block the client appends. The canonical text
+//     alone, the superseded prompt this package used to render, and a generic
+//     system message are all answered 429; the text plus the block is answered
+//     200. The values in the block (directory, date) are not checked — a changed
+//     directory and date kept the 200 — and the client's own rules may follow
+//     the block. The provider therefore renders the prompt and keeps the
+//     client's part after it (prompt.go).
+//
 // Condition 1 is the one this proxy used to lose: a client that did not ask for
 // a stream was passed through with "stream": false and refused, which is exactly
 // the non-conforming traffic that gets an egress address flagged. Condition 2 is
@@ -87,24 +117,20 @@ const DefaultUserAgent = "opencode/1.19.2 ai-sdk/provider-utils/4.0.23 runtime/b
 // request shape can undo. That is why every condition here is enforced on our
 // side rather than left to the caller.
 //
-// The system prompt is not a condition of its own: with the tools present and
-// the session headers canonical, a request whose only message is the user's is
-// admitted. Whether the recognised prompt alone, with no tools, is still enough
-// was not re-measured after the session-header condition surfaced, and nothing
-// here relies on it.
-//
 // The User-Agent is not one of these conditions either — it is checked, but only
-// for "looks like an OpenCode build"; see DefaultUserAgent.
+// for "looks like an OpenCode build"; see DefaultUserAgent. The 1.19.2 string is
+// admitted.
 //
-// HOW OUR REQUEST COMPARES TO THE CLIENT'S OWN, captured 2026-10-19 by running
-// the installed client through a TLS-terminating proxy (mitmproxy, its CA in
-// NODE_EXTRA_CA_CERTS) and reading the request off the wire. The list is kept
-// because "the shape is close enough" is a claim that ages badly:
+// HOW OUR REQUEST COMPARES TO THE CLIENT'S OWN, captured on 2026-10-19 and
+// re-measured on 2026-10-25 by running the installed client through a
+// TLS-terminating proxy and reading the request off the wire:
 //
 //	field            the client                    this proxy
 //	---------------- ------------------------------ ------------------------------
 //	protocol         HTTP/1.1, ALPN "http/1.1"     HTTP/1.1 (transport/direct.go)
-//	path             /inference/openai/v1/chat/…   /inference/v1/chat/completions
+//	TLS hello        Bun/BoringSSL                 the captured Bun hello
+//	                                               (transport/bunhello.go)
+//	path             /inference/openai/v1/chat/…   the same
 //	headers          Content-Type, User-Agent,     the same set, the same spelling
 //	                 x-opencode-client,            (the custom names lowercase, as
 //	                 x-opencode-project,           the client writes them)
@@ -117,28 +143,24 @@ const DefaultUserAgent = "opencode/1.19.2 ai-sdk/provider-utils/4.0.23 runtime/b
 //	Accept-Encoding  gzip, deflate, br, zstd       gzip
 //	body             max_tokens, tool_choice also  only what the caller sent
 //	                 present
+//	system message   default.txt + env block       the same, then the client's
+//	                                               rules
 //
 // The differences that remain are deliberate or out of reach:
 //
-//   - The path is the vendor's other public route for the same handler; both are
-//     answered 200 with this shape, and the model list lives under the one used
-//     here.
-//   - The order is Go's: net/http writes Host first and sorts the rest. Matching
-//     the client's order needs a hand-written HTTP/1.1 writer, and the order is
-//     not decisive — curl, whose order differs from both, is admitted.
+//   - The header order is Go's: net/http writes Host first and sorts the rest.
+//     Matching the client's order needs a hand-written HTTP/1.1 writer, and the
+//     order is not decisive — curl, whose order differs from both, is admitted.
 //   - gzip alone, because a Go transport decodes only what it negotiated itself.
 //   - max_tokens and tool_choice are the caller's: this proxy is not the client
 //     and must not invent a token budget for it.
-//   - The TLS ClientHello cannot be matched from crypto/tls at all. Measured
-//     JA3: the client's runtime 8f1d483d7c5fba63a9170d6e4dd66f93, Go
-//     96458b3de39df5d47bc5c4a9f10f8f26, curl 0659743d0a8904909448456a6dfa4b06.
-//     On an open lane all three are admitted, so the fingerprint is not a
-//     condition today; closing it would take a hand-built ClientHello.
 //
 // The lesson of the same measurement, which is why the table is not a to-do
 // list: the SAME bytes from the same address were answered 403 at 21:23 and 200
-// at 21:28 with nothing changed. The verdict is not a function of the request.
-// No amount of shape fidelity removes a refusal the lane issues by address.
+// at 21:28 with nothing changed. The verdict is not a pure function of the
+// request: the address-level state matters too. The 429 conditions above were
+// measured afterwards, each against a fresh session, with the address in an
+// admitting state.
 
 // Stream budgets. The numbers are the contract's own: the client holds its own
 // timeouts, and a budget shorter than the client's would make the gateway break
@@ -210,71 +232,3 @@ const shellDescriptionTemplate = "Execute a shell command and return its output.
 	"Rely on automatic truncation unless filtering the output is more useful. " +
 	"Commands accept an optional timeout, background commands have no timeout by default. " +
 	"Background commands return immediately, and you will be notified when they complete."
-
-// systemPromptTemplate is the system prompt template with the tool guidance
-// substituted.
-//
-// The prompt is RENDERED rather than taken ready-made: the client assembles it
-// from the names of the active tools
-// (packages/core/src/session/system-prompt.ts), and the insertion depends on
-// what is available. Passing the client's prompt through as-is would give a
-// different shape, because the client has a different set of tools.
-const systemPromptTemplate = "You are an AI agent running in OpenCode, a coding agent harness. " +
-	"Help the user accomplish their goals using the tools you have available.\n" +
-	"\n" +
-	"# Harness\n" +
-	"- Responses are rendered as GitHub-flavored Markdown.\n" +
-	"- `<system-reminder>` blocks are harness instructions, not user-authored content. Read and follow them.\n" +
-	"- Prefer parallelizing independent tool calls.\n" +
-	"${OPENCODE_TOOL_GUIDANCE}\n" +
-	"\n" +
-	"# Communication\n" +
-	"- Use clear file paths when referring to files.\n" +
-	"- Keep responses clear and concise, and avoid unnecessary technical jargon.\n" +
-	"\n" +
-	"# Working in codebases\n" +
-	"- Keep changes consistent with the structure, naming, style, and patterns of the surrounding code.\n" +
-	"- Treat unfamiliar files or changes as potential user work and investigate before deleting or overwriting them.\n"
-
-// guidanceShell is the guidance added when the shell tool is available.
-const guidanceShell = "- Prefer dedicated tools over shell commands; fall back to the shell when a tool cannot do what you need.\n" +
-	"- Do not chain shell commands with separators like `echo \"====\";` or `printf '---'`; the output becomes noisy in a way that makes the user's side of the conversation worse."
-
-// guidanceWrite is the guidance for the write tool.
-const guidanceWrite = "- Use the write tool to create files or completely replace their content. " +
-	"Prefer using the edit tool for targeted changes."
-
-// guidanceEdit is the guidance for the edit tool.
-const guidanceEdit = "- Use the edit tool for targeted changes to existing text files. " +
-	"It replaces the exact text in `oldString` with `newString`, and the values must differ. " +
-	"By default, `oldString` must occur exactly once. If it occurs multiple times, include more " +
-	"surrounding context to make it unique or set `replaceAll` to true to replace every occurrence."
-
-// RenderSystemPrompt assembles the system prompt from the names of the active
-// tools.
-//
-// The function is exported because its result is a verifiable property: the
-// prompt is a pure function of the list of names, and that is testable without
-// the network.
-//
-// The guidance is added for the same three tools as on the client: shell, write,
-// edit. The insertion order matches the order of the checks in system-prompt.ts.
-func RenderSystemPrompt(toolNames []string) string {
-	has := make(map[string]bool, len(toolNames))
-	for _, name := range toolNames {
-		has[name] = true
-	}
-
-	var guidance []string
-	if has["shell"] {
-		guidance = append(guidance, guidanceShell)
-	}
-	if has["write"] {
-		guidance = append(guidance, guidanceWrite)
-	}
-	if has["edit"] {
-		guidance = append(guidance, guidanceEdit)
-	}
-
-	return strings.Replace(systemPromptTemplate, "${OPENCODE_TOOL_GUIDANCE}", strings.Join(guidance, "\n"), 1)
-}
