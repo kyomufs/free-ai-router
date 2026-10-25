@@ -155,6 +155,7 @@ func TestSettableValuesComeFromTheConfiguration(t *testing.T) {
 		{"rotate", "key_rotation", config.RotationValues()},
 		{"fallback", "model_fallback", config.FallbackValues()},
 		{"family", "family", config.FamilyValues()},
+		{"transport", "transport", transportIDs()},
 	}
 	if len(cases) != len(settableAxes()) {
 		t.Fatalf("settableAxes has %d entries, the test covers %d", len(settableAxes()), len(cases))

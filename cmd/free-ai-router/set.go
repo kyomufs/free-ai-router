@@ -55,6 +55,11 @@ func settableAxes() []settable {
 		{command: "rotate", aliases: []string{"key_rotation"}, key: "key_rotation", values: config.RotationValues()},
 		{command: "fallback", aliases: []string{"model_fallback"}, key: "model_fallback", values: config.FallbackValues()},
 		{command: "family", key: "family", values: config.FamilyValues()},
+		// transport — written here for the same reason as the rest, although it has
+		// a side condition the others do not: the unit the daemon runs under gets its
+		// PATH from the module, and only when the declared transport is pool. The
+		// value is written, and the warning below says what still has to be true.
+		{command: "transport", key: "transport", values: transportIDs()},
 	}
 }
 
@@ -119,6 +124,16 @@ func cmdSet(s settable, args []string) error {
 	if s.key == "mode" && want == config.ModeServer && strings.TrimSpace(cfg.Token.Val) == "" {
 		warn = "server mode requires a token: set it in the file or pass it in the environment"
 	}
+	// The transport is the one axis whose value is not enough on its own. On
+	// NixOS the unit's PATH is rendered by the module and carries proxprobe and
+	// its packages ONLY when the declared transport is pool — a unit built for
+	// direct starts the pool with no probe on PATH, and the pass dies on
+	// "executable file not found" rather than on a configuration error. The
+	// workdir has the same shape: the module creates it, tmfiles only under pool.
+	if s.key == "transport" && want == "pool" {
+		warn = "the unit's PATH and the pool workdir are rendered by the NixOS module, " +
+			"and only for a declared transport: a unit built for direct has no proxprobe on PATH"
+	}
 
 	if err := writeConfigKey(cfg.Paths.ConfigFile, s.key, want); err != nil {
 		return err
@@ -171,6 +186,8 @@ func axisValue(cfg *config.Config, key string) config.Value[string] {
 		return cfg.KeyRotation
 	case "family":
 		return cfg.Family
+	case "transport":
+		return cfg.Transport
 	}
 	// Unreachable: axisValue is only called with a key from settableAxes.
 	return config.Value[string]{}
