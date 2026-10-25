@@ -284,7 +284,7 @@ func TestRunnerRejectsWhenCoreFailsToBecomeReady(t *testing.T) { /* core binary 
   - Gateway: `if errors.Is(err, pool.ErrNotReady) { writeError(w, http.StatusServiceUnavailable, "pool", message); return }` before the 502 branch, with `Retry-After: 30`.
 - [ ] **Step 1: Write the failing tests** — switcher with fake tunnels: `RoundTripper` proxy URL changes after `Suspect` + `Switch`; a failed `Start` leaves the previous proxy URL in place; `ErrNotReady` is returned when the registry is empty; gateway test asserting a `RoundTripper` returning `pool.ErrNotReady` produces 503 with `"type":"pool"` and no `recordAbort` as a refusal.
 - [ ] **Step 2: Run tests to verify they fail.**
-- [ ] **Step 3: Implement.** `atomic.Pointer[tunnel]`; `http.Transport` with `Proxy: func(*http.Request) (*url.URL, error)` reading the pointer, `DialContext` defaults, and `MaxIdleConnsPerHost` from nothing (defaults are fine — say so in a comment); `Switch` starts the new tunnel, swaps, calls `CloseIdleConnections`, then stops the old one after `Grace` in a goroutine; `Suspect` records in the registry and triggers `Switch`. `Transport.Start` kicks off the evaluator and the health loop, `Stop` stops the active tunnel and the evaluator.
+- [ ] **Step 3: Implement.** `atomic.Pointer[tunnel]`; the round tripper comes from `transport.ClientTransport` with a CONNECT dialer that reads the pointer (NOT `Transport.Proxy`: with `Proxy` set, `DialTLSContext` receives the proxy address and the uTLS hello names the tunnel — see the design, §9); `Switch` starts the new tunnel, swaps, calls `CloseIdleConnections`, then stops the old one after `Grace` in a goroutine; `Suspect` records in the registry and triggers `Switch`. `Transport.Start` kicks off the evaluator and the health loop, `Stop` stops the active tunnel and the evaluator.
 - [ ] **Step 4: Run tests to verify they pass** plus the whole suite.
 - [ ] **Step 5: Commit** — `feat(pool): switch tunnels between requests`.
 
@@ -334,12 +334,12 @@ func TestRunnerRejectsWhenCoreFailsToBecomeReady(t *testing.T) { /* core binary 
 **Files:**
 - Modify: `README.md` (a `pool` section: what it does, the three schedule slots, the empty-pool contract)
 
-- [ ] **Step 1:** `gofmt -l .` → empty; `CGO_ENABLED=0 go vet ./...` → clean; `CGO_ENABLED=0 go test ./... -count=1` → all green.
-- [ ] **Step 2:** `CGO_ENABLED=0 go build -ldflags "-X main.buildVersion=$(git rev-parse --short HEAD)" -o /tmp/free-ai-router ./cmd/free-ai-router && cp /tmp/free-ai-router ~/.local/bin/free-ai-router`.
-- [ ] **Step 3:** live run with the three subscriptions: `/tmp/free-ai-router up --listen 127.0.0.1:8795 --transport pool`; poll `/tmp/free-ai-router pool` until the relevant list is non-empty (up to 3 min); record the observed counts in the commit message.
-- [ ] **Step 4:** `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8795/v1/models` → 200; `curl -s http://127.0.0.1:8795/_control/status` shows the node's exit address as the egress address (compare with `/_control/pool`).
-- [ ] **Step 5:** find the active core (`pgrep -f 'mihomo.*pool'`), `kill -9` it, then `curl … /v1/models` → still 200 and `/_control/pool` reports a different active node.
-- [ ] **Step 6:** empty pool: restart with `--pool-subscriptions=` (empty) → `curl /v1/models` → 503 with `"type":"pool"` and the evaluating message; TUI (or `/_control/pool`) shows the same sentence.
+- [x] **Step 1:** `gofmt -l .` → empty; `CGO_ENABLED=0 go vet ./...` → clean; `CGO_ENABLED=0 go test ./... -count=1` → all green.
+- [x] **Step 2:** `CGO_ENABLED=0 go build -ldflags "-X main.buildVersion=$(git rev-parse --short HEAD)" -o /tmp/free-ai-router ./cmd/free-ai-router && cp /tmp/free-ai-router ~/.local/bin/free-ai-router`.
+- [ ] **Step 3:** live run with the three subscriptions: `/tmp/free-ai-router up --listen 127.0.0.1:8795 --transport pool`; poll `curl -s http://127.0.0.1:8795/_control/pool` until `relevant` is non-empty (up to 3 min); record the observed counts in the commit message.
+- [ ] **Step 4:** a real answer through the tunnel: `POST /v1/chat/completions` → 200 with a streamed body; `curl -s http://127.0.0.1:8795/_control/status` shows the node's exit address as the egress address (compare with `/_control/pool`). `/v1/models` is NOT the check: it reads the catalog in memory and answers 200 with an empty pool.
+- [ ] **Step 5:** find the active core (`pgrep -f mihomo`), `kill -9` it, then the next chat request → still 200 and `/_control/pool` reports a different active node.
+- [x] **Step 6:** empty pool → `POST /v1/chat/completions` → `503`, `retry-after: 30`, `"type":"pool"`, body naming the reason and the next check. Verified 2026-10-25 with an unreachable subscription (`127.0.0.1:9`); `/_control/pool` showed `eval_state: error`, `relevant: 0`. The plan's `--pool-subscriptions=` cannot express "empty" — an empty value is "not given"
 - [ ] **Step 7:** commit — `feat(pool): document and verify the pool transport`, with the measured numbers in the body.
 
 ## Self-Review
@@ -347,3 +347,214 @@ func TestRunnerRejectsWhenCoreFailsToBecomeReady(t *testing.T) { /* core binary 
 Spec coverage: §4 core choice → Task 4 (+ table in Task 4's `Supports`); §5 layout → the file list across tasks; §6 model → Task 1; §7 fetch/parse → Tasks 1–2; §8 pipeline → Tasks 3–5, 7; §9 rotation → Task 8; §10 empty pool → Tasks 8, 10; §11 schedule → Task 7; §12 persistence → Task 7; §13 config/axes → Task 9; §14 surfaces → Tasks 9, 10; §15 egress wiring → Task 9; §16 testing → every task plus Task 11; §17 risks → the live check in Task 11 is what turns each risk into a measurement.
 
 Every Review Focus line has an owner: HTML body → Task 2; IPv6 literal → Tasks 1, 3; exit address drift → Task 6 (`Replace` re-measures, `Suspect` needs `deadThreshold`, not one miss); core that rejects its own config → Task 4 (`Start` fails, Task 8 keeps the old tunnel); unreadable `pool.json` → Task 7.
+
+---
+
+## Progress 2026-10-24 01:55 MSK — paused at Task 7
+
+Paused at the owner's request: the live traffic through third-party egress is
+being refused by the provider far earlier than expected, and that condition has to
+be understood before this list is worth building. What is done is on the branch
+and green; what is not done is listed with the exact point to resume from.
+
+### Done (files on disk, `gofmt`/`vet`/`test` clean)
+
+| Task | State | Where |
+| --- | --- | --- |
+| 1 Share-link parser | done | `internal/pool/share.go` |
+| 2 Subscription fetching | done | `internal/pool/fetch.go` |
+| 3 TCP stage | done | `internal/pool/probe.go` |
+| 4 Core interface, mihomo renderer, runner | done | `internal/pool/core.go`, `core_mihomo.go`, `runner.go` |
+| 5 Provider probe | done, plus the spent-free-lane verdict | `internal/pool/judge.go` |
+| 6 Registry | done | `internal/pool/registry.go` |
+| 7 Persistence and evaluator | implemented; store + evaluator + tests pass | `internal/pool/store.go`, `evaluate.go` |
+| 8 Switcher, transport, gateway contract | done | `internal/pool/switcher.go`, `transport.go`, `internal/gateway/gateway.go` |
+| 9 Config, wiring, control API, CLI | done, with the deviations below | `internal/axes`, `internal/config`, `internal/control`, `cmd/free-ai-router` |
+| 10 TUI surface | done | `internal/tui/pool.go`, `dashboard.go` |
+| 11 Documentation and publish | **not started** | `README.md` section, install to `~/.local/bin`, commit |
+
+Measured on this host, live, before the pause:
+
+- subscriptions fetched by the daemon's own stack: 3 URLs, `470 parsed`, `270 alive` by TCP, `60 probed`;
+- `2 servers relevant ... in 55s` — the whole pipeline fits the budget with `max_probe=60`, `probe_workers=8`;
+- serving node installed and reported by `GET /_control/pool` with its exit address and geo;
+- a client request through the tunnel reached the provider and got `HTTP 429 FreeUsageLimitError` — the path works, the address is already refused.
+
+Defects found by that live run and fixed:
+
+1. `pool.New` was reading settings off the top level of the map the registry hands
+   out, where the pool's keys are nested under `pool` — the daemon refused to start
+   with `subscriptions are empty`. Fixed by `pool.Section`, with a test.
+2. The evaluation report's deferred timestamp wrote to a copy, so every run
+   reported a negative duration. Fixed by naming the result; `durationMs` guards it.
+3. A spent free lane was installed as a relevant server. With no key the free quota
+   belongs to the exit address, so `insufficient quota` must reject the node in
+   anonymous mode and must not in account mode. Fixed in `judge.go`, the covered
+   test now asserts both sides.
+4. An empty list waited for the next scheduled slot — hours of `not ready` after a
+   start without state. `Start` now runs a check at once, and the `not ready`
+   sentence names the re-check it is waiting for.
+
+Deviations from the plan, to be stated in the commit that lands Task 9:
+
+- only 5 of the 16 pool settings are exposed as axes (`subscriptions`, `core_path`,
+  `interval`, `max_nodes`, `probe_model`): `internal/axes` has no integer or list
+  kind, and every global axis needs an environment variable in the
+  `FREE_AI_ROUTER_` namespace. The remaining keys live in
+  `transport_settings.pool` in the file and are validated on decode.
+- the plan's `--pool-subscriptions=` empty-pool check cannot express "empty": an
+  empty value is indistinguishable from "not given". The empty-list path is
+  covered by the unit tests and by starting with an empty state file instead.
+
+### To resume
+
+1. Task 11 Steps 2–7: README section, install, publish.
+2. `kill -9` on the active core, then a request: the switcher must move to the next
+   node and the request must succeed. Not verified yet.
+3. Empty pool → `HTTP 503` with `"type":"pool"` from a real client. Not verified yet
+   (the live pool never came up empty).
+4. Remove `cmd/poolprobe/` — a temporary harness, not part of the deliverable.
+
+---
+
+## Progress 2026-10-25 04:45 MSK — code complete, live checks pending
+
+The pool is written, built and installed. What is left is the part that needs the
+host's own tunnel out of the way.
+
+### What changed since the pause
+
+1. **The probe and the request path now speak the client's TLS.** Measured on
+   2026-10-24: the free lane answers `429 FreeUsageLimitError` to a plain
+   `crypto/tls` handshake and to the legacy chat path, whatever the address is —
+   indistinguishable from a spent address. `internal/transport` already carried
+   the fix (uTLS `ClientHello`, `chat_path`), so the pool reuses it:
+   `transport.ClientTransport` + `provider.Build`, with the CONNECT done inside
+   `DialContext`. `Transport.Proxy` is unusable here: `net/http` consults
+   `hasCustomTLSDialer()` before the CONNECT and hands `DialTLSContext` the
+   proxy's address, so the hello would name the tunnel.
+2. **A failed request now moves the tunnel.** `Switcher.RoundTripper` returns a
+   small `observing` wrapper: a transport error marks the tunnel suspect and asks
+   for one switch, and `CloseIdleConnections` is passed through so the gateway's
+   own retry still gets a fresh connection. A response — any status — is not a
+   tunnel failure. One tunnel asks for one switch, so the gateway's three attempts
+   do not burn three nodes. `TestSwitcherMovesOnAFailedRequest` covers it.
+3. **`/_control/pool` stopped lying about absence.** `active` and `last` are
+   pointers, so a pool with nothing serving omits them instead of printing an
+   object full of empty strings and `0001-01-01T00:00:00Z`.
+4. README has the pool section, the tile in Monitoring, the flags and the
+   `pool.json` row; the design doc's §8/§9 now record the measured TLS fact, the
+   `Proxy` trap and the failure taxonomy as the code actually behaves.
+
+### Two defects found while waiting
+
+1. **Two evaluations could run at once.** `evaluating` was raised by `Recheck` only, so a
+   scheduled pass was invisible to the health loop, which could then start a second one
+   against the same quota and the same list. The pass now claims itself, and `Transport`
+   holds the evaluation behind a two-method interface (`Run`, `Progress`) so this is
+   testable without a network: `TestTransportRunsOneEvaluationAtATime`.
+   `save()` also returns early without a state path, instead of writing a temp file
+   into the working directory.
+2. **A switch could start a core after `Stop`.** The core started, bound a port, served
+   nothing and outlived the daemon, because `Stop` had already stopped the tunnel it
+   knew about. `Switcher` now carries `closed`: `Switch` refuses after a stop, and
+   tunnels still in their grace period are ended at once instead of being left to the
+   sleep. Reproduced as two orphaned `pool.test` processes after a suite run; zero after
+   the fix (`pgrep -c -f "pool[-]fakecore"` → 0).
+
+### Also fixed: the status no longer loses a serving node that left the list
+
+An evaluation re-measures, and the probe spends the allowance it measures: a node
+accepted at 03:00 can be refused at 11:00 while real traffic still flows through it.
+`Status` built `active` by scanning the ranked list, so in that case it reported
+nothing serving while the switcher served. It now falls back to the switcher, which is
+what knows. `TestStatusNamesTheServingNodeAfterItLeavesTheList`.
+
+### Two more, both about what the pool writes down
+
+3. **The subscription token went into the log.** `pool: subscription https://host/…?token=…:
+   Get "https://…?token=…": …` — the format string and the transport error each quoted the
+   URL, so masking one would not have been enough. `redactSource` keeps the scheme and
+   host and replaces the URL inside the error text too; `TestRedactSource*`.
+4. **`pool.json` holds every share link the user owns**, UUIDs included, and the mode was
+   whatever `CreateTemp` gave (0600) — now asserted rather than assumed, in
+   `TestStateRoundTripKeepsTheLink`.
+
+### Verified
+
+| Check | Command | Result |
+| --- | --- | --- |
+| formatting, vet, suite | `gofmt -l .`; `CGO_ENABLED=0 go vet ./...`; `CGO_ENABLED=0 go test ./... -count=1` | clean, all green |
+| build and install | `go build -ldflags "-X main.buildVersion=$(git rev-parse --short HEAD)"` → `~/.local/bin/free-ai-router` | `version` → `4d64e98` (installed by rename: the running daemon holds the old inode) |
+| start with the pool | `up --config /tmp/far-pool/config.json` | daemon up, `/_control/pool` answers, catalog resolved (the probe model came from the provider, not from the pool) |
+| empty pool contract | `POST /v1/chat/completions` | `503`, `retry-after: 30`, `"type":"pool"`, `the relevant list is empty: no server could be parsed from the subscriptions; next check at 2026-10-25T03:00:00Z` |
+| failed request moves the tunnel | `go test ./internal/pool/ -run TestSwitcher -v` | 6/6 PASS |
+| one pass at a time | `go test ./internal/pool/ -run TestTransportRunsOneEvaluation -v` | PASS |
+| no core outlives the daemon | `go test ./internal/pool/ -count=1` then `pgrep -c -f "pool[-]fakecore"` | 0 |
+| a serving node stays named after leaving the list | `go test ./internal/pool/ -run TestStatusNames -v` | PASS |
+| the subscription token stays out of the log | `go test ./internal/pool/ -run TestRedact -v` | PASS |
+| `pool.json` is not world-readable | `go test ./internal/pool/ -run TestStateRoundTrip -v` | PASS (asserts 0600) |
+
+### Not verified, and why
+
+- rotation at a scheduled instant, and a real answer through a real node: need the
+  host's own tunnel off (FlClash TUN rewrites `1.1.1.1` and the provider's
+  addresses), which the operator turns off on request;
+- `kill -9` on the active core moving the switch;
+- an already-open streaming response surviving a swap.
+
+### To finish
+
+1. Live run with the three subscriptions (Task 11 Steps 3–5) with TUN off.
+2. Commit `feat(pool): document and verify the pool transport`.
+
+### 2026-10-25 12:25 MSK — live run still blocked, now by a dead tunnel
+
+The daemon came back at 12:16:56 on the installed binary. The network does not work at
+all, and not because of the pool:
+
+```
+$ ip -br link | grep -i flclash
+FlClash          UNKNOWN  <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP>
+$ ip route get 1.1.1.1
+1.1.1.1 via 198.18.0.2 dev FlClash table 2022 src 198.18.0.1 uid 1000
+$ systemctl --user is-active flclash
+inactive
+$ curl -s -m 6 -o /dev/null -w '%{http_code}' https://example.com/
+000
+```
+
+The TUN device is up and holds the default route, while the service that should sit
+behind it is stopped: everything is blackholed, plain HTTP included. The pool cannot
+be measured in this state and neither can anything else. Steps 3–5 stay open until the
+link is either serving or down.
+
+### 2026-10-25 12:30 MSK — what the empty pool does today, and two operational facts
+
+The pool is not enabled in the running daemon (`transport: direct`), so a second
+daemon was started on 8796 with one unreachable subscription — no internet needed:
+
+```
+$ curl -s 127.0.0.1:8796/_control/pool | jq -c '{eval_state, relevant, next_eval_at, last}'
+{"eval_state":"error","relevant":0,"next_eval_at":"2026-10-25T11:00:00Z",
+ "last":{"at":"...","subscriptions":1,"parsed":0,"tcp_alive":0,"probed":0,
+         "accepted":0,"error":"no server could be parsed from the subscriptions",
+         "duration_ms":4003}}
+```
+
+`duration_ms: 4003` is the fetch backoff (1 s + 3 s) on a refused connection, not the
+cold-catalog stall. The state surface is right: the reason is the operator's, and the
+next check is in the future rather than "now".
+
+Two facts that cost time to learn:
+
+- **A request cannot reach the pool before the catalog is warm.** `POST
+  /v1/chat/completions` with the tunnel empty and no internet answered `404 {"type":
+  "model not found"}` because `/v1/models` was empty, so `resolveModel` refused before
+  the transport was consulted. The `503 type=pool` therefore needs a warm catalog; its
+  evidence stays the 04:45 run, and the live check must not be read as broken if a
+  fresh start answers 404 first.
+- **`/tmp` is tmpfs here.** The 12:16 reboot wiped `/tmp/pool-live` (config, scripts,
+  `urls.txt`) and `/tmp/free-ai-router`. Recreated with `make-config.sh`: 4
+  subscriptions, `config.json` 773 bytes, both `0600`. A future reboot costs one
+  command, and `start.sh` refuses to run while the TUN is up.

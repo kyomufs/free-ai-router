@@ -349,7 +349,7 @@ allowed: anonymous | account
 | `key_rotation` | `on` \| `off` | whether a refusal that names the key spends the next key from the pool |
 | `model_fallback` | `on` \| `off` | whether a model that cannot answer at all is replaced by another free model of the same provider — **off by default**, because the answer then names a model other than the one asked for |
 | `family` | `auto` \| `v4` \| `v6` | the address family the traffic leaves from |
-| `transport` | `direct` | how requests leave the machine |
+| `transport` | `direct` \| `pool` | how requests leave the machine: from it, or through a measured server of your own |
 
 ### How `credential` decides
 
@@ -392,6 +392,132 @@ been written yet.
 Pinned to one family, the daemon spends one address's allowance and the per-IP
 matrix shows exactly which. On `auto`, the same daemon reaches the service
 through different addresses and the counters stop being comparable.
+
+### The pool: traffic from an address that is not yours
+
+`transport: "pool"` takes the traffic off your address: the requests leave
+through a server that the proxprobe pass measured, and the address the provider
+counts is the server's.
+
+The pool does not fetch, parse, sort or ping: that is `proxprobe`'s job. The pass
+fetches the subscriptions, dedupes the servers, checks TCP and makes one HTTP
+request through each; the pool reads the pass's artifacts and does the one thing
+the pass cannot — asks the provider.
+
+```json
+{
+  "transport": "pool",
+  "transport_settings": {
+    "pool": {
+      "source": "proxprobe",
+      "proxprobe_workdir": "/var/lib/free-ai-router/proxprobe",
+      "proxprobe_command": [
+        "proxprobe", "all",
+        "-config", "/etc/proxprobe/sources.yaml",
+        "-workdir", "/var/lib/free-ai-router/proxprobe",
+        "-core", "mihomo",
+        "-url", "https://opencode.ai/inference/v1/models",
+        "-target", "best"
+      ]
+    }
+  }
+}
+```
+
+A server is not in the list because its port answers — it is in the list because
+the **provider** answered it. The stages run cheapest first, and each one only
+sees what the previous one left:
+
+| Stage | Cost | What it removes |
+|---|---|---|
+| the pass: fetch, parse, dedupe, TCP, HTTP (`proxprobe_command`) | one request per source, one HTTP request per live server | sources that are down, servers that are not there, servers whose exit cannot reach the service |
+| read `merged.jsonl` and `http.jsonl`, keep only `ok: true` | — | everything the pass itself rejected |
+| one chat completion through a core, `probe_workers` at a time, `probe_timeout` each | a process and a completion | servers the provider will not hear |
+| rank by measured RTT, dedupe by exit network, keep `max_nodes` | — | servers behind one hosting network, which share one allowance |
+
+The third stage is the one that decides the list, and it is built by the
+provider rather than by the pool: same path, same headers, same body, same TLS
+client as a served request. A test request that is not the client's request
+measures the test, not the server — a probe of the wrong shape is refused by the
+lane itself, and every server would then look spent.
+
+That stage is not free either: an accepted test request is one request of that
+address's allowance, spent on measuring. A server the provider accepts has
+already used one of the few the free lane grants an address per day, and the pool
+cannot hand it back. That is why `max_probe` is a budget and not a sample size.
+
+The allowance is counted per **network**, not per address: five servers from one
+hosting pool are five copies of one budget, and the first refusal takes all of
+them. So the list keeps one server per exit network — `/24` for IPv4, `/64` for
+IPv6 — the fastest one, and a refusal for one address drops whatever the same
+network had already put in the list and skips the rest of it for that run. A
+longer list of siblings would look like five chances and behave like one.
+
+The pass and the read are one slot, so they never describe different sets of
+servers. A pass older than `proxprobe_max_age` is refused instead of trusted: the
+list keeps serving, and the failure names the age.
+
+`proxprobe_command` is an argv, not a shell line — every argument is the
+operator's explicit choice, quoting included. Empty means an outside scheduler
+runs the pass and the pool only reads what it last left.
+
+Rotation:
+
+- on a schedule: `first_eval_utc` and then every `interval` — 03:00, 11:00 and
+  19:00 UTC by default (06:00, 14:00, 22:00 MSK);
+- on failure: a request that cannot be completed through the serving server moves
+  to the next one at once, and one dead tunnel asks for one switch rather than
+  one per retry;
+- an empty list is re-checked off the schedule, at most once per
+  `reeval_min_gap`.
+
+A slot re-ranks the list but does not move away from a server that still works:
+the allowance is counted per exit network per day and resets at 00:00 UTC, so
+leaving a working network at 11:00 buys nothing and cuts whatever is in flight.
+
+The list survives a restart in `pool.json`, so a fresh daemon serves from the
+first second instead of waiting for an evaluation.
+
+With nothing to serve, a client gets `503` with `"type": "pool"` and a sentence
+that says what is happening and when it will be known:
+
+```
+the relevant list is empty: no server was accepted by the provider: the free
+quota of this address is spent (57 of 60); next check at 2026-10-25T03:00:00Z
+```
+
+Settings live under `transport_settings.pool`:
+
+| Key | Default | What |
+|---|---|---|
+| `source` | `proxprobe` | where the list comes from; `proxprobe` is the only one |
+| `proxprobe_workdir` | — (required) | the pass's work directory: `merged.jsonl`, `http.jsonl` |
+| `proxprobe_command` | empty | the pass argv; empty means an outside scheduler runs it |
+| `proxprobe_max_age` | = `interval` | how old a pass may be before it is refused |
+| `pass_timeout` | `10m` | how long one pass may run |
+| `core` | `mihomo` | the core that renders a tunnel per server |
+| `core_path` | empty | the binary; empty means `mihomo` on `PATH` |
+| `first_eval_utc` | `03:00` | the anchor of the schedule, UTC |
+| `interval` | `8h` | between evaluations |
+| `probe_timeout` | `12s` | one test request |
+| `probe_workers` | `6` | cores and requests in flight |
+| `max_probe` | `60` | how many servers from the pass get a test request per run; `0` means every one |
+| `probe_model` | empty | the model the test asks for; empty means the first free one |
+| `max_nodes` | `20` | how many servers the list keeps |
+| `health_interval` | `30s` | how often the serving core is checked |
+| `dead_threshold` | `2` | consecutive failures that quarantine a server |
+| `reeval_min_gap` | `10m` | the floor between two off-schedule checks |
+| `grace` | `30s` | how long the old tunnel is kept for requests in flight |
+
+Each one has a flag and an environment variable — `--pool-source`
+(`FREE_AI_ROUTER_POOL_SOURCE`), `--pool-proxprobe-workdir`, `--pool-proxprobe-command`,
+`--pool-proxprobe-max-age`, `--pool-pass-timeout`, `--pool-core-path`,
+`--pool-interval`, `--pool-max-nodes`, `--pool-probe-model`.
+
+What the pool still needs is a core binary: it renders one tunnel per server and
+runs it, so name one in `core_path` or put `mihomo` on `PATH`. The pass itself is
+`proxprobe`, which the pool neither installs nor knows how to run: `proxprobe_command`
+is the operator's argv, and the work directory is where the two artifacts land.
 
 ### Providers
 
@@ -584,14 +710,17 @@ free-ai-router tui        # or: free-ai-router tui --config <path> --state <path
 ```
 
 The monitor reads what the daemon wrote and never writes anything itself. Four
-blocks:
+blocks, and a fifth when the pool is in use:
 
 - the active credential and the address it leaves from;
 - whether key rotation is on, and how many keys remain;
 - the log, scrollable, filterable, with wrap toggled on and off;
-- the per-address model matrix — one row per address, `OK` and `ERROR` columns.
+- the per-address model matrix — one row per address, `OK` and `ERROR` columns;
+- the pool, when `transport = "pool"`: the serving server and where it exits, how
+  many are relevant, the ranked list with its measured RTT, and when the next
+  check is due.
 
-That last block is the reason the TUI exists. Free tiers are counted per source
+The matrix is the reason the TUI exists. Free tiers are counted per source
 address, so "which of my addresses has spent its allowance on which model" is
 the question you actually ask, and a single global counter cannot answer it.
 
@@ -611,6 +740,8 @@ The same information is on the control surface, which is what the TUI reads:
 ```sh
 curl http://127.0.0.1:8787/_control/status
 curl http://127.0.0.1:8787/_control/keys
+curl http://127.0.0.1:8787/_control/pool   # the pool: the list, the serving node, the schedule
+curl -X POST http://127.0.0.1:8787/_control/pool   # ask for a check now (throttled)
 ```
 
 In `mode = "server"` these need the token:
@@ -678,11 +809,15 @@ model capabilities from this catalog.
 | `--mode` | `local` \| `server` |
 | `--listen` | the address to listen on |
 | `--token` | the token for server mode |
-| `--transport` | `direct` |
+| `--transport` | `direct` \| `pool` |
 | `--upstream` | address for providers that do not name their own (empty: none) |
 | `--family` | `auto` \| `v4` \| `v6` |
 | `--credential` | `anonymous` \| `account` |
 | `--rotate` | `on` \| `off` |
+| `--pool-core-path` | the pool's core binary; empty means `mihomo` on `PATH` |
+| `--pool-interval` | how often the pool rebuilds its list |
+| `--pool-max-nodes` | how many servers the pool's list keeps |
+| `--pool-probe-model` | the model the pool's test request asks for |
 | `--first-event-timeout` | wait for response headers |
 | `--idle-timeout` | allowed silence between events |
 | `--reasoning-idle-timeout` | silence allowed while reasoning |
@@ -698,9 +833,10 @@ model capabilities from this catalog.
 |---|---|
 | `~/.config/free-ai-router/config.json` | the configuration (or `$XDG_CONFIG_HOME`) |
 | `~/.local/state/free-ai-router/state.json` | counters and per-address history |
+| `~/.local/state/free-ai-router/pool.json` | the pool's list, its quarantine and the next evaluation |
 | `~/.local/state/free-ai-router/app.log` | the log |
 
-`free-ai-router data` prints all three with their sizes, and
+`free-ai-router data` prints them all with their sizes, and
 `free-ai-router data clear` empties the log or the counters. It never touches the
 configuration: deleting the file that describes the daemon's design is not
 maintenance but the loss of a deployment.

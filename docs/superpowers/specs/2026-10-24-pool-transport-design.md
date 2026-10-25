@@ -26,7 +26,8 @@ set of third-party servers, chosen by measurement".
 
 ## 2. Goals
 
-1. Build a set of usable servers from subscriptions, not from hand-written config.
+1. Build a set of usable servers from the proxprobe pass over subscriptions, not
+   from hand-written config.
 2. Test each candidate for what actually matters — is this address acceptable to
    the provider — not merely "is the port open".
 3. Keep a ranked list of usable servers and rotate between them without the
@@ -41,8 +42,9 @@ set of third-party servers, chosen by measurement".
 
 - No general-purpose VPN client. Only HTTP(S) proxying for provider traffic: the
   router makes no other kind of connection.
-- No Clash YAML subscriptions in v1. Only share-link lists. A YAML subscription is
-  logged and shown as unsupported instead of being half-parsed.
+- No subscription parsing of our own: proxprobe owns the formats (share links, clash
+  yaml) and the pool reads only its artifacts. A format proxprobe cannot read is
+  its business, and the pool never sees a half-parsed list.
 - No rules, GeoIP databases, DNS tricks, or per-site routing inside the core. One
   node per core process, one rule (`MATCH,node`).
 - No per-country preference, no latency-based auto-testing inside the core. The
@@ -113,10 +115,10 @@ and buys complete independence from the core's control API.
 
 ```
 internal/pool/            new subsystem
-  share.go                share-link → Node
-  fetch.go                subscription fetching and decoding
+  node.go                 Node: the pass record plus its clash profile
+  proxprobe.go            reading the pass artifacts, SourceProxprobe
   evaluate.go             the evaluation pipeline (§8)
-  probe.go                TCP stage and provider stage
+  probe.go                provider stage
   registry.go             ranked list, cursor, quarantine
   runner.go               Core: one node, one process, one port
   core_mihomo.go          mihomo config rendering
@@ -172,9 +174,8 @@ type Node struct {
     Port      int
     SNI       string
     Label     string // decoded #fragment, display only
-    Raw       string // the share link verbatim: the source of truth for rendering
+    Raw       string // the clash profile verbatim: the source of truth for rendering
 
-    TCPRTT    time.Duration
     ProbeRTT  time.Duration
     ExitIP    string
     ExitGeo   string // the flag from the label, display only
@@ -184,51 +185,63 @@ type Node struct {
 `Raw` is kept because rendering is the core's business and a lossy intermediate
 representation would eventually lose a field the core needs.
 
-## 7. Subscription fetch and parse
+## 7. The source: a proxprobe pass
 
-- Input: `[]string` of URLs. Fetched in parallel, 20 s timeout each, three
-  attempts with 1 s/3 s backoff to survive a flaky mirror.
-- A body is either plain text (one link per line) or base64 (whole body, standard
-  or URL-safe alphabet, with or without padding). Detection: if the body does not
-  start with a known scheme after trimming, try base64; if that fails, log and
-  skip the subscription.
-- Supported schemes: `vless`, `vmess` (base64 JSON), `ss`, `trojan`, `hysteria2`,
-  `tuic`. Anything else is counted and logged, never fatal.
-- **Fetching runs on the host, not through the pool** — a node cannot be measured
-  before it exists. Measured: Go's stack fetches the three URLs fine from this
-  host (`STATUS: 200 BYTES: 34352`). The `curl` on this host fails on the same URL
-  without `-k`; that is a local CA quirk of the shell tool, not the network, and
-  the daemon does not inherit it. No insecure knob is added.
-- Deduplication key: `(proto, host, port, uuid/password, transport, path,
-  serviceName, sni)`. Two lines that differ only in label are one node.
+The pool does not fetch, parse, dedupe, ping or sort. A pass does that
+(`proxprobe all`), and its artifacts are the contract:
+
+- `merged.jsonl` — one node per line: `id, proto, name, server, port, uuid,
+  network, security, sni, source[]` plus `raw.clash`, the core's own profile.
+- `http.jsonl` — the pass's own GET verdict per node: `delay_ms`, `ok`, `error`.
+
+Read rules:
+
+- A node enters the candidate list only when its `http.jsonl` record is
+  `ok: true`. A repeated id takes the last verdict: an artifact appended to by an
+  interrupted pass must not resurrect a server the pass later failed.
+- The profile is kept verbatim and handed to the core as it is. Every field the
+  parser does not know (xhttp options, packet-encoding, reality spellings) is
+  therefore not a loss. A node whose profile the core cannot render is counted as
+  unrenderable and named in the log, never silently dropped.
+- Freshness is the older of the two files' mtimes. A pass older than
+  `proxprobe_max_age` (default: one `interval`) is refused with the age and the
+  limit, and the current list keeps serving: a stale pass describes servers
+  measured before the last rotation.
+- The daemon runs the pass itself when `proxprobe_command` is set — an argv, not
+  a shell line — and otherwise trusts an outside scheduler. With no command and
+  no artifacts the evaluation fails with `proxprobe has no merged.jsonl in
+  <dir>: run proxprobe all first`.
+- Counts, never secrets: the log carries parsed/http-ok/unrenderable, and the
+  pass's own log tail on failure.
+
+The pool therefore has exactly one hard dependency it does not install:
+`proxprobe` on `PATH` (plus the core it starts). The NixOS module supplies both
+through `poolPackages` and `pkgs.mihomo`.
+
 
 ## 8. Evaluation pipeline
 
-Four stages, each of which can only shrink the candidate set. Cheap filters first
-because the expensive ones cost a process and a provider request.
+Three stages, each of which can only shrink the candidate set: the pass has
+already removed the cheap failures, so every remaining candidate costs a process
+and a provider request.
 
 ```
-fetch     3 subscriptions                        → ~619 links
-parse     + dedupe                               → ~380 nodes
-TCP       dial host:port, 64 workers, 3s timeout → alive + RTT
-probe     core per node, 6 workers, one minimal completion, 12s timeout
+read      merged.jsonl ∩ http.jsonl ok:true      → ~398 candidates
+admit     core per node, 6 workers, one minimal completion, 12s timeout
           + exit-IP observation                  → accepted + RTT + ExitIP
-rank      dedupe by ExitIP, sort by probe RTT, cap at max_nodes
+publish   dedupe by exit network, sort by probe RTT, cap at max_nodes
 ```
 
-**TCP stage.** Pure Go, no core, no provider. Purpose: throw away dead endpoints
-before paying for any process. 64 concurrent dials, 3 s timeout each.
-
-**Provider stage.** For each candidate, in ascending TCP RTT order, at most
-`max_probe` candidates:
+**Admission stage.** For each candidate, in the pass's order, at most
+`max_probe` candidates (0 = all):
 
 1. Start a `Core` for this node on a free loopback port (§9 for the port rule).
 2. Observe the exit address through that tunnel by asking
    `https://1.1.1.1/cdn-cgi/trace` with the tunnel's round tripper — the same
    observation `internal/egress` already performs, exported as `egress.Observe`.
    This is what "does this address have problems" means concretely, and it is
-   also the key for deduplication: two nodes behind one exit address are one
-   budget.
+   also the key for deduplication and quarantine: two nodes behind one exit
+   network are one budget (/24, /64 — see §8, Promotion).
 3. Send ONE minimal completion through the tunnel. The request is built by
    `provider.Build` — the wire contract is the provider's, not the pool's — with
    `Stream: true`, `MaxTokens: 1`, one short user message, on the cheapest free
@@ -242,6 +255,17 @@ before paying for any process. 64 concurrent dials, 3 s timeout each.
      probe was inconclusive should rank below one that answered.
 5. Stop the core.
 
+**The probe must be the client's request, down to the handshake (measured
+2026-10-24).** The lane admits the reference client's TLS ClientHello and only
+`/inference/openai/v1/chat/completions`; a plain `crypto/tls` handshake or the
+legacy `/inference/v1/chat/completions` is answered `429 FreeUsageLimitError`
+whatever the address is. A probe of the wrong shape therefore rejects every node
+with "the free quota of this address is spent" — the exact failure it exists to
+detect, reported for a reason that has nothing to do with the address. So the
+pool builds no HTTP client of its own: it takes `transport.ClientTransport` (the
+same uTLS hello the daemon serves with) and `provider.Build`, and reaches the node
+through a CONNECT dialer (§9).
+
 The probe reuses the gateway's credential rules through
 `provider.ApplyCredential(p, prepared, key)`. The header name, the prefix and the
 anonymity marker are properties of the provider, so the helper moves from
@@ -250,14 +274,20 @@ it — the direction matters, since `internal/pool` may not import
 `internal/gateway`. In anonymous mode the key is empty and the provider
 substitutes its anonymity marker exactly as it does for a client request.
 
-**Promotion.** Accepted nodes are deduplicated by `ExitIP` (best probe RTT wins),
-sorted by probe RTT, and truncated to `max_nodes`. That truncated list is the
-relevant list. Exit-address diversity is the property being maximised: twenty
-nodes behind one address have the budget of one address.
+**Promotion.** Accepted nodes are deduplicated by exit NETWORK — /24 for IPv4, /64
+for IPv6 — and the best probe RTT of a network wins. Sorted by probe RTT and
+truncated to `max_nodes`, that list is the relevant list. The property being
+maximised is the number of independent allowances, and five servers behind one
+hosting pool have the allowance of one: the provider counts per address, but the
+pool it hands out is burned as a whole. The same key is used on the way out: a
+refusal for one address drops the network's already-accepted nodes, and any node
+of that network that answers later in the same run is dropped as well — the
+allowance it would draw on is already gone.
 
-Cost on the measured data: 619 links → ~380 nodes → 60 probes → 60 tiny
-completion requests, roughly 40–60 s wall clock with 6 workers, peak ~200 MB for
-six core processes.
+Cost on the measured data (2026-10-25): 398 candidates → 398 probes, 145 s wall
+clock with 6 workers, 0 accepted — the pass had done its job, the provider
+refused every address, and the report says so per address (`336 of 398` were a
+spent free quota). Peak memory stays around 200 MB for six core processes.
 
 **Evaluation is never destructive.** It builds a new list and swaps it in at the
 end. While it runs, the previous list keeps serving. A crash mid-evaluation leaves
@@ -276,16 +306,29 @@ type tunnel struct {
 }
 ```
 
-`switcher` holds `atomic.Pointer[tunnel]` and returns an `*http.Transport` whose
-`Proxy` function reads that pointer. This is the mechanism that makes switching
-correct without touching in-flight requests:
+`switcher` holds `atomic.Pointer[tunnel]` and returns a round tripper built by
+`transport.ClientTransport` whose dialer reads that pointer. It does **not** use
+`Transport.Proxy`, for two measured reasons:
 
-> Go's connection pool keys idle connections by `connectMethod`, which includes
-> the proxy URL. After a swap the proxy URL differs, so new requests open
-> connections to the new port and the old connections are never reused, aging out
-> through `IdleConnTimeout`. The switcher additionally calls
-> `CloseIdleConnections` on swap so the old sockets are not held for the full
-> timeout.
+> With `Proxy` set, `net/http` asks `hasCustomTLSDialer()` **before** it sends the
+> CONNECT, and `cm.addr()` is the **proxy's** address
+> (`$GOROOT/src/net/http/transport.go`, `dialConn`). `DialTLSContext` would then
+> receive `127.0.0.1:<port>` as the server name, and the ClientHello would name
+> the tunnel instead of the provider. The lane reads that hello (§8), so this is
+> not a cosmetic difference.
+>
+> The lane admits only the reference client's TLS shape, so a plain
+> `crypto/tls` dialer is answered `429` whichever node sits behind it. The pool
+> therefore dials with the provider's own client transport and speaks the CONNECT
+> itself inside `DialContext`.
+
+Rotation still reaches the request: the dialer reads the tunnel of the moment, and
+`CloseIdleConnections` runs on every swap. That call is load-bearing — the
+transport keys idle connections by **target host**, not by tunnel, so without it a
+new request could be handed a socket through the old server. A connection that
+goes idle after the swap and before the old core stops may still use the old
+tunnel during `grace`; that is accepted, and it is why the old core is not stopped
+at once.
 
 Unverified: that an already-open streaming response survives the swap in
 practice. It should, because the swap does not touch open connections, but this
@@ -310,15 +353,23 @@ bind-then-release window is a race against nothing else on a personal host; the
 alternative — parsing the core's own port report — does not exist for a fixed
 `mixed-port`. Documented as a trade-off, not an oversight.
 
+**A failed request is the only signal from the far end.** The health loop sees the
+core, not the node: a core that keeps listening while its server stopped
+forwarding looks perfectly healthy. So the round tripper reports transport errors
+to the switcher, which moves to the next node — and one tunnel asks for one
+switch, because the gateway alone makes three attempts and each of them would
+otherwise burn a node. A response, whatever its status, is not a tunnel failure:
+it means the node carried the request there and the answer came back.
+
 **Failure taxonomy.**
 
 | Signal | Where it is seen | Reaction |
 | --- | --- | --- |
-| dial / TLS / reset before headers | switcher's `RoundTripper` | node suspect, switch, return the error unchanged |
-| provider went silent (no first event) | gateway watchdog | node suspect, switch (`refreshAddress` already fires here) |
-| refusal classified `freeLaneRefusal` | gateway classify, reported to the switcher | quarantine immediately, switch |
-| health check of the active node fails twice in a row | pool's own loop, every 30 s | switch proactively, before a client pays for it |
-| two failures with no success in between | registry | quarantine until the next evaluation |
+| dial / TLS / reset before headers | switcher's round tripper | node suspect, one switch per tunnel, the error returned unchanged |
+| provider went silent (no first event) | gateway watchdog | request aborted with `504` after `silenceAttempts`; the node is **not** moved — a silent provider cannot be told apart from a silent path, and quarantining the list on it would empty the pool for hours |
+| refusal classified `freeLaneRefusal` | gateway classify | the refusal reaches the client; the pool does not see it, and the address is dropped by the next evaluation, which is where the address is judged |
+| health check of the active node fails | pool's own loop, every 30 s | switch, before a client pays for it |
+| `dead_threshold` failures with no success in between | registry | quarantine until the next evaluation |
 
 The gateway counts what happened exactly as it does today: these become transport
 aborts (`recordAbort`), not provider refusals, because a broken path is not the
@@ -330,7 +381,7 @@ and is retried at the next evaluation, which is the only thing allowed to clear 
 ## 10. Empty pool contract
 
 When the relevant list is empty (nothing evaluated yet, everything quarantined,
-or every subscription unreachable):
+or the pass left nothing usable):
 
 - `switcher.RoundTripper` returns `pool.ErrNotReady`.
 - The gateway recognises that error (three lines in the transport-failure branch)
@@ -338,7 +389,7 @@ or every subscription unreachable):
 
 ```json
 {"error":{"code":"pool","type":"pool",
-  "message":"the pool has no usable server yet: 37 of 120 servers tested; next check in 41s"}}
+  "message":"the pool has no usable server yet: 0 of 398 servers accepted; the free quota of this address is spent; next check at 2026-10-25T19:00:00Z"}}
 ```
 
 with `Retry-After: 30`. The number is real: it is the progress of the running
@@ -347,7 +398,7 @@ evaluation, so the operator sees a job in progress instead of a hang. A stray
 pool simply had nothing to send through.
 
 - An out-of-band evaluation starts immediately, throttled to `reeval_min_gap`
-  (10 min) so a dead subscription list cannot turn into a permanent evaluation
+  (10 min) so a failing pass cannot turn into a permanent evaluation
   loop.
 - While the pool is empty the TUI carries the same sentence in its notes band.
 
@@ -399,16 +450,18 @@ environment → flag precedence that already exists.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
+| `source` | `proxprobe` | the only source: anything else is refused at startup |
+| `proxprobe_workdir` | `""` (required) | where the pass leaves `merged.jsonl` and `http.jsonl` |
+| `proxprobe_command` | `[]` | argv of the pass the daemon runs itself; empty means an outside scheduler |
+| `proxprobe_max_age` | `interval` | oldest accepted pass; older keeps the current list |
+| `pass_timeout` | `10m` | budget for one pass run |
 | `core` | `mihomo` | which core renders nodes |
 | `core_path` | `""` | explicit binary path; empty means look up on `PATH` |
-| `subscriptions` | `[]` | subscription URLs |
 | `first_eval_utc` | `03:00` | first daily evaluation |
 | `interval` | `8h` | spacing between evaluations |
-| `tcp_timeout` | `3s` | per-dial timeout of the TCP stage |
-| `tcp_workers` | `64` | TCP stage concurrency |
 | `probe_timeout` | `12s` | budget for one provider probe |
 | `probe_workers` | `6` | concurrent core processes during evaluation |
-| `max_probe` | `60` | candidates that reach the provider stage |
+| `max_probe` | `60` | candidates admitted, 0 = all |
 | `probe_model` | `""` | empty means the first free model of the catalog |
 | `max_nodes` | `20` | size of the relevant list |
 | `health_interval` | `30s` | liveness check of the active node |
@@ -421,12 +474,18 @@ environment → flag precedence that already exists.
   "transport": "pool",
   "transport_settings": {
     "pool": {
-      "core": "mihomo",
-      "subscriptions": [
-        "https://gitlab.com/avencores/goida-vpn-configs/-/raw/main/githubmirror/6.txt",
-        "https://gitlab.com/avencores/goida-vpn-configs/-/raw/main/githubmirror/22.txt",
-        "https://gitlab.com/avencores/goida-vpn-configs/-/raw/main/githubmirror/25.txt"
-      ]
+      "source": "proxprobe",
+      "proxprobe_workdir": "/var/lib/free-ai-router/proxprobe",
+      "proxprobe_command": [
+        "proxprobe", "all",
+        "-config", "/etc/free-ai-router/proxprobe.yaml",
+        "-workdir", "/var/lib/free-ai-router/proxprobe",
+        "-core", "mihomo",
+        "-target", "best"
+      ],
+      "proxprobe_max_age": "8h",
+      "max_probe": 0,
+      "max_nodes": 5
     }
   }
 }
@@ -477,10 +536,16 @@ a pool feature; pool mode only makes it visible.
 
 Unit, at the seams:
 
-- `share.go` against fixtures built from the real lines (all four schemes, the
-  xhttp/raw/grpc/reality variety, a base64 vmess, a malformed line that must be
-  counted and skipped, not fatal).
-- dedupe by node key and by exit IP; ranking order; the `max_nodes` cut.
+- `proxprobe.go` against fixtures cut from a real pass: merged records with and
+  without `raw.clash`, a proto the core does not render, a repeated id whose last
+  verdict is `ok: false`, an http record with no merge counterpart.
+- the profile is handed to the core verbatim: an xhttp node keeps its
+  `xhttp-opts`, a reality node its public key and short id, and nothing is
+  re-derived on the way.
+- a stale pass is refused and leaves the current list in place; a missing
+  `merged.jsonl` is the empty-pool error, not a panic.
+- dedupe by exit network (same /24 wins once, the other does not), the refusal that
+  burns its whole network, ranking order; the `max_nodes` cut.
 - schedule: next instant for each wall-clock case including a restart just after
   an evaluation.
 - quarantine transitions and the cursor's skip behaviour.
@@ -490,20 +555,22 @@ Unit, at the seams:
 Integration, on this host:
 
 - `store.go` round trip, atomic write surviving a truncated file.
-- No test may hit a real provider or a real subscription in `go test`; the wiring
+- No test may hit a real provider or a real `proxprobe` in `go test`; the wiring
   is exercised by the live check instead.
 
 Live check, which is the actual acceptance:
 
 1. `CGO_ENABLED=0 go build`, `gofmt -l .` empty, `go vet ./...`, `go test ./...`.
-2. `/tmp/free-ai-router up --transport pool` with the three subscriptions; wait
-   for `/_control/pool` to report a non-empty relevant list.
-3. `curl … /v1/models` → 200, and `/_control/status` shows the node's exit address
-   as the egress address.
+2. `/tmp/free-ai-router up` with `transport_settings.pool` pointing at a finished
+   pass; wait for `/_control/pool` to report a non-empty relevant list.
+3. A chat completion through the tunnel → 200 with a streamed body, and
+   `/_control/status` shows the node's exit address as the egress address.
+   `/v1/models` does not prove it: the catalog is answered from memory, with or
+   without a tunnel.
 4. `kill -9` the active core process → next request still 200, now through the
    next node (address in `/_control/status` changes).
-5. Empty the pool (`max_nodes: 0` or a bogus subscription) → 503 with the message
-   from §10, and the TUI shows the evaluating note.
+5. Empty the pool (`max_nodes: 0`, or an empty work directory) → 503 with the
+   message from §10, and the TUI shows the evaluating note.
 
 ## 17. Risks and unverified assumptions
 
@@ -515,15 +582,15 @@ Live check, which is the actual acceptance:
   runtime. If a node renders into a config the core rejects, the node is
   quarantined with the render error attached; the operator sees it, and the
   evaluation continues.
-- **The share of candidates that survive TCP and then the provider probe is
-  unknown** — nothing here was measured against the real provider. If the
+- **The share of candidates that survive the provider probe is unknown** — the
+  pass was measured, the provider's answer was not (2026-10-25: 0 of 398). If the
   survivors are few, `max_probe` and `max_nodes` are the knobs, and the honest
   consequence is a small pool, not a silent expansion of concurrency.
 - **In-flight behaviour across a swap** is argued from Go's pooling, not measured
   (§9).
 - **The provider's free lane may impose per-address limits tighter than one
   request**, in which case a pool of many nodes behind few addresses has fewer
-  usable slots than its length suggests. The exit-IP dedupe is the mitigation;
+  usable slots than its length suggests. The exit-network dedupe is the mitigation;
   the real number is only learnable by running it.
 - **Quota cost**: one minimal completion per candidate, 60 per evaluation, three
   evaluations per day. Small but not zero, and it is spent on the operator's
@@ -539,3 +606,15 @@ different meanings at different services, which is the same argument the package
 already makes for `KeyRejected` and `Retryable`. The field is set where
 `freeLaneRefusal` matches and is inert for every other consumer, so the gateway
 behaviour is unchanged.
+
+**What a slot does, and what it does not do.** A slot re-evaluates: it runs the
+pass (or reads the one an outside scheduler left), measures, re-ranks and
+replaces the list. The serving node is kept if
+it is still on the new list and still passes a health check (`applyList`); it moves
+only when it stopped working. This follows from the measured allowance: the free lane
+counts requests per **egress network per day**, reset at 00:00 UTC, so moving at
+11:00 to another address of the same day buys no fresh allowance and costs an
+interruption — and a refusal burns the whole network anyway.
+The three slots exist to keep the list fresh, not to spend three addresses a day. If
+the intent is a different exit at every slot regardless of health, `applyList` is the
+one place to change, and the cost is that a stream open at the slot may be cut.
