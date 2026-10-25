@@ -10,6 +10,7 @@ import (
 
 	"free-ai-router/internal/egress"
 	"free-ai-router/internal/provider"
+	"free-ai-router/internal/transport"
 )
 
 // Prober decides whether a node is usable by asking the provider the same
@@ -48,7 +49,11 @@ func (p Prober) Run(ctx context.Context, t *Tunnel) Verdict {
 	if t == nil || t.Proxy == nil {
 		return Verdict{Reason: "no tunnel"}
 	}
-	rt := &http.Transport{Proxy: http.ProxyURL(t.Proxy)}
+	// The probe must be the client's own connection, not merely a request with the
+	// client's headers: the lane looks at the TLS handshake, and a Go one through
+	// this tunnel is answered exactly like a spent address. A probe that measures
+	// the wrong thing would reject every server and blame the servers.
+	rt := transport.ClientTransport(connectDialer(func() (string, error) { return t.Proxy.Host, nil }))
 	defer rt.CloseIdleConnections()
 	return p.Against(ctx, rt)
 }
@@ -58,6 +63,12 @@ func (p Prober) Run(ctx context.Context, t *Tunnel) Verdict {
 func (p Prober) Against(ctx context.Context, rt http.RoundTripper) Verdict {
 	if p.Provider == nil {
 		return Verdict{Reason: "no provider"}
+	}
+	// Without a model the body cannot be shaped the way the lane expects, and the
+	// refusal that comes back is about the body, not the address. Rejecting here
+	// keeps a broken probe from being read as a dead list of servers.
+	if p.Model.ID == "" {
+		return Verdict{Reason: "no probe model"}
 	}
 	timeout := p.Timeout
 	if timeout <= 0 {
@@ -122,7 +133,20 @@ func (p Prober) Against(ctx context.Context, rt http.RoundTripper) Verdict {
 		return v
 	}
 
-	// Any other refusal is about the key, the quota or the model, not the address.
+	// Without a key the free lane's quota belongs to the exit address: the provider
+	// hands free requests out per address, so a node that answers "free usage limit
+	// reached" would pass exactly that refusal on to clients. Rotating over such a
+	// list achieves nothing, which is the whole reason this stage exists.
+	//
+	// With a key the same answer is about the key, and rotating keys is the gateway's
+	// business: rejecting the node there would empty the list and blame the address
+	// for something it did not do.
+	if key == "" && failure.KeyRejected {
+		v.Reason = "the free quota of this address is spent"
+		return v
+	}
+
+	// Any other refusal is about the model or a momentary limit, not the address.
 	// The node is worth keeping: this stage asks one question only.
 	v.Accepted = true
 	v.Reason = fmt.Sprintf("inconclusive: %s", resp.Status)

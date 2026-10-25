@@ -132,6 +132,8 @@ type Observation struct {
 	Logs []string
 	// LogPath is where the journal lives, so that a reader can find it.
 	LogPath string
+	// Pool is the pool transport's list, nil when that transport is not in use.
+	Pool *PoolState
 	// Notes are facts the reader should not have to infer: an unreachable
 	// daemon, a missing journal, a provider whose catalog was not asked for.
 	Notes []string

@@ -1,11 +1,13 @@
 package control
 
 import (
+	"context"
 	"net/http"
 	"sort"
 
 	"free-ai-router/internal/config"
 	"free-ai-router/internal/egress"
+	"free-ai-router/internal/pool"
 	"free-ai-router/internal/provider"
 	"free-ai-router/internal/state"
 )
@@ -385,4 +387,42 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// PoolStatus is what the control surface needs from the pool transport.
+//
+// An interface, not the concrete transport: the surface only reads a snapshot and
+// asks for a re-check, and in direct mode there is no pool at all.
+type PoolStatus interface {
+	Status() pool.Status
+	Recheck(ctx context.Context)
+}
+
+// handlePool answers with the pool's state, or asks for a re-evaluation.
+//
+// The state is a measurement report rather than a configuration view: which servers
+// are relevant, which are quarantined, how the last pass went, and when the next one
+// is due. That is what the operator needs to decide whether to wait or to look at the
+// pass.
+func (h *Handler) handlePool(w http.ResponseWriter, r *http.Request) {
+	if h.Pool == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{
+			"error": "the pool transport is not in use",
+		})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, h.Pool.Status())
+	case http.MethodPost:
+		// The re-check is throttled by the transport itself: a burst of asks must
+		// not turn into a burst of evaluations, each starting processes.
+		h.Pool.Recheck(r.Context())
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"accepted": true,
+			"status":   h.Pool.Status(),
+		})
+	default:
+		methodNotAllowed(w, "pool")
+	}
 }

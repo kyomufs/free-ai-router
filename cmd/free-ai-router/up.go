@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"syscall"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"free-ai-router/internal/control"
 	"free-ai-router/internal/egress"
 	"free-ai-router/internal/gateway"
+	"free-ai-router/internal/pool"
 	"free-ai-router/internal/provider"
 	"free-ai-router/internal/state"
 	"free-ai-router/internal/transport"
@@ -80,15 +82,16 @@ func build(cfg *config.Config) (*daemon, error) {
 	}
 	d.providers = providers
 
-	// The transport.
-	tr, err := transport.NewRegistryWithDefaults().Build(transport.ID(cfg.Transport.Val), transportSettings(cfg))
+	// The key rotation mechanisms. Built before the transport: the pool probes the
+	// provider with the same key the requests carry, and an anonymous credential
+	// must reach the probe as well.
+	d.keys = newKeyRegistry(cfg, d.providers)
+
+	tr, err := transports(d).Build(transport.ID(cfg.Transport.Val), transportSettings(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("transport: %w", err)
 	}
 	d.transport = tr
-
-	// The key rotation mechanisms.
-	d.keys = newKeyRegistry(cfg, d.providers)
 
 	// The egress address.
 	//
@@ -98,7 +101,7 @@ func build(cfg *config.Config) (*daemon, error) {
 	// counters are then kept without an address.
 	d.egress = egress.New(egress.Config{
 		Families:  egress.FamiliesFor(cfg.Family.Val),
-		Transport: func(family string) (http.RoundTripper, error) { return transport.Pinned(family), nil },
+		Transport: d.egressTransport,
 		Log:       d.log,
 	})
 
@@ -169,6 +172,7 @@ func (d *daemon) buildHandler() http.Handler {
 		Config:      d.cfg,
 		Transports:  transportIDs(),
 		Egress:      d.egress,
+		Pool:        poolOf(d.transport),
 	}
 	ctrl.Routes(root)
 
@@ -273,6 +277,7 @@ func cmdUp(args []string) error {
 	if err != nil {
 		return err
 	}
+	f.applyPool(cfg)
 
 	// Printing the effective configuration is useful in itself, and also as a
 	// way to check the merging of the levels without starting anything.
@@ -359,7 +364,9 @@ func transportSettings(cfg *config.Config) map[string]any {
 // The interfaces need strings, not typed identifiers: they build a choice out of
 // them, and the typing adds nothing there.
 func transportIDs() []string {
-	ids := transport.NewRegistryWithDefaults().IDs()
+	// The pool is registered by the daemon rather than by the transport package, so
+	// the list of choices is the daemon's own.
+	ids := append(transport.NewRegistryWithDefaults().IDs(), pool.ID)
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, string(id))
@@ -391,4 +398,107 @@ func stopPollers(reg *provider.Registry) {
 			_ = polling.Stop()
 		}
 	}
+}
+
+// transports assembles the transports this daemon offers.
+//
+// The pool is registered here rather than inside the transport package: it needs the
+// provider to probe with, the key that probe should carry, a log and a place for its
+// own state, and registration is the moment when the daemon's dependencies are within
+// reach. The transport package stays free of providers because of it.
+func transports(d *daemon) *transport.Registry {
+	registry := transport.NewRegistryWithDefaults()
+	registry.Register(pool.TransportInfo, func(cfg map[string]any) (transport.Transport, error) {
+		return pool.New(cfg, pool.Deps{
+			Provider:  d.probeProvider(),
+			Key:       d.probeKey,
+			Log:       poolLogger{d.log},
+			StatePath: poolStatePath(d.cfg),
+		})
+	})
+	return registry
+}
+
+// probeProvider is the provider the pool judges addresses against.
+//
+// The judgement is the provider's own: whether it refuses to serve this address is
+// what the pool asks, and it asks the one provider whose answer it can classify. A
+// daemon without that provider cannot run the pool, and says so at build time.
+func (d *daemon) probeProvider() provider.Provider {
+	if d.providers == nil {
+		return nil
+	}
+	all := d.providers.All()
+	for _, p := range all {
+		if p.ID() == probeProviderID {
+			return p
+		}
+	}
+	if len(all) == 0 {
+		return nil
+	}
+	return all[0]
+}
+
+// probeProviderID is the provider whose refusal the pool understands.
+const probeProviderID provider.ID = "opencode"
+
+// probeKey is the key a probe carries.
+//
+// The first of the provider's keys, and nothing under the anonymous credential: the
+// probe must travel with the same credentials as the requests it stands for, or it
+// answers about a different client.
+func (d *daemon) probeKey() string {
+	p := d.probeProvider()
+	if p == nil {
+		return ""
+	}
+	if d.cfg.CredentialFor(string(p.ID())) == config.CredentialAnonymous {
+		return ""
+	}
+	keys := d.keys.Keys(p.ID())
+	if len(keys) == 0 {
+		return ""
+	}
+	return keys[0]
+}
+
+// poolStatePath is where the pool keeps its list between runs.
+func poolStatePath(cfg *config.Config) string {
+	return filepath.Join(filepath.Dir(cfg.Paths.StateFile), "pool.json")
+}
+
+// egressTransport hands the resolver the path the requests take.
+//
+// Under direct routing the address is observed through a transport of the family
+// being measured, because the family is what the observation is about. Under any
+// other transport the family axis is inert: the path is the transport's own, and
+// asking for a family would describe a route that is not used.
+func (d *daemon) egressTransport(family string) (http.RoundTripper, error) {
+	if d.transport == nil || d.transport.ID() == transport.Direct {
+		return transport.Pinned(family), nil
+	}
+	return d.transport.RoundTripper()
+}
+
+// poolLogger adapts the daemon's log to the pool's one method.
+//
+// The wrapper exists for the nil case: a daemon that could not open its log still
+// runs, and the pool must not dereference a missing logger to report that it could
+// not fetch a subscription.
+type poolLogger struct{ log *state.Logger }
+
+// Warn implements pool.Logger.
+func (l poolLogger) Warn(format string, args ...any) {
+	if l.log != nil {
+		l.log.Warn(format, args...)
+	}
+}
+
+// poolOf exposes the pool to the control surface, or nothing when it is not in use.
+func poolOf(tr transport.Transport) control.PoolStatus {
+	if p, ok := tr.(control.PoolStatus); ok {
+		return p
+	}
+	return nil
 }

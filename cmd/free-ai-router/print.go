@@ -167,7 +167,7 @@ Startup flags:
   --mode                  local | server      deployment form
   --listen                ADDRESS             listen address
   --token                 VALUE               token for server mode
-  --transport             direct              transport
+  --transport             direct | pool       transport
   --upstream              ADDRESS             default address for providers
   --family                auto | v4 | v6      address family
   --credential            anonymous | account  what is presented to the provider

@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"free-ai-router/internal/config"
+	"free-ai-router/internal/pool"
 	"free-ai-router/internal/state"
 	"free-ai-router/internal/tui"
 )
@@ -112,6 +113,7 @@ func (s *tuiSource) Observe(day string) (tui.Observation, error) {
 		}
 	}
 
+	obs.Pool = s.poolReading()
 	obs.Providers = s.providers(snap, obs.Day)
 	obs.Addresses, obs.Totals = matrix(snap, obs.Day)
 
@@ -317,4 +319,61 @@ func isMissing(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "no such file") || strings.Contains(msg, "not exist")
+}
+
+// poolReading reads the pool's list for the monitor.
+//
+// The reading comes from the file the transport writes between runs. A pool that
+// has not run yet leaves the tile empty with the reason in a note, which is the
+// truth: there is nothing to show, not a failure to hide.
+func (s *tuiSource) poolReading() *tui.PoolState {
+	cfg := s.cfg
+	if cfg.Transport.Val != string(pool.ID) {
+		return nil
+	}
+	state, err := pool.Load(poolStatePath(cfg))
+	out := &tui.PoolState{EvalState: state.EvalState, EvaluatedAt: state.EvaluatedAt, NextEvalAt: state.NextEvalAt, Source: state.Source}
+	if state.Last != nil {
+		out.Pass = tui.PassCounts{
+			Parsed:      state.Last.Parsed,
+			HTTPOK:      state.Last.HTTPOK,
+			Unsupported: state.Last.Unsupported,
+			Accepted:    state.Last.Accepted,
+		}
+		if out.Source == "" {
+			out.Source = state.Last.Source
+		}
+	}
+	if err != nil {
+		out.Error = err.Error()
+	}
+	if out.EvalState == "" {
+		out.EvalState = "never"
+	}
+
+	for _, n := range state.Nodes {
+		node := tui.PoolNode{
+			Label:  n.Label,
+			Host:   n.Host,
+			Port:   n.Port,
+			Proto:  n.Proto,
+			RTT:    n.ProbeRTT,
+			ExitIP: n.ExitIP,
+			Geo:    n.ExitGeo,
+		}
+		out.Nodes = append(out.Nodes, node)
+	}
+	out.Relevant = len(out.Nodes)
+	out.Quarantined = len(state.Quarantined)
+	// The file names the serving node by its identifier, which the monitor does not
+	// carry on the row: the row is what the pass called the server.
+	if state.Active != "" {
+		for _, n := range state.Nodes {
+			if n.ID == state.Active {
+				out.Active = tui.PoolNode{Label: n.Label, Host: n.Host, Port: n.Port, Proto: n.Proto, RTT: n.ProbeRTT, ExitIP: n.ExitIP, Geo: n.ExitGeo}
+				break
+			}
+		}
+	}
+	return out
 }

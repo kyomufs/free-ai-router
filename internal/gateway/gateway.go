@@ -29,6 +29,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,6 +39,7 @@ import (
 	"free-ai-router/internal/capability"
 	"free-ai-router/internal/provider"
 	"free-ai-router/internal/state"
+	"free-ai-router/internal/transport"
 )
 
 // Limits. The request body is bounded, because the client can send anything,
@@ -613,6 +615,18 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Pro
 		if err != nil {
 			wd.stop()
 			cause := wd.fired()
+
+			// Nothing to send through. This is neither a provider refusal nor a
+			// broken path: the transport has no server at all. Said plainly, with
+			// the transport's own words, because the alternative — reporting it as an
+			// unreachable provider — sends the client looking for a fault that is
+			// not there.
+			if errors.Is(err, transport.ErrNotReady) {
+				w.Header().Set("retry-after", "30")
+				writeError(w, http.StatusServiceUnavailable, "pool", err.Error())
+				h.recordAbort(model.ID, address, h.fingerprint(key))
+				return
+			}
 
 			// A model that took the connection and then never sent its headers is
 			// as unusable as one whose host is out, and the two were measured in

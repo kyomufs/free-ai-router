@@ -58,6 +58,9 @@ type Handler struct {
 	// than an empty one.
 	Egress EgressStatus
 
+	// Pool — the pool transport, when it is the one in use. Nil in direct mode.
+	Pool PoolStatus
+
 	// Token and RequireToken — the access check.
 	Token        string
 	RequireToken bool
@@ -92,6 +95,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		h.handleKeyRemove(w, r)
 	case "options":
 		h.handleOptions(w, r)
+	case "pool":
+		h.handlePool(w, r)
 	default:
 		http.NotFound(w, r)
 	}

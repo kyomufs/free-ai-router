@@ -41,6 +41,19 @@ type flags struct {
 	idleTimeout          string
 	reasoningIdleTimeout string
 
+	// The pool transport's own settings. They travel into transport_settings.pool
+	// rather than into a flat key, because they describe one transport and not the
+	// daemon.
+	poolCorePath     string
+	poolInterval     string
+	poolMaxNodes     string
+	poolProbeModel   string
+	poolSource       string
+	poolProxprobeDir string
+	poolProxprobeCmd string
+	poolProxprobeAge string
+	poolPassTimeout  string
+
 	// configPath and statePath move the two files the daemon reads and writes.
 	// They are resolved before the file is opened, so they are not part of
 	// config.FlagValues.
@@ -73,7 +86,16 @@ func parseFlags(args []string) (*flags, error) {
 	fs.StringVar(&f.mode, "mode", "", "deployment form: local | server")
 	fs.StringVar(&f.listen, "listen", "", "listen address")
 	fs.StringVar(&f.token, "token", "", "access token for server mode")
-	fs.StringVar(&f.transport, "transport", "", "transport: direct")
+	fs.StringVar(&f.transport, "transport", "", "transport: direct | pool")
+	fs.StringVar(&f.poolCorePath, "pool-core-path", "", "pool: the core binary; empty means mihomo on PATH")
+	fs.StringVar(&f.poolInterval, "pool-interval", "", "pool: how often the list is rebuilt")
+	fs.StringVar(&f.poolMaxNodes, "pool-max-nodes", "", "pool: how many servers the list keeps")
+	fs.StringVar(&f.poolProbeModel, "pool-probe-model", "", "pool: the model the test request asks for")
+	fs.StringVar(&f.poolSource, "pool-source", "", "pool: where the list comes from: proxprobe | builtin")
+	fs.StringVar(&f.poolProxprobeDir, "pool-proxprobe-workdir", "", "pool: proxprobe's work directory (merged.jsonl and http.jsonl)")
+	fs.StringVar(&f.poolProxprobeCmd, "pool-proxprobe-command", "", "pool: proxprobe pass argv; empty means an outside scheduler runs it")
+	fs.StringVar(&f.poolProxprobeAge, "pool-proxprobe-max-age", "", "pool: how old a proxprobe pass may be before it is refused")
+	fs.StringVar(&f.poolPassTimeout, "pool-pass-timeout", "", "pool: how long one proxprobe pass may run")
 	fs.StringVar(&f.upstream, "upstream", "", "default address for providers")
 	fs.StringVar(&f.credential, "credential", "", "what to present: anonymous | account")
 	fs.StringVar(&f.rotation, "rotate", "", "rotate the key on a refusal: on | off")
@@ -139,4 +161,42 @@ func joinArgs(args []string) string {
 func loadConfigSimple(args []string) (*config.Config, error) {
 	cfg, _, err := loadConfig(args)
 	return cfg, err
+}
+
+// applyPool merges the pool's flags into the transport settings.
+//
+// The flags are not a second source of truth: they write into the same map the file
+// fills, and the decoder reads that map. A flag therefore overrides one key of the
+// section and leaves the rest of it alone.
+func (f *flags) applyPool(cfg *config.Config) {
+	overrides := make(map[string]any, 9)
+	for key, value := range map[string]string{
+		"core_path":         f.poolCorePath,
+		"interval":          f.poolInterval,
+		"max_nodes":         f.poolMaxNodes,
+		"probe_model":       f.poolProbeModel,
+		"source":            f.poolSource,
+		"proxprobe_workdir": f.poolProxprobeDir,
+		"proxprobe_command": f.poolProxprobeCmd,
+		"proxprobe_max_age": f.poolProxprobeAge,
+		"pass_timeout":      f.poolPassTimeout,
+	} {
+		if value != "" {
+			overrides[key] = value
+		}
+	}
+	if len(overrides) == 0 {
+		return
+	}
+	if cfg.TransportConfig == nil {
+		cfg.TransportConfig = make(map[string]any)
+	}
+	section, ok := cfg.TransportConfig["pool"].(map[string]any)
+	if !ok {
+		section = make(map[string]any)
+	}
+	for key, value := range overrides {
+		section[key] = value
+	}
+	cfg.TransportConfig["pool"] = section
 }

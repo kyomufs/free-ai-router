@@ -651,6 +651,18 @@ const (
 	// EnvState overrides the state file — so that a one-off run does not touch
 	// the working state.
 	EnvState = "FREE_AI_ROUTER_STATE"
+
+	// The pool transport's variables. They layer over transport_settings.pool, the
+	// same way the flat axes layer over their own keys.
+	EnvPoolCorePath     = "FREE_AI_ROUTER_POOL_CORE_PATH"
+	EnvPoolInterval     = "FREE_AI_ROUTER_POOL_INTERVAL"
+	EnvPoolMaxNodes     = "FREE_AI_ROUTER_POOL_MAX_NODES"
+	EnvPoolProbeModel   = "FREE_AI_ROUTER_POOL_PROBE_MODEL"
+	EnvPoolSource       = "FREE_AI_ROUTER_POOL_SOURCE"
+	EnvPoolProxprobeDir = "FREE_AI_ROUTER_POOL_PROXPROBE_WORKDIR"
+	EnvPoolProxprobeCmd = "FREE_AI_ROUTER_POOL_PROXPROBE_COMMAND"
+	EnvPoolProxprobeAge = "FREE_AI_ROUTER_POOL_PROXPROBE_MAX_AGE"
+	EnvPoolPassTimeout  = "FREE_AI_ROUTER_POOL_PASS_TIMEOUT"
 )
 
 // applyEnv layers the environment over the file.
@@ -695,7 +707,41 @@ func (c *Config) applyEnv() error {
 		}
 		e.dst.Set(d, SourceEnv)
 	}
+
+	// The pool transport's settings. They live in a map without sources of its
+	// own, so the environment writes into the same section the file fills: a
+	// variable overrides one key and leaves the rest of the section alone.
+	for name, key := range map[string]string{
+		EnvPoolCorePath:     "core_path",
+		EnvPoolInterval:     "interval",
+		EnvPoolMaxNodes:     "max_nodes",
+		EnvPoolProbeModel:   "probe_model",
+		EnvPoolSource:       "source",
+		EnvPoolProxprobeDir: "proxprobe_workdir",
+		EnvPoolProxprobeCmd: "proxprobe_command",
+		EnvPoolProxprobeAge: "proxprobe_max_age",
+		EnvPoolPassTimeout:  "pass_timeout",
+	} {
+		v := strings.TrimSpace(os.Getenv(name))
+		if v == "" {
+			continue
+		}
+		c.setTransportSetting("pool", key, v)
+	}
 	return nil
+}
+
+// setTransportSetting writes one key of a transport's settings section.
+func (c *Config) setTransportSetting(transport, key string, value any) {
+	if c.TransportConfig == nil {
+		c.TransportConfig = make(map[string]any)
+	}
+	section, ok := c.TransportConfig[transport].(map[string]any)
+	if !ok {
+		section = make(map[string]any)
+	}
+	section[key] = value
+	c.TransportConfig[transport] = section
 }
 
 // PathOverrides — the paths that the environment and the command line may move.

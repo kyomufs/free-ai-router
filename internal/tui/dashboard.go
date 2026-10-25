@@ -57,6 +57,9 @@ func (m Model) dashboardSection(inner int) []string {
 	rows := [][]tileSpec{{m.todayTile(), m.daemonTile()}}
 	rows = append(rows, m.providerRows(m.providerTiles())...)
 	rows = append(rows, []tileSpec{m.addressesTile()})
+	if m.obs.Pool != nil {
+		rows = append(rows, []tileSpec{m.poolTile()})
+	}
 	return m.tileRows(inner, rows...)
 }
 

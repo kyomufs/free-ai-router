@@ -21,17 +21,25 @@ type Tunnel struct {
 	Port  int
 	Proxy *url.URL
 
-	cmd    *exec.Cmd
-	stderr *tailBuffer
-	dir    string
-	done   chan struct{}
-	once   sync.Once
+	cmd     *exec.Cmd
+	stderr  *tailBuffer
+	dir     string
+	done    chan struct{}
+	once    sync.Once
+	release func()
 }
 
 // Runner starts and stops cores. It knows nothing about how a config is rendered.
+//
+// It also owns the port range: two cores started in parallel would otherwise pick
+// the same port, and the second would fail for a reason that has nothing to do
+// with its node.
 type Runner struct {
 	binary string
 	dir    string
+
+	mu    sync.Mutex
+	taken map[int]bool
 }
 
 // NewRunner takes the binary path explicitly (empty means "look it up on PATH")
@@ -57,10 +65,16 @@ func (r *Runner) Start(ctx context.Context, c Core, n Node) (*Tunnel, error) {
 	if !c.Supports(n) {
 		return nil, fmt.Errorf("pool: core %s cannot render %s", c.ID(), n.Proto)
 	}
-	port, err := FreePort(DefaultPortLow, DefaultPortHigh)
+	port, release, err := r.reserve()
 	if err != nil {
 		return nil, err
 	}
+	keep := false
+	defer func() {
+		if !keep {
+			release()
+		}
+	}()
 	cfg, err := c.Config(n, port)
 	if err != nil {
 		return nil, fmt.Errorf("pool: render %s: %w", n.Proto, err)
@@ -93,13 +107,14 @@ func (r *Runner) Start(ctx context.Context, c Core, n Node) (*Tunnel, error) {
 	}
 
 	t := &Tunnel{
-		Node:   n,
-		Port:   port,
-		Proxy:  &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", itoa(port))},
-		cmd:    cmd,
-		stderr: stderr,
-		dir:    dir,
-		done:   make(chan struct{}),
+		Node:    n,
+		Port:    port,
+		release: release,
+		Proxy:   &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", itoa(port))},
+		cmd:     cmd,
+		stderr:  stderr,
+		dir:     dir,
+		done:    make(chan struct{}),
 	}
 	go func() {
 		cmd.Wait()
@@ -110,6 +125,7 @@ func (r *Runner) Start(ctx context.Context, c Core, n Node) (*Tunnel, error) {
 		t.Stop(0)
 		return nil, err
 	}
+	keep = true
 	return t, nil
 }
 
@@ -160,6 +176,9 @@ func (t *Tunnel) Stop(grace time.Duration) {
 		if t.dir != "" {
 			os.RemoveAll(t.dir)
 		}
+		if t.release != nil {
+			t.release()
+		}
 	})
 }
 
@@ -178,23 +197,6 @@ func (t *Tunnel) Alive() bool {
 
 // ExitReason is the core's own last words, used as a quarantine reason.
 func (t *Tunnel) ExitReason() string { return t.stderr.Tail() }
-
-// FreePort finds a free loopback port in the range and returns it.
-//
-// Bind-then-release leaves a window in which another process could take the port.
-// The alternative — reading the core's own port report — does not exist for a
-// fixed mixed-port, and on a host that runs one router the window is harmless.
-func FreePort(low, high int) (int, error) {
-	for port := low; port <= high; port++ {
-		l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", itoa(port)))
-		if err != nil {
-			continue
-		}
-		l.Close()
-		return port, nil
-	}
-	return 0, fmt.Errorf("pool: no free port in %d-%d", low, high)
-}
 
 type tailBuffer struct {
 	mu    sync.Mutex
@@ -216,4 +218,50 @@ func (b *tailBuffer) Tail() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// reserve takes a port that no other core of this runner holds.
+//
+// The port is held for the life of the tunnel: the listening socket is the core's,
+// and the local address is what the round tripper dials, so two tunnels cannot share
+// one.
+func (r *Runner) reserve() (int, func(), error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.taken == nil {
+		r.taken = make(map[int]bool)
+	}
+	port, err := freePort(DefaultPortLow, DefaultPortHigh, r.taken)
+	if err != nil {
+		return 0, nil, err
+	}
+	r.taken[port] = true
+	release := func() {
+		r.mu.Lock()
+		delete(r.taken, port)
+		r.mu.Unlock()
+	}
+	return port, release, nil
+}
+
+// FreePort finds a free loopback port in the range and returns it.
+//
+// Bind-then-release leaves a window in which another process could take the port.
+// The alternative — reading the core's own port report — does not exist for a
+// fixed mixed-port, and on a host that runs one router the window is harmless.
+func FreePort(low, high int) (int, error) { return freePort(low, high, nil) }
+
+func freePort(low, high int, taken map[int]bool) (int, error) {
+	for port := low; port <= high; port++ {
+		if taken[port] {
+			continue
+		}
+		l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", itoa(port)))
+		if err != nil {
+			continue
+		}
+		l.Close()
+		return port, nil
+	}
+	return 0, fmt.Errorf("pool: no free port in %d-%d", low, high)
 }

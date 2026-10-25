@@ -101,6 +101,8 @@ func cmdData(args []string) error {
 	fmt.Printf("%-12s %-45s %10s\n", "WHAT", "WHERE", "SIZE")
 	fmt.Printf("%-12s %-45s %10s\n", "configuration", cfg.Paths.ConfigFile, humanSize(fileSize(cfg.Paths.ConfigFile)))
 	fmt.Printf("%-12s %-45s %10s\n", "state", cfg.Paths.StateFile, humanSize(fileSize(cfg.Paths.StateFile)))
+	poolFile := poolStatePath(cfg)
+	fmt.Printf("%-12s %-45s %10s\n", "pool", poolFile, humanSize(fileSize(poolFile)))
 
 	logBytes, logFiles, _ := state.LogFileSize(cfg.Paths.LogFile)
 	fmt.Printf("%-12s %-45s %10s", "log", cfg.Paths.LogFile, humanSize(logBytes))

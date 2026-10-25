@@ -17,8 +17,10 @@ type standIn struct {
 	url string
 }
 
-func (s standIn) ID() provider.ID                                  { return "standin" }
-func (s standIn) Models(context.Context) ([]provider.Model, error) { return nil, nil }
+func (s standIn) ID() provider.ID { return "standin" }
+func (s standIn) Models(context.Context) ([]provider.Model, error) {
+	return []provider.Model{{ID: "m", Free: true}}, nil
+}
 
 func (s standIn) Build(provider.Request) (provider.Prepared, error) {
 	return provider.Prepared{
@@ -84,15 +86,27 @@ func TestProberFlagsAddressRefusal(t *testing.T) {
 	}
 }
 
-func TestProberKeepsANodeOnAQuotaRefusal(t *testing.T) {
+// TestProberJudgesAQuotaRefusalByWhoOwnsTheQuota: with a key the quota sits on the
+// credential and the gateway rotates keys, so the node stays. Without one the free
+// lane hands quota out per exit address, and a node that answers "limit reached"
+// would pass exactly that refusal on to clients.
+func TestProberJudgesAQuotaRefusalByWhoOwnsTheQuota(t *testing.T) {
 	srv := judgeServer(t, http.StatusTooManyRequests, `{"error":{"code":"insufficient_quota"}}`)
-	p := Prober{Provider: standIn{url: srv.URL}, Model: provider.Model{ID: "m"}, TraceURL: srv.URL + "/trace", Timeout: 2 * time.Second}
-	v := p.Against(context.Background(), srv.Client().Transport)
-	if !v.Accepted || v.AddressRefused {
-		t.Fatalf("a quota refusal is not an address problem: %+v", v)
+	base := Prober{Provider: standIn{url: srv.URL}, Model: provider.Model{ID: "m"}, TraceURL: srv.URL + "/trace", Timeout: 2 * time.Second}
+
+	keyed := base
+	keyed.Key = func() string { return "sk-test" }
+	if v := keyed.Against(context.Background(), srv.Client().Transport); !v.Accepted || v.AddressRefused {
+		t.Fatalf("a quota on the key is not an address problem: %+v", v)
+	}
+
+	keyless := base
+	v := keyless.Against(context.Background(), srv.Client().Transport)
+	if v.Accepted || v.AddressRefused {
+		t.Fatalf("a spent free lane must not be installed: %+v", v)
 	}
 	if v.Reason == "" {
-		t.Fatal("an inconclusive verdict must say why")
+		t.Fatal("a rejected verdict must say why")
 	}
 }
 

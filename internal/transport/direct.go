@@ -53,6 +53,10 @@ func NewDirect(cfg map[string]any) (Transport, error) {
 	return &direct{rt: buildDirectTransport(parsed.Family)}, nil
 }
 
+// Dialer is a plain TCP dialer. It is what a client transport is built on when the
+// connection is made by someone else — by a tunnel, for instance.
+type Dialer func(ctx context.Context, network, addr string) (net.Conn, error)
+
 // buildDirectTransport assembles an http.Transport with a warm pool.
 func buildDirectTransport(family string) *http.Transport {
 	dialer := &net.Dialer{
@@ -63,13 +67,27 @@ func buildDirectTransport(family string) *http.Transport {
 	// A family is given: we take the dial into our own hands and substitute the
 	// network name. A family error becomes an ordinary connection error — that
 	// is how the caller will see it, and no separate path is needed for it.
-	dial := dialer.DialContext
+	dial := Dialer(dialer.DialContext)
 	if network := networkFor(family); network != "" {
 		dial = func(ctx context.Context, _, addr string) (net.Conn, error) {
 			return dialer.DialContext(ctx, network, addr)
 		}
 	}
 
+	return ClientTransport(dial)
+}
+
+// ClientTransport returns the HTTP transport the provider admits, over dial.
+//
+// WHY IT IS EXPORTED, and not spelled out twice. The provider decides whether a
+// request may use the free lane by the TLS client, so the transport IS part of the
+// wire contract (see bunClientHello). Anything that sends provider traffic from a
+// different place — the pool, which sends it through a server — must present the
+// same client, or it is refused for a reason that has nothing to do with the exit
+// address and every measurement it makes is worthless.
+//
+// The caller owns the returned pool and must close its idle connections.
+func ClientTransport(dial Dialer) *http.Transport {
 	// The TLS client is part of the request here, not an implementation detail.
 	//
 	// MEASURED on 2026-10-24 against the inference endpoint: the same method,
