@@ -167,6 +167,7 @@ func buildOpenCode(id string, pc config.ProviderConfig, defaults Defaults) (prov
 	return opencode.New(opencode.Config{
 		ID:           provider.ID(id),
 		BaseURL:      baseURL,
+		ChatPath:     stringSetting(settings, "chat_path"),
 		MetaURL:      stringSetting(settings, "meta_url"),
 		APIKey:       pc.ProviderKey(),
 		AnonymousKey: stringSetting(settings, "anonymous_key"),

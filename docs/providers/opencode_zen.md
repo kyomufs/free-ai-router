@@ -17,17 +17,22 @@ sends, the errors it produces. Every claim carries its evidence:
 
 | path | method | answer | note |
 | --- | --- | --- | --- |
-| `/inference/v1/chat/completions` | POST | 200 | the provider's base URL |
-| `/inference/v1/models` | GET | 200 | model list, same base |
-| `/inference/openai/v1/chat/completions` | POST | 200 | the path the reference client uses |
+| `/inference/openai/v1/chat/completions` | POST | 200 | the chat path the reference client uses; the provider's default (`DefaultChatPath`) |
+| `/inference/v1/chat/completions` | POST | 429 | the legacy chat path; now routed to the exhausted lane |
+| `/inference/v1/models` | GET | 200 | model list, the provider's base URL |
 | `/inference/go/v1/models` | GET | 200 | paid lane, ids carry no `-free` suffix |
 | `/inference/go/openai/v1/models` | GET | 404 | not a route |
 | `/zen/v1/models` | GET | 200 | legacy alias |
 | `/zen/go/v1/models` | GET | 200 | legacy alias |
 
-measured 2026-10-19. The provider's `base_url` is `https://opencode.ai/inference/v1`
-(`DefaultBaseURL` in `internal/provider/opencode/provider.go`), taken from the
-`api` key of the published model catalog rather than from the client's code.
+measured 2026-10-19, re-measured 2026-10-25. The provider's `base_url` is
+`https://opencode.ai/inference/v1` (`DefaultBaseURL` in
+`internal/provider/opencode/provider.go`), taken from the `api` key of the
+published model catalog rather than from the client's code. The chat path is
+resolved separately: `chat_path` in the provider settings, default
+`/inference/openai/v1/chat/completions`. A custom `base_url` for a mirror keeps
+the model list under its own path; the chat path stays the absolute default
+unless `chat_path` is set.
 
 ## Credential
 
@@ -53,10 +58,14 @@ the rest of this file relies on:
 
 ## The request the lane admits
 
-Four conditions, each measured one request at a time on 2026-10-19 with the rest
-held constant. A request that fails any of them is answered `403` with a
-`FreeTierError` *before a model is chosen* — so the refusal says nothing about
-the model, the quota or the account.
+The lane has two different refusals, and they mean different things. `403
+FreeTierError` arrives before a model is chosen and describes the **shape** of
+the request. `429 FreeUsageLimitError` is the quota refusal — and, on the client
+lane, also what a request that does not look like the shipped client gets: such
+traffic is routed to the exhausted legacy bucket.
+
+The 403 conditions, each measured one request at a time on 2026-10-19 with the
+rest held constant:
 
 | # | condition | without it |
 | --- | --- | --- |
@@ -109,11 +118,42 @@ Condition 4, the `User-Agent`, is checked for "looks like an OpenCode build"
 Version digits and the suffix are ignored; a value that does not name an OpenCode
 release is refused.
 
-The system prompt is **not** a condition: with the tools present and the session
-header canonical, a request whose only message is the user's is admitted
-(measured 2026-10-19). The gateway renders the recognised prompt anyway
-(`RenderSystemPrompt`), from the names of the active tools, the way the client
-assembles it (`packages/core/src/session/system-prompt.ts`).
+### The 429 conditions
+
+Measured 2026-10-25, each flipping 429/200 with everything else held constant,
+including the body, the headers and the address:
+
+| # | condition | without it |
+| --- | --- | --- |
+| 5 | TLS ClientHello of Bun/BoringSSL | 429; `crypto/tls`, curl/OpenSSL and uTLS with Chrome's hello are all refused |
+| 6 | chat path `/inference/openai/v1/chat/completions` | 429 on `/inference/v1/chat/completions`, even with the client's own body |
+| 7 | canonical system prompt + environment block | 429; the canonical text alone, a generic prompt and the superseded rendered prompt are refused |
+
+Condition 5 is implemented in `internal/transport/bunhello.go` and
+`internal/transport/direct.go`: a hand-built hello that follows the captured Bun
+one. Condition 6 is `DefaultChatPath` / `chat_path`. Condition 7 is the
+reference client's `packages/opencode/src/session/prompt/default.txt` at
+v1.19.3, followed by the block the client appends:
+
+    You are powered by the model named <model>. The exact model ID is opencode/<model>
+    Here is some useful information about the environment you are running in:
+    <env>
+      Working directory: ...
+      Workspace root folder: ...
+      Is directory a git repo: ...
+      Platform: linux
+      Today's date: ...
+    </env>
+
+The values in the block are not checked: a different working directory and date
+kept the 200. The block's shape is. The client's own system part may follow the
+block; the provider keeps it there, so the harness's rules are not lost
+(`internal/provider/opencode/prompt.go`).
+
+The 2026-10-19 reading that "the system prompt is not a condition" was taken on
+the legacy lane while it was still open. It no longer describes the client lane:
+the same tools and session header with no system message are now answered 429,
+and the canonical prompt is what flips the verdict.
 
 ## Headers
 
@@ -139,25 +179,28 @@ itself, so offering `br` or `zstd` would turn every answer into unparsed bytes.
 
 ## The reference client's wire shape
 
-Captured 2026-10-19 by running the installed client through a TLS-terminating
-proxy. The client's request and this gateway's:
+Captured 2026-10-19 and re-measured 2026-10-25 by running the installed client
+through a TLS-terminating proxy. The client's request and this gateway's:
 
 | field | the client | this gateway |
 | --- | --- | --- |
 | protocol | HTTP/1.1, ALPN `http/1.1` | HTTP/1.1, ALPN `http/1.1` |
-| path | `/inference/openai/v1/chat/completions` | `/inference/v1/chat/completions` |
+| TLS ClientHello | Bun/BoringSSL | the captured Bun hello (`internal/transport/bunhello.go`) |
+| path | `/inference/openai/v1/chat/completions` | the same |
 | headers | the set above | the same set, the same spelling |
 | order | as listed above | alphabetical, `Host` first |
 | `Accept-Encoding` | `gzip, deflate, br, zstd` | `gzip` |
 | body | `max_tokens`, `tool_choice` present | only what the caller sent |
+| system message | `default.txt` + environment block | the same, then the client's rules |
 
-Both paths are answered 200 with this shape, so the path is a choice, not a
-condition. The order is Go's and is not decisive — curl, whose order differs from
-both, is admitted. The TLS ClientHello cannot be matched from `crypto/tls` at
-all; measured JA3: client `8f1d483d7c5fba63a9170d6e4dd66f93`, Go
-`96458b3de39df5d47bc5c4a9f10f8f26`, curl `0659743d0a8904909448456a6dfa4b06` — all
-three admitted while the lane was open, so the fingerprint is not a condition
-today.
+The path and the hello are now conditions, not choices: the legacy path is
+answered 429 even with the client's own body, and so is any hello other than the
+Bun one. The order is Go's and is not decisive — curl, whose order differs from
+both, is admitted once its hello matches. The TLS ClientHello cannot be matched
+from `crypto/tls` at all; measured JA3: client
+`8f1d483d7c5fba63a9170d6e4dd66f93`, Go `96458b3de39df5d47bc5c4a9f10f8f26`,
+curl `0659743d0a8904909448456a6dfa4b06`. On the open legacy lane all three were
+admitted; on the client lane only the Bun hello is.
 
 ## What the vendor asks of a client it does not ship
 
@@ -207,7 +250,8 @@ tokens from a stream has nowhere else to read them.
 
 | status | body | class | lever |
 | --- | --- | --- | --- |
-| 403 | `{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building."}}` | request shape | the four conditions above |
+| 403 | `{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building."}}` | request shape | the 403 conditions above |
+| 429 | `{"type":"error","error":{"type":"FreeUsageLimitError","message":"Free usage limit reached. Subscribe to OpenCode Go to keep going: https://opencode.ai/go"}}` | quota, or traffic that does not look like the client | the 429 conditions above, or another address, or time |
 | 403 | `{"code":null,"message":"OpenCode's free models aren't available from your current network because we've detected abusive traffic from this IP address. This isn't related to your account. If you're on a VPN or proxy, turn it off and try again, or subscribe to OpenCode Go…"}` | egress address | none in the request; the vendor's team, or another address, or time |
 | 401 | `{"error":{"type":"server_error","message":"Upstream request failed: Go requires a credential"}}` | paid lane | a credential; the free lane has no equivalent |
 | 403 / 429 / 503 | `{"error":{"type":"server_error","message":"Upstream request failed: Endpoint is unavailable."}}` | the model host | another model of the same lane; the requested one answers nothing until the vendor restores it |
@@ -380,15 +424,18 @@ curl -sN http://127.0.0.1:8787/v1/chat/completions \
 
 | file | what it holds |
 | --- | --- |
-| `internal/provider/opencode/provider.go` | request assembly, headers, forced stream, path |
-| `internal/provider/opencode/contract.go` | the four conditions, the wire-shape table, the budgets |
+| `internal/provider/opencode/provider.go` | request assembly, headers, forced stream, chat path |
+| `internal/provider/opencode/prompt.go` | the canonical system prompt and the environment block |
+| `internal/provider/opencode/prompt/default.txt` | `default.txt` of opencode v1.19.3, embedded |
+| `internal/provider/opencode/contract.go` | the admission conditions, the wire-shape table, the budgets |
 | `internal/provider/opencode/classify.go` | refusal classification, the quota and auth code sets |
 | `internal/provider/opencode/sessionids.go` | session identifier derivation, the shape the check admits |
 | `internal/provider/opencode/sessioncache.go` | one session per conversation, bounded |
 | `internal/provider/opencode/identifiers.go` | the identifier formula of the shipped client, reproduced |
 | `internal/gateway/collect.go` | event stream merged into one body for a non-streaming caller |
 | `internal/gateway/gateway.go` | the rotation loop: key, repeat, and the move to another model |
-| `internal/transport/direct.go` | egress: HTTP/1.1, ALPN, no proxy of its own |
+| `internal/transport/bunhello.go` | the captured Bun ClientHello |
+| `internal/transport/direct.go` | egress: HTTP/1.1, ALPN, uTLS with the Bun hello |
 
 ## Sources
 
@@ -399,6 +446,7 @@ Vendor tree, `~/Projects/opencode` (branch `dev`):
 | `packages/console/app/src/lib/inference-proxy.ts` | keyless free lane, `cf-connecting-ip` forwarded as `x-real-ip` |
 | `packages/core/src/app.ts` | the `User-Agent` format |
 | `packages/core/src/session/system-prompt.ts` | the system prompt assembled from tool names |
+| `packages/opencode/src/session/prompt/default.txt` (tag `v1.19.3`) | the canonical chat prompt embedded in `prompt/default.txt` |
 | `packages/ai/src/provider-error.ts` | `classifyProviderFailure`, the quota and auth code sets |
 | `packages/schema/src/identifier.ts` | the identifier formula: inverted timestamp, 12 hex + 14 base62 |
 | `packages/core/src/session/model-request.ts` | the header set of a live request, `x-opencode-client` included |

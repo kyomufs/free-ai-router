@@ -34,6 +34,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -52,12 +53,24 @@ const liveModelsPath = "/models"
 
 const ID provider.ID = "opencode"
 
-// DefaultBaseURL is the address of the provider's inference endpoint.
+// DefaultBaseURL is the address of the provider's model list.
 //
 // Taken from the model catalog (snapshot.txt, the `api` key) rather than from
 // the client's code: the catalog is what the client goes by when choosing a
-// model.
+// model. It is NOT the chat address: the service moved chat to a
+// protocol-specific path, and the old one now answers from a different,
+// address-limited lane (see DefaultChatPath).
 const DefaultBaseURL = "https://opencode.ai/inference/v1"
+
+// DefaultChatPath is the path of the chat endpoint on the service's host.
+//
+// MEASURED on 2026-10-24: the reference client sends chat to
+// /inference/openai/v1/chat/completions. The old /inference/v1/chat/completions
+// still answers, but from the address-limited free lane, and with a spent
+// address it answers 429 FreeUsageLimitError while the client's path answers
+// 200 with the same body, headers and TLS client. The path is therefore part of
+// the wire contract, not a cosmetic alias.
+const DefaultChatPath = "/inference/openai/v1/chat/completions"
 
 // Config is the provider settings, parsed from the gateway configuration.
 type Config struct {
@@ -71,6 +84,13 @@ type Config struct {
 	ID provider.ID
 	// BaseURL overrides the provider address.
 	BaseURL string
+	// ChatPath overrides the chat path on the BaseURL host.
+	//
+	// A path rather than a whole URL: the catalog and the chat endpoint share a
+	// host but not a path, and a deployment that mirrors the service usually
+	// keeps that arrangement. An absolute http(s) URL is accepted too, for a
+	// mirror that serves chat from another host.
+	ChatPath string
 	// MetaURL overrides the address of the property catalog.
 	//
 	// The properties of a model — limits, reasoning, price — are published
@@ -123,6 +143,7 @@ type Provider struct {
 
 	id           provider.ID
 	baseURL      string
+	chatURL      string
 	anonymousKey string
 	userAgent    string
 	shellName    string
@@ -147,6 +168,7 @@ func New(cfg Config) (*Provider, error) {
 	if p.baseURL == "" {
 		p.baseURL = DefaultBaseURL
 	}
+	p.chatURL = resolveChatURL(p.baseURL, cfg.ChatPath)
 	p.anonymousKey = cfg.AnonymousKey
 	if p.anonymousKey == "" {
 		p.anonymousKey = "public"
@@ -241,7 +263,7 @@ func (p *Provider) Build(req provider.Request) (provider.Prepared, error) {
 	headers := p.buildHeaders(p.stableSession(req))
 
 	return provider.Prepared{
-		URL:     p.baseURL + "/chat/completions",
+		URL:     p.chatURL,
 		Headers: headers,
 		Body:    raw,
 		// The body always asks for a stream, so the gateway has to know that
@@ -256,12 +278,44 @@ func (p *Provider) Build(req provider.Request) (provider.Prepared, error) {
 	}, nil
 }
 
+// resolveChatURL composes the chat endpoint from the catalog address.
+//
+// The path is absolute by default because the service puts chat on a different
+// path of the same host. A mirror may override it with another absolute path,
+// or with a whole URL when chat lives on a separate host.
+func resolveChatURL(base, path string) string {
+	if path == "" {
+		path = DefaultChatPath
+	}
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return path
+	}
+	if u, err := url.Parse(base); err == nil && u.Scheme != "" && u.Host != "" {
+		return u.Scheme + "://" + u.Host + path
+	}
+	return strings.TrimRight(base, "/") + path
+}
+
 // buildBody assembles the request body.
 func (p *Provider) buildBody(req provider.Request) (map[string]any, error) {
 	messages, err := p.buildMessages(req)
 	if err != nil {
 		return nil, err
 	}
+
+	// The system message is rendered here, not taken from the client as-is.
+	//
+	// MEASURED on 2026-10-25: the free lane admits a request only when the
+	// system message carries the reference client's canonical prompt and the
+	// environment block that follows it. A request without a system message,
+	// with a generic one, or with the prompt this package used to render is
+	// answered 429 FreeUsageLimitError; the canonical text plus the block is
+	// answered 200. The client's own rules are kept after the block, which was
+	// admitted as well.
+	messages = append([]map[string]any{{
+		"role":    "system",
+		"content": p.systemPrompt(req.Model, req.System),
+	}}, messages...)
 
 	body := map[string]any{
 		"model":    req.Model.ID,
@@ -324,11 +378,6 @@ func (p *Provider) buildMessages(req provider.Request) ([]map[string]any, error)
 	}
 	thinking := reasoningMode(req)
 
-	// The system part is one message, rendered by the provider.
-	if req.System != "" {
-		out = append(out, map[string]any{"role": "system", "content": req.System})
-	}
-
 	for _, m := range req.Messages {
 		switch m.Role {
 		case "assistant":
@@ -373,7 +422,12 @@ func (p *Provider) buildMessages(req provider.Request) ([]map[string]any, error)
 				"content":      nonEmpty(m.Text),
 			})
 
-		default: // user, system from the client
+		case "system":
+			// The system part is assembled separately (see buildBody); a system
+			// entry in the history would send the same instruction twice.
+			continue
+
+		default: // user
 			content, err := p.buildUserContent(m)
 			if err != nil {
 				return nil, err
