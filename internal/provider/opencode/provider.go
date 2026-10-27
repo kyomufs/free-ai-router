@@ -656,10 +656,17 @@ func (p *Provider) gateTools() []gateTool {
 // live request rather than guessed: `Content-Type`, `User-Agent`,
 // `x-opencode-client`, `x-opencode-project`, `x-opencode-request`,
 // `x-opencode-session`, `x-opencode-session-id`, `Connection: keep-alive`,
-// `Accept: */*` — and nothing else. The client sends no separate affinity
-// header: the value of `x-opencode-session` is the affinity (the group root for
-// cache routing) and the value of `x-opencode-session-id` is the session itself,
-// so for a flat session the two coincide and for a nested one they diverge.
+// `Accept: */*`. The value of `x-opencode-session` is the affinity (the group
+// root for cache routing) and the value of `x-opencode-session-id` is the
+// session itself, so for a flat session the two coincide and for a nested one
+// they diverge.
+//
+// v1.19.x sent no separate affinity header. v2.1.2 (captured from its sources,
+// packages/core/src/session/model-request.ts) repeats the affinity under
+// `x-session-affinity` and `X-Session-Id`, and no longer sends
+// `x-opencode-request`. The request is the union: the lane admitted both shapes
+// when measured on 2026-10-27, and an extra header the client used to send is
+// not a difference the lane punishes.
 //
 // The names are written into the map in the client's spelling, because
 // http.Header.Set canonicalises them and a canonicalised name is an observable
@@ -693,9 +700,15 @@ func (p *Provider) buildHeaders(ids provider.SessionIDs) http.Header {
 
 	set("x-opencode-project", ids.Project)
 	set("x-opencode-request", ids.Message)
-	set("x-opencode-session", nonEmpty(ids.Affinity, ids.Session))
+	affinity := nonEmpty(ids.Affinity, ids.Session)
+	set("x-opencode-session", affinity)
 	set("x-opencode-session-id", ids.Session)
 	set("x-opencode-parent-session-id", ids.Parent)
+	// v2 of the client repeats the affinity under two more spellings; the lane
+	// does not require them, but the client sends them, and an emulation that
+	// omits what the client sends is a difference the service can see.
+	set("x-session-affinity", affinity)
+	set("X-Session-Id", affinity)
 
 	return h
 }

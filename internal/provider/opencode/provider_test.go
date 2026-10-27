@@ -190,8 +190,11 @@ func TestSessionAndAffinityAreDistinct(t *testing.T) {
 	if got := header(prep.Headers, "x-opencode-session"); got != "ses_000000000000BBBBBBBBBBBBBB" {
 		t.Fatalf("x-opencode-session = %q, want the affinity", got)
 	}
-	if got := header(prep.Headers, "x-session-affinity"); got != "" {
-		t.Fatalf("x-session-affinity = %q, but the reference client sends no such header", got)
+	if got := header(prep.Headers, "x-session-affinity"); got != "ses_000000000000BBBBBBBBBBBBBB" {
+		t.Fatalf("x-session-affinity = %q, want the affinity", got)
+	}
+	if got := header(prep.Headers, "X-Session-Id"); got != "ses_000000000000BBBBBBBBBBBBBB" {
+		t.Fatalf("X-Session-Id = %q, want the affinity", got)
 	}
 }
 
@@ -856,6 +859,8 @@ func TestHeaderSetMatchesReferenceClient(t *testing.T) {
 		"x-opencode-request":    "msg_000000000000CCCCCCCCCCCCCC",
 		"x-opencode-session":    "ses_000000000000AAAAAAAAAAAAAA",
 		"x-opencode-session-id": "ses_000000000000AAAAAAAAAAAAAA",
+		"x-session-affinity":    "ses_000000000000AAAAAAAAAAAAAA",
+		"X-Session-Id":          "ses_000000000000AAAAAAAAAAAAAA",
 	}
 	for name, value := range want {
 		if got := header(prep.Headers, name); got != value {
