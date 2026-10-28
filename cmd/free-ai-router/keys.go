@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+
 	"free-ai-router/internal/capability"
 	"free-ai-router/internal/config"
 	"free-ai-router/internal/gateway"
@@ -178,3 +180,71 @@ func fingerprint(key string) string {
 // Build-time check: the registry is obliged to satisfy the interface the control
 // surface expects.
 var _ gateway.KeyRotationRegistry = (*keyRegistry)(nil)
+
+// expandKeyPlaceholders replaces `${NAME}` inside `settings.keys` with the value
+// of the environment variable NAME.
+//
+// WHY. A declaration system writes the key list as NAMES, not values: the
+// rendered configuration is world-readable, and the keys are handed to the
+// daemon through the environment. A substitution in the declaration system
+// would leave the dotted name in the file — an interpolation nobody reads back
+// looks exactly like working configuration — so the expansion belongs HERE,
+// where the key is about to be spent.
+//
+// Absent or empty variables are dropped with the placeholder: an empty string in
+// the pool is a key that gets refused on every request. The daemon still refuses
+// to start under the account credential with no keys at all, which is the exit
+// that reports the real problem.
+func expandKeyPlaceholders(cfg *config.Config) {
+	for name, pc := range cfg.Providers {
+		raw, ok := pc.Settings["keys"]
+		if !ok {
+			continue
+		}
+		var items []any
+		switch v := raw.(type) {
+		case []any:
+			items = v
+		case []string:
+			for _, s := range v {
+				items = append(items, s)
+			}
+		default:
+			continue
+		}
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			s, ok := item.(string)
+			if !ok {
+				continue
+			}
+			if value, isRef := envRef(s); isRef {
+				if value == "" {
+					continue
+				}
+				s = value
+			}
+			out = append(out, s)
+		}
+		pc.Settings["keys"] = out
+		cfg.Providers[name] = pc
+	}
+}
+
+// envRef resolves a whole-string `${NAME}` reference.
+//
+// The whole string must be the reference: a key that merely contains a `${`
+// is a key, and rewriting part of it would silently send something else.
+func envRef(s string) (string, bool) {
+	if len(s) < 4 || s[0] != '$' || s[1] != '{' || s[len(s)-1] != '}' {
+		return "", false
+	}
+	name := s[2 : len(s)-1]
+	for i, r := range name {
+		ok := r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (i > 0 && r >= '0' && r <= '9')
+		if !ok {
+			return "", false
+		}
+	}
+	return os.Getenv(name), true
+}

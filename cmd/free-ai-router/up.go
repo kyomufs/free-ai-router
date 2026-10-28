@@ -85,6 +85,7 @@ func build(cfg *config.Config) (*daemon, error) {
 	// The key rotation mechanisms. Built before the transport: the pool probes the
 	// provider with the same key the requests carry, and an anonymous credential
 	// must reach the probe as well.
+	expandKeyPlaceholders(cfg)
 	d.keys = newKeyRegistry(cfg, d.providers)
 
 	tr, err := transports(d).Build(transport.ID(cfg.Transport.Val), transportSettings(cfg))
