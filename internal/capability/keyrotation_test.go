@@ -62,6 +62,50 @@ func TestKeyRotationEmptyStringsDropped(t *testing.T) {
 	}
 }
 
+// TestKeyRotationDuplicatesCollapse — a repeated key is one key.
+//
+// The repeat arrives on its own: the section supplies keys from three places at
+// once, and the same key written in two of them must not look like a pool of
+// two. Otherwise HasAlternatives promises an alternative that does not exist,
+// and the retry spends a request to get the same key back.
+func TestKeyRotationDuplicatesCollapse(t *testing.T) {
+	v, err := NewKeyRotation(map[string]any{"keys": []any{"a", "a", "b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr := v.(*KeyRotation)
+
+	if kr.Len() != 2 {
+		t.Fatalf("Len = %d, want 2", kr.Len())
+	}
+	if !kr.HasAlternatives() {
+		t.Fatal("two distinct keys must report alternatives")
+	}
+
+	// The pair is genuinely different — the property "a has an alternative"
+	// has to hold in practice, not merely in Len.
+	if got, ok := kr.Take("a"); !ok || got != "b" {
+		t.Fatalf("Take(%q) = %q, %v; want %q, true", "a", got, ok, "b")
+	}
+
+	// And when the repeat was the ONLY content, there is nothing to rotate.
+	v, err = NewKeyRotation(map[string]any{"keys": []any{"a", "a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr = v.(*KeyRotation)
+
+	if kr.Len() != 1 {
+		t.Fatalf("Len = %d, want 1", kr.Len())
+	}
+	if kr.HasAlternatives() {
+		t.Fatal("a doubled single key must report no alternatives")
+	}
+	if _, ok := kr.Take("a"); ok {
+		t.Fatal("Take must fail when the only key is the current one")
+	}
+}
+
 // TestKeyRotationTakeReturnsDifferentKey — the point of the mechanism: the
 // retry proceeds with a DIFFERENT key.
 func TestKeyRotationTakeReturnsDifferentKey(t *testing.T) {

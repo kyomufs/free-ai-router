@@ -137,9 +137,28 @@ func NewKeyRotation(cfg map[string]any) (any, error) {
 	// Drop empty keys: an empty string in the list is almost always the trace of
 	// a stray comma in the configuration, and keeping it would mean handing out
 	// a key that is bound to be rejected.
+	//
+	// Drop repeats as well. A repeat is not a rarity but the ordinary outcome of
+	// assembly: the daemon counts the keys of a section from three places at
+	// once (api_key, api_key_env, settings.keys), and an operator who wrote the
+	// same key in two of them meant one key, not two. Keeping the repeat would
+	// make Len lie and turn HasAlternatives into a false "there is another one"
+	// — while Next and Take, facing two equal strings, would hand back the very
+	// key that had just been refused. Rotation would stop working exactly where
+	// it is switched on, and silently.
 	keys := make([]string, 0, len(parsed.Keys))
 	for _, k := range parsed.Keys {
-		if k != "" {
+		if k == "" {
+			continue
+		}
+		duplicate := false
+		for _, existing := range keys {
+			if existing == k {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
 			keys = append(keys, k)
 		}
 	}
