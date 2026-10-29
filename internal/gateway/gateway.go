@@ -27,6 +27,7 @@ package gateway
 import (
 	"bytes"
 	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"encoding/json"
 	"errors"
@@ -35,6 +36,9 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 
 	"free-ai-router/internal/capability"
 	"free-ai-router/internal/provider"
@@ -507,6 +511,11 @@ func (h *Handler) buildRequest(r *http.Request, body map[string]any, p provider.
 		req.ToolChoice = raw
 	}
 	if v, ok := body["max_tokens"].(float64); ok && v > 0 {
+		req.MaxTokens = int(v)
+	}
+	// The newer spelling is what the v2 client sends. Both are read because the
+	// gateway's surface is OpenAI-compatible, and a caller may use either.
+	if v, ok := body["max_completion_tokens"].(float64); ok && v > 0 {
 		req.MaxTokens = int(v)
 	}
 	if v, ok := body["temperature"].(float64); ok {
@@ -1014,7 +1023,9 @@ func (h *Handler) do(req *http.Request, p provider.Provider) (*http.Response, er
 // message the provider wrote.
 //
 // The reference service compresses its JSON, refusals included, so this is the
-// ordinary path and not an edge case.
+// ordinary path and not an edge case. Every encoding the client offers is
+// handled; the earlier gzip-only form was a visible difference from the client
+// on the wire.
 func decode(resp *http.Response, err error) (*http.Response, error) {
 	if err != nil {
 		return nil, err
@@ -1025,25 +1036,44 @@ func decode(resp *http.Response, err error) (*http.Response, error) {
 		return resp, nil
 	}
 
-	// Only gzip is ever offered, so any other value means a header this package
-	// did not write reached the provider. Passing it through undecoded would
-	// hand the client compressed octets labelled as plain text, which is worse
-	// than a failure the caller can see.
-	if encoding != "gzip" {
+	var reader io.Reader
+	var decompressor io.Closer
+	switch encoding {
+	case "gzip":
+		zr, zerr := gzip.NewReader(resp.Body)
+		if zerr != nil {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("content-encoding gzip: %w", zerr)
+		}
+		reader, decompressor = zr, zr
+	case "deflate":
+		zr, zerr := zlib.NewReader(resp.Body)
+		if zerr != nil {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("content-encoding deflate: %w", zerr)
+		}
+		reader, decompressor = zr, zr
+	case "br":
+		reader = brotli.NewReader(resp.Body)
+	case "zstd":
+		zr, zerr := zstd.NewReader(resp.Body)
+		if zerr != nil {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("content-encoding zstd: %w", zerr)
+		}
+		reader, decompressor = zr, zr.IOReadCloser()
+	default:
+		// A coding nobody asked for means a header this package did not write
+		// reached the provider. Passing it through undecoded would hand the
+		// client compressed octets labelled as plain text, which is worse than a
+		// failure the caller can see.
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("unsupported content-encoding %q", encoding)
 	}
 
-	zr, zerr := gzip.NewReader(resp.Body)
-	if zerr != nil {
-		_ = resp.Body.Close()
-		return nil, fmt.Errorf("content-encoding gzip: %w", zerr)
-	}
-
-	// The compressed reader closes over the body, so the two are closed as one:
-	// closing the gzip reader alone would leave the connection to the provider
-	// open.
-	resp.Body = &decodedBody{Reader: zr, gzip: zr, body: resp.Body}
+	// The decompressed reader closes over the body, so the two are closed as
+	// one: closing it alone would leave the connection to the provider open.
+	resp.Body = &decodedBody{Reader: reader, decompressor: decompressor, body: resp.Body}
 	resp.Header.Del("Content-Encoding")
 	resp.Header.Del("Content-Length")
 	resp.ContentLength = -1
@@ -1055,12 +1085,14 @@ func decode(resp *http.Response, err error) (*http.Response, error) {
 // reader that decompresses and the connection underneath.
 type decodedBody struct {
 	io.Reader
-	gzip *gzip.Reader
-	body io.ReadCloser
+	decompressor io.Closer
+	body         io.ReadCloser
 }
 
 func (b *decodedBody) Close() error {
-	_ = b.gzip.Close()
+	if b.decompressor != nil {
+		_ = b.decompressor.Close()
+	}
 	return b.body.Close()
 }
 

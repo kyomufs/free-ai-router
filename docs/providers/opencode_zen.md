@@ -128,76 +128,103 @@ including the body, the headers and the address:
 | 5 | TLS ClientHello of Bun/BoringSSL | 429; `crypto/tls`, curl/OpenSSL and uTLS with Chrome's hello are all refused |
 | 6 | chat path `/inference/openai/v1/chat/completions` | 429 on `/inference/v1/chat/completions`, even with the client's own body |
 | 7 | canonical system prompt + environment block | 429; the canonical text alone, a generic prompt and the superseded rendered prompt are refused |
+| 8 | no v1 markers (see below) | 429; the lane routes what it reads as v1 traffic into the exhausted legacy bucket |
 
-Condition 5 is implemented in `internal/transport/bunhello.go` and
-`internal/transport/direct.go`: a hand-built hello that follows the captured Bun
-one. Condition 6 is `DefaultChatPath` / `chat_path`. Condition 7 is the
-reference client's `packages/opencode/src/session/prompt/default.txt` at
-v1.19.3, followed by the block the client appends:
+Conditions 5 and 6 are implemented in `internal/transport/bunhello.go`,
+`internal/transport/direct.go` and `DefaultChatPath` / `chat_path`. Condition 7
+is the reference client's `packages/core/src/session/runner/prompt/system.txt`
+(v2), followed by the model block, the client's own rules and the environment
+block the client appends:
 
-    You are powered by the model named <model>. The exact model ID is opencode/<model>
+    # Your Model
+    - Name: <name>
+    - Provider ID: opencode
+    - Model ID: <model>
+
+    <client rules>
+
+    Today's date: Thu Oct 29 2026
+
     Here is some useful information about the environment you are running in:
     <env>
       Working directory: ...
       Workspace root folder: ...
       Is directory a git repo: ...
       Platform: linux
-      Today's date: ...
     </env>
 
 The values in the block are not checked: a different working directory and date
-kept the 200. The block's shape is. The client's own system part may follow the
-block; the provider keeps it there, so the harness's rules are not lost
+kept the 200. The block's shape is, and the provider keeps the client's rules
+before it, where the v2 client puts its tool guidance
 (`internal/provider/opencode/prompt.go`).
 
+Condition 8 was identified on 2026-10-29 by capturing the installed v2.1.2
+client's request and replaying both shapes through the same transport: the
+proxy's v1-shaped request was answered 429 while the client's v2-shaped request
+from the same address was answered 200 seconds earlier and later. The markers
+are the User-Agent, `x-opencode-request`, the literal `global` project id,
+`max_tokens`, tools without `strict`, gzip-only `Accept-Encoding` and the v1
+system prompt. Each is now the value the v2 client sends; see the next sections.
+
 The 2026-10-19 reading that "the system prompt is not a condition" was taken on
-the legacy lane while it was still open. It no longer describes the client lane:
-the same tools and session header with no system message are now answered 429,
-and the canonical prompt is what flips the verdict.
+the legacy lane while it was still open. It no longer describes the client lane.
 
 ## Headers
 
-The set the provider sends, in this spelling — the custom names are written
-lowercase on purpose, matching the client:
+The set the provider sends, in the spelling and the case captured from the
+installed v2.1.2 client on 2026-10-29:
 
 ```
-Content-Type: application/json
-Accept-Encoding: gzip
-User-Agent: <user-agent>
+B3: <trace>-<span>-1-<parent>
+X-Opencode-Client: <client name, "cli" by default>
+X-Session-Id: <session or affinity id>
 Accept: */*
+Accept-Encoding: gzip, deflate, br, zstd
+Authorization: <credential, "Bearer public" when anonymous>
+Content-Type: application/json
+User-Agent: opencode/latest/2.1.2/cli
+X-Opencode-Project: <sha1("directory:" + directory)>
+X-Opencode-Session-Id: <session id>
+X-Session-Affinity: <affinity id>
+Traceparent: 00-<trace>-<span>-01
 Connection: keep-alive
-x-opencode-client: <client name, "cli" by default>
-x-opencode-project: <project id>
-x-opencode-request: <message id>
-x-opencode-session: <session id, or the affinity id when set>
-x-opencode-session-id: <session id>
-x-opencode-parent-session-id: <parent session id, only in a child session>
+X-Opencode-Session: <affinity id>
 ```
 
-`Accept-Encoding` is `gzip` alone: a Go transport decodes only what it negotiated
-itself, so offering `br` or `zstd` would turn every answer into unparsed bytes.
+The v1 client also sent `x-opencode-request`; v2 dropped it, so the provider no
+longer sends it. The trace pair is minted per request. Every encoding in
+`Accept-Encoding` is decoded in `internal/gateway/gateway.go`; offering one the
+gateway cannot undo would hand the client compressed octets labelled as plain
+text.
+
+The project header is not the literal `global` outside a git worktree: v2 mints
+`sha1("directory:" + absolute directory)` for every directory
+(`packages/core/src/project.ts`). The provider derives the same value from the
+daemon's working directory (`internal/provider/opencode/sessionids.go`); a
+client-supplied `global` or a `prj_`-prefixed value is translated.
 
 ## The reference client's wire shape
 
-Captured 2026-10-19 and re-measured 2026-10-25 by running the installed client
-through a TLS-terminating proxy. The client's request and this gateway's:
+Captured 2026-10-29 by running the installed v2.1.2 client through a
+TLS-terminating proxy. The client's request and this gateway's:
 
 | field | the client | this gateway |
 | --- | --- | --- |
 | protocol | HTTP/1.1, ALPN `http/1.1` | HTTP/1.1, ALPN `http/1.1` |
 | TLS ClientHello | Bun/BoringSSL | the captured Bun hello (`internal/transport/bunhello.go`) |
 | path | `/inference/openai/v1/chat/completions` | the same |
-| headers | the set above | the same set, the same spelling |
+| headers | the set above | the same set, spelling and case |
 | order | as listed above | alphabetical, `Host` first |
-| `Accept-Encoding` | `gzip, deflate, br, zstd` | `gzip` |
-| body | `max_tokens`, `tool_choice` present | only what the caller sent |
-| system message | `default.txt` + environment block | the same, then the client's rules |
+| `Accept-Encoding` | `gzip, deflate, br, zstd` | the same |
+| body | `max_completion_tokens`, tools with `"strict": false` | the same fields; the value is the caller's |
+| project header | `sha1("directory:" + dir)` | the same derivation |
+| system message | `system.txt` + model block + tool guidance + date + env | the same, with the client's rules in place of the guidance |
 
-The path and the hello are now conditions, not choices: the legacy path is
-answered 429 even with the client's own body, and so is any hello other than the
-Bun one. The order is Go's and is not decisive — curl, whose order differs from
-both, is admitted once its hello matches. The TLS ClientHello cannot be matched
-from `crypto/tls` at all; measured JA3: client
+The path and the hello are conditions, not choices: the legacy path is answered
+429 even with the client's own body, and so is any hello other than the Bun one.
+The order is Go's and is not decisive — curl, whose order differs from both, is
+admitted once its hello matches. The TLS ClientHello cannot be matched from
+`crypto/tls` at all; measured JA3: client
 `8f1d483d7c5fba63a9170d6e4dd66f93`, Go `96458b3de39df5d47bc5c4a9f10f8f26`,
 curl `0659743d0a8904909448456a6dfa4b06`. On the open legacy lane all three were
 admitted; on the client lane only the Bun hello is.
@@ -426,7 +453,7 @@ curl -sN http://127.0.0.1:8787/v1/chat/completions \
 | --- | --- |
 | `internal/provider/opencode/provider.go` | request assembly, headers, forced stream, chat path |
 | `internal/provider/opencode/prompt.go` | the canonical system prompt and the environment block |
-| `internal/provider/opencode/prompt/default.txt` | `default.txt` of opencode v1.19.3, embedded |
+| `internal/provider/opencode/prompt/default.txt` | `system.txt` of opencode v2, embedded |
 | `internal/provider/opencode/contract.go` | the admission conditions, the wire-shape table, the budgets |
 | `internal/provider/opencode/classify.go` | refusal classification, the quota and auth code sets |
 | `internal/provider/opencode/sessionids.go` | session identifier derivation, the shape the check admits |
@@ -446,7 +473,8 @@ Vendor tree, `~/Projects/opencode` (branch `dev`):
 | `packages/console/app/src/lib/inference-proxy.ts` | keyless free lane, `cf-connecting-ip` forwarded as `x-real-ip` |
 | `packages/core/src/app.ts` | the `User-Agent` format |
 | `packages/core/src/session/system-prompt.ts` | the system prompt assembled from tool names |
-| `packages/opencode/src/session/prompt/default.txt` (tag `v1.19.3`) | the canonical chat prompt embedded in `prompt/default.txt` |
+| `packages/core/src/session/runner/prompt/system.txt` | the canonical chat prompt embedded in `prompt/default.txt` |
+| `packages/core/src/project.ts` | the project id: `sha1("directory:" + dir)` |
 | `packages/ai/src/provider-error.ts` | `classifyProviderFailure`, the quota and auth code sets |
 | `packages/schema/src/identifier.ts` | the identifier formula: inverted timestamp, 12 hex + 14 base62 |
 | `packages/core/src/session/model-request.ts` | the header set of a live request, `x-opencode-client` included |

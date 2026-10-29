@@ -1,7 +1,10 @@
 package opencode
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"net/http"
+	"os"
 	"strings"
 
 	"free-ai-router/internal/provider"
@@ -84,12 +87,36 @@ func sessionIDs(r *http.Request) provider.SessionIDs {
 		ids.Message = newMessageID()
 	}
 	if ids.Project == "" || isRejectedProjectID(ids.Project) {
-		// Outside a git project the client sends the literal "global", and a
-		// `prj_`-prefixed value is refused regardless of what follows it. The
-		// project identifier belongs in the request body or path, never here.
-		ids.Project = "global"
+		// The project header is a version marker, not a formality. v1 of the
+		// client sent the literal "global" outside a git worktree; v2 never
+		// does — it mints `sha1("directory:" + absolute directory)` for every
+		// directory, git or not (packages/core/src/project.ts). A v1-only value
+		// is therefore a difference the lane can classify, and a `prj_`-prefixed
+		// value is refused regardless of what follows it.
+		ids.Project = projectID()
 	}
 	return ids
+}
+
+// projectID mints the project identifier of the directory this process serves.
+//
+// The reference client derives it from the session's directory:
+//
+//	sha1("directory:" + dir).hex   // 40 lowercase hex characters
+//
+// Measured on 2026-10-29 against a captured v2.1.2 request from a directory
+// that is not a git repository: the header carried a 40-hex value and it
+// equalled the hash of that directory. The proxy serves every client from one
+// process, so the daemon's working directory is the only directory it can
+// honestly name; the lane does not compare the value with anything the caller
+// sent.
+func projectID() string {
+	dir, err := os.Getwd()
+	if err != nil || dir == "" {
+		dir = "/"
+	}
+	sum := sha1.Sum([]byte("directory:" + dir))
+	return hex.EncodeToString(sum[:])
 }
 
 // Prefixes the service refuses to see in these two headers.
@@ -106,14 +133,24 @@ func sessionIDs(r *http.Request) provider.SessionIDs {
 // What is refused is the PREFIX, not the value: any `prj_`-prefixed string is
 // rejected regardless of what follows it. The check is therefore on the marker
 // rather than on the contents.
+//
+// "global" is admitted but v1-only: v2 mints a directory hash instead (see
+// projectID). A client that still sends it is translated, because forwarding a
+// value the reference client no longer produces keeps the request looking like
+// the version the lane is retiring.
 const (
 	rejectedProjectPrefix = "prj_"
 	rejectedRequestPrefix = "req_"
 )
 
-// isRejectedProjectID reports whether a project header value carries the
-// refused marker.
-func isRejectedProjectID(v string) bool { return strings.HasPrefix(v, rejectedProjectPrefix) }
+// legacyProjectID is the v1 sentinel for "outside a git worktree".
+const legacyProjectID = "global"
+
+// isRejectedProjectID reports whether a project header value is one this
+// package replaces: a refused marker, or the v1 sentinel.
+func isRejectedProjectID(v string) bool {
+	return strings.HasPrefix(v, rejectedProjectPrefix) || v == legacyProjectID
+}
 
 // isRejectedRequestID reports whether a request header value carries the
 // refused marker.

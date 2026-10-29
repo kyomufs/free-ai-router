@@ -17,9 +17,17 @@ const jsonSchemaDialect = "https://json-schema.org/draft/2020-12/schema"
 // `opencode/unknown/unknown/opencode` when the parts are unset — which is what
 // this constant used to say.
 //
-// The lane checks the User-Agent, but only for "does this look like an OpenCode
-// build", not for a version. Measured on 2026-10-19, canonical session ids and
-// the mandatory tools held constant, one header changed at a time:
+// The value is the one captured on 2026-10-29 from the installed v2.1.2 client
+// through a TLS-terminating proxy: `opencode/latest/2.1.2/cli`. The lane checks
+// the User-Agent for "does this look like an OpenCode build" and the measured
+// table below shows that version digits are not compared. The value still
+// names a real v2 build, because the whole point of this emulation is that no
+// part of the request says "v1" any more: the lane retires v1 traffic into the
+// exhausted legacy bucket, and that routing is what a 429 FreeUsageLimitError
+// means on the client lane.
+//
+// Measured on 2026-10-19, canonical session ids and the mandatory tools held
+// constant, one header changed at a time:
 //
 //	opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14 -> admitted
 //	opencode/1.19.2                                              -> admitted
@@ -29,19 +37,13 @@ const jsonSchemaDialect = "https://json-schema.org/draft/2020-12/schema"
 //	node bun                                                     -> refused
 //	(no User-Agent header)                                       -> refused
 //
-// Version digits and the suffix are ignored: the 1.x form and the 2.x form are
-// both admitted, and so is a bare `opencode/<version>`. A refused shape is one
-// that does not resolve to an OpenCode release at all. The value below is the
-// User-Agent of the build installed on this host, so the header names a build
-// that exists.
-//
 // WARNING about the method, not the result: never isolate a wire-shape
 // condition on an egress address whose quota is spent. 403s are then produced
 // by the exhausted quota rather than by the request, and every reading in the
 // batch is noise. Fresh sessions per batch are what make the table above
 // meaningful — and an earlier batch on this same lane, whose session headers
 // happened to be malformed, produced a UA table that no longer reproduces.
-const DefaultUserAgent = "opencode/1.19.2 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+const DefaultUserAgent = "opencode/latest/2.1.2/cli"
 
 // The free-lane admission conditions, measured one request at a time.
 //
@@ -96,14 +98,21 @@ const DefaultUserAgent = "opencode/1.19.2 ai-sdk/provider-utils/4.0.23 runtime/b
 //     /inference/v1/models.
 //
 //  6. The system message must carry the reference client's canonical prompt
-//     (opencode v1.19.3, packages/opencode/src/session/prompt/default.txt)
 //     followed by the environment block the client appends. The canonical text
 //     alone, the superseded prompt this package used to render, and a generic
 //     system message are all answered 429; the text plus the block is answered
-//     200. The values in the block (directory, date) are not checked — a changed
-//     directory and date kept the 200 — and the client's own rules may follow
-//     the block. The provider therefore renders the prompt and keeps the
-//     client's part after it (prompt.go).
+//     200. The values in the block (directory, date) are not checked. The
+//     provider therefore renders the prompt and keeps the client's part before
+//     the block (prompt.go).
+//
+// A seventh condition is the one that surfaced on 2026-10-29: the request must
+// not look like v1. The lane retires v1 traffic into the exhausted legacy
+// bucket and answers FreeUsageLimitError, which is why the same bytes flipped
+// between 200 and 429 while the v2 client on the same address kept working. The
+// v1 markers were the User-Agent, `x-opencode-request`, the literal "global"
+// project id, `max_tokens`, tools without `strict`, gzip-only Accept-Encoding
+// and the v1 system prompt. Every one of them is now the value the installed
+// v2.1.2 client sends; see the table below.
 //
 // Condition 1 is the one this proxy used to lose: a client that did not ask for
 // a stream was passed through with "stream": false and refused, which is exactly
@@ -117,13 +126,9 @@ const DefaultUserAgent = "opencode/1.19.2 ai-sdk/provider-utils/4.0.23 runtime/b
 // request shape can undo. That is why every condition here is enforced on our
 // side rather than left to the caller.
 //
-// The User-Agent is not one of these conditions either — it is checked, but only
-// for "looks like an OpenCode build"; see DefaultUserAgent. The 1.19.2 string is
-// admitted.
-//
-// HOW OUR REQUEST COMPARES TO THE CLIENT'S OWN, captured on 2026-10-19 and
-// re-measured on 2026-10-25 by running the installed client through a
-// TLS-terminating proxy and reading the request off the wire:
+// HOW OUR REQUEST COMPARES TO THE CLIENT'S OWN, captured on 2026-10-29 by
+// running the installed v2.1.2 client through a TLS-terminating proxy and
+// reading the request off the wire:
 //
 //	field            the client                    this proxy
 //	---------------- ------------------------------ ------------------------------
@@ -131,29 +136,32 @@ const DefaultUserAgent = "opencode/1.19.2 ai-sdk/provider-utils/4.0.23 runtime/b
 //	TLS hello        Bun/BoringSSL                 the captured Bun hello
 //	                                               (transport/bunhello.go)
 //	path             /inference/openai/v1/chat/…   the same
-//	headers          Content-Type, User-Agent,     the same set, the same spelling
-//	                 x-opencode-client,            (the custom names lowercase, as
-//	                 x-opencode-project,           the client writes them)
-//	                 x-opencode-request,
-//	                 x-opencode-session,
-//	                 x-opencode-session-id,
+//	headers          B3, Traceparent,              the same set, the same spelling
+//	                 X-Opencode-Client,            and the same case
+//	                 X-Opencode-Project,
+//	                 X-Opencode-Session,
+//	                 X-Opencode-Session-Id,
+//	                 X-Session-Affinity, X-Session-Id,
 //	                 Connection: keep-alive,
-//	                 Accept: *∕*
+//	                 Accept: *∕*, Accept-Encoding:
+//	                 gzip, deflate, br, zstd
 //	header order     as listed above               alphabetical, Host first
-//	Accept-Encoding  gzip, deflate, br, zstd       gzip
-//	body             max_tokens, tool_choice also  only what the caller sent
-//	                 present
-//	system message   default.txt + env block       the same, then the client's
-//	                                               rules
+//	body             max_completion_tokens,        the same fields; the value is
+//	                 tools with "strict": false    the caller's
+//	system message   system.txt + model block +    the same, with the client's
+//	                 tool guidance + date + env    rules in place of the guidance
+//	project header   sha1("directory:" + dir)       the same derivation
 //
 // The differences that remain are deliberate or out of reach:
 //
 //   - The header order is Go's: net/http writes Host first and sorts the rest.
 //     Matching the client's order needs a hand-written HTTP/1.1 writer, and the
 //     order is not decisive — curl, whose order differs from both, is admitted.
-//   - gzip alone, because a Go transport decodes only what it negotiated itself.
-//   - max_tokens and tool_choice are the caller's: this proxy is not the client
-//     and must not invent a token budget for it.
+//   - max_completion_tokens and tool_choice are the caller's: this proxy is not
+//     the client and must not invent a token budget for it.
+//   - The 32k output ceiling the client sends is its own default; the proxy
+//     forwards whatever the caller asked for and omits the field when it asked
+//     for nothing.
 //
 // The lesson of the same measurement, which is why the table is not a to-do
 // list: the SAME bytes from the same address were answered 403 at 21:23 and 200

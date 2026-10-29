@@ -23,12 +23,42 @@ func TestRejectedHeaderPrefixesAreReplaced(t *testing.T) {
 
 	ids := sessionIDs(r)
 
-	if ids.Project != "global" {
-		t.Errorf("Project = %q, want the admitted literal", ids.Project)
+	if !isProjectHash(ids.Project) {
+		t.Errorf("Project = %q, want a 40-hex directory hash", ids.Project)
 	}
 	if !strings.HasPrefix(ids.Message, messageIDPrefix) {
 		t.Errorf("Message = %q, want a derived message id", ids.Message)
 	}
+}
+
+// TestLegacyProjectValueIsReplaced — v1 sent "global" outside a git worktree;
+// v2 mints a directory hash. Forwarding the v1 sentinel would keep the request
+// looking like the version the lane is retiring, so it is translated too.
+func TestLegacyProjectValueIsReplaced(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	r.Header.Set(headerProject, legacyProjectID)
+
+	ids := sessionIDs(r)
+
+	if ids.Project == legacyProjectID {
+		t.Fatalf("Project = %q, want the v1 sentinel replaced", ids.Project)
+	}
+	if !isProjectHash(ids.Project) {
+		t.Errorf("Project = %q, want a 40-hex directory hash", ids.Project)
+	}
+}
+
+// isProjectHash reports whether v is the 40 lowercase hex the v2 client mints.
+func isProjectHash(v string) bool {
+	if len(v) != 40 {
+		return false
+	}
+	for _, c := range v {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // TestAdmissibleHeaderValuesSurvive — the replacement must not touch values

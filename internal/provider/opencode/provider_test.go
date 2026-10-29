@@ -182,16 +182,16 @@ func TestSessionAndAffinityAreDistinct(t *testing.T) {
 
 	// The outbound names are spelled as the reference client spells them, so the
 	// lookup is a map key and not Get, which canonicalises the name first.
-	got := header(prep.Headers, "x-opencode-session-id")
+	got := header(prep.Headers, "X-Opencode-Session-Id")
 	want := "ses_000000000000AAAAAAAAAAAAAA"
 	if got != want {
-		t.Fatalf("x-opencode-session-id = %q, want %q", got, want)
+		t.Fatalf("X-Opencode-Session-Id = %q, want %q", got, want)
 	}
-	if got := header(prep.Headers, "x-opencode-session"); got != "ses_000000000000BBBBBBBBBBBBBB" {
-		t.Fatalf("x-opencode-session = %q, want the affinity", got)
+	if got := header(prep.Headers, "X-Opencode-Session"); got != "ses_000000000000BBBBBBBBBBBBBB" {
+		t.Fatalf("X-Opencode-Session = %q, want the affinity", got)
 	}
-	if got := header(prep.Headers, "x-session-affinity"); got != "ses_000000000000BBBBBBBBBBBBBB" {
-		t.Fatalf("x-session-affinity = %q, want the affinity", got)
+	if got := header(prep.Headers, "X-Session-Affinity"); got != "ses_000000000000BBBBBBBBBBBBBB" {
+		t.Fatalf("X-Session-Affinity = %q, want the affinity", got)
 	}
 	if got := header(prep.Headers, "X-Session-Id"); got != "ses_000000000000BBBBBBBBBBBBBB" {
 		t.Fatalf("X-Session-Id = %q, want the affinity", got)
@@ -210,8 +210,8 @@ func TestParentHeadersOnlyForNestedSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if header(flat.Headers, "x-opencode-parent-session-id") != "" {
-		t.Fatalf("a flat session must not carry x-opencode-parent-session-id")
+	if header(flat.Headers, "X-Opencode-Parent-Session-Id") != "" {
+		t.Fatalf("a flat session must not carry X-Opencode-Parent-Session-Id")
 	}
 
 	nested, err := p.Build(provider.Request{
@@ -224,27 +224,26 @@ func TestParentHeadersOnlyForNestedSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := header(nested.Headers, "x-opencode-parent-session-id"); got != "ses_000000000000DDDDDDDDDDDDDD" {
-		t.Fatalf("x-opencode-parent-session-id = %q, want the parent", got)
+	if got := header(nested.Headers, "X-Opencode-Parent-Session-Id"); got != "ses_000000000000DDDDDDDDDDDDDD" {
+		t.Fatalf("X-Opencode-Parent-Session-Id = %q, want the parent", got)
 	}
 }
 
-// TestProjectHeaderForwarded — the project value goes out as-is, without
-// substitutions.
+// TestProjectHeaderForwarded — the value the identifier source produced reaches
+// the wire unchanged. Substitution happens in SessionIDs, not here.
 func TestProjectHeaderForwarded(t *testing.T) {
 	p := newTestProvider(t)
 
-	for _, project := range []string{"global", "prj_abcdef0123456789"} {
-		prep, err := p.Build(provider.Request{
-			Model:   provider.Model{ID: "x"},
-			Session: provider.SessionIDs{Session: "ses_000000000000AAAAAAAAAAAAAA", Project: project},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := header(prep.Headers, "x-opencode-project"); got != project {
-			t.Fatalf("x-opencode-project = %q, want %q", got, project)
-		}
+	const project = "156f1e9a1edbdacd44def9b6b405af2c7d710552"
+	prep, err := p.Build(provider.Request{
+		Model:   provider.Model{ID: "x"},
+		Session: provider.SessionIDs{Session: "ses_000000000000AAAAAAAAAAAAAA", Project: project},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := header(prep.Headers, "X-Opencode-Project"); got != project {
+		t.Fatalf("X-Opencode-Project = %q, want %q", got, project)
 	}
 }
 
@@ -448,16 +447,16 @@ func TestSystemPromptCarriesTheCanonicalClient(t *testing.T) {
 	model := provider.Model{ID: "mimo-v2.6-flash-free"}
 
 	got := p.systemPrompt(model, "")
-	if !strings.HasPrefix(got, "You are opencode, an interactive CLI tool") {
+	if !strings.HasPrefix(got, "You are an AI agent running in OpenCode, a coding agent harness.") {
 		t.Fatalf("the prompt does not start with the canonical text: %q", got[:80])
 	}
-	if strings.Contains(got, "You are an AI agent running in OpenCode") {
-		t.Fatal("the superseded prompt is still in use")
-	}
-	wantModel := "\nYou are powered by the model named mimo-v2.6-flash-free. " +
-		"The exact model ID is opencode/mimo-v2.6-flash-free\n"
+	wantModel := "\n# Your Model\n- Name: mimo-v2.6-flash-free\n" +
+		"- Provider ID: opencode\n- Model ID: mimo-v2.6-flash-free\n"
 	if !strings.Contains(got, wantModel) {
-		t.Fatalf("the model line is missing:\n%s", wantModel)
+		t.Fatalf("the model block is missing:\n%s", wantModel)
+	}
+	if !strings.Contains(got, "\nToday's date: ") {
+		t.Fatal("the date line is missing")
 	}
 	if !strings.Contains(got, "Here is some useful information about the environment you are running in:\n<env>\n") {
 		t.Fatal("the environment block is missing")
@@ -468,12 +467,16 @@ func TestSystemPromptCarriesTheCanonicalClient(t *testing.T) {
 }
 
 // TestSystemPromptKeepsTheClientRules — the client's own system part is not
-// dropped: it follows the canonical block, an order the lane admitted too.
+// dropped: it is placed before the environment block, where the v2 client puts
+// its own tool guidance.
 func TestSystemPromptKeepsTheClientRules(t *testing.T) {
 	p := newTestProvider(t)
 	got := p.systemPrompt(provider.Model{ID: "m"}, "HARNESS RULES")
-	if !strings.HasSuffix(got, "</env>\n\nHARNESS RULES") {
-		t.Fatal("the client rules are not kept after the canonical block")
+	if !strings.Contains(got, "\nHARNESS RULES\n\nToday's date: ") {
+		t.Fatal("the client rules are not kept before the environment block")
+	}
+	if !strings.HasSuffix(got, "</env>") {
+		t.Fatal("the environment block must stay at the end")
 	}
 }
 
@@ -505,14 +508,64 @@ func TestBuildBodyPutsTheRenderedSystemFirst(t *testing.T) {
 	if body.Messages[0].Role != "system" {
 		t.Fatalf("first message role = %q, want system", body.Messages[0].Role)
 	}
-	if !strings.HasPrefix(body.Messages[0].Content, "You are opencode, an interactive CLI tool") {
+	if !strings.HasPrefix(body.Messages[0].Content, "You are an AI agent running in OpenCode") {
 		t.Fatal("the first message is not the canonical prompt")
 	}
-	if !strings.HasSuffix(body.Messages[0].Content, "\n\nHARNESS RULES") {
+	if !strings.Contains(body.Messages[0].Content, "\nHARNESS RULES\n\nToday's date: ") {
 		t.Fatal("the client's system part is missing from the first message")
 	}
 	if body.Messages[1].Role != "user" || body.Messages[1].Content != "hi" {
 		t.Fatalf("history was changed: %+v", body.Messages[1])
+	}
+}
+
+// TestOutputBudgetUsesTheV2FieldName — the client sends max_completion_tokens
+// for this provider (detectMaxTokensField in
+// packages/ai/src/protocols/openai-chat.ts). The old max_tokens spelling is a
+// v1 marker and is no longer emitted.
+func TestOutputBudgetUsesTheV2FieldName(t *testing.T) {
+	p := newTestProvider(t)
+	prep, err := p.Build(provider.Request{
+		Model:     provider.Model{ID: "m"},
+		MaxTokens: 32000,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(prep.Body, &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if got := body["max_completion_tokens"]; got != float64(32000) {
+		t.Fatalf("max_completion_tokens = %v, want 32000", got)
+	}
+	if _, ok := body["max_tokens"]; ok {
+		t.Fatal("the v1 max_tokens field is still emitted")
+	}
+}
+
+// TestEveryToolCarriesStrictFalse — the v2 client lowers every tool with
+// `"strict": false` for this provider, mandatory ones included.
+func TestEveryToolCarriesStrictFalse(t *testing.T) {
+	p := newTestProvider(t)
+	prep, err := p.Build(provider.Request{
+		Model: provider.Model{ID: "m"},
+		Tools: []provider.Tool{{Name: "grep", Description: "search", Schema: []byte(`{"type":"object"}`)}},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	for _, entry := range toolEntriesFromBody(t, prep.Body) {
+		fn, _ := entry["function"].(map[string]any)
+		if fn == nil {
+			t.Fatalf("tool entry has no function: %+v", entry)
+		}
+		strict, ok := fn["strict"].(bool)
+		if !ok || strict {
+			t.Fatalf("tool %v strict = %v, want false", fn["name"], fn["strict"])
+		}
 	}
 }
 
@@ -850,16 +903,15 @@ func TestHeaderSetMatchesReferenceClient(t *testing.T) {
 
 	want := map[string]string{
 		"Content-Type":          "application/json",
-		"Accept-Encoding":       "gzip",
+		"Accept-Encoding":       "gzip, deflate, br, zstd",
 		"User-Agent":            p.userAgent,
 		"Accept":                "*/*",
 		"Connection":            "keep-alive",
-		"x-opencode-client":     p.clientName,
-		"x-opencode-project":    "global",
-		"x-opencode-request":    "msg_000000000000CCCCCCCCCCCCCC",
-		"x-opencode-session":    "ses_000000000000AAAAAAAAAAAAAA",
-		"x-opencode-session-id": "ses_000000000000AAAAAAAAAAAAAA",
-		"x-session-affinity":    "ses_000000000000AAAAAAAAAAAAAA",
+		"X-Opencode-Client":     p.clientName,
+		"X-Opencode-Project":    "global",
+		"X-Opencode-Session":    "ses_000000000000AAAAAAAAAAAAAA",
+		"X-Opencode-Session-Id": "ses_000000000000AAAAAAAAAAAAAA",
+		"X-Session-Affinity":    "ses_000000000000AAAAAAAAAAAAAA",
 		"X-Session-Id":          "ses_000000000000AAAAAAAAAAAAAA",
 	}
 	for name, value := range want {
@@ -867,11 +919,46 @@ func TestHeaderSetMatchesReferenceClient(t *testing.T) {
 			t.Fatalf("%s = %q, want %q", name, got, value)
 		}
 	}
-	if got := len(prep.Headers); got != len(want) {
+	// The trace pair is minted per request, so only its shape is fixed.
+	if got := header(prep.Headers, "Traceparent"); !isTraceparent(got) {
+		t.Fatalf("Traceparent = %q, want the W3C shape", got)
+	}
+	if got := header(prep.Headers, "B3"); !isB3(got) {
+		t.Fatalf("B3 = %q, want the B3 value", got)
+	}
+	if got := len(prep.Headers); got != len(want)+2 {
 		names := make([]string, 0, got)
 		for name := range prep.Headers {
 			names = append(names, name)
 		}
-		t.Fatalf("headers = %v, want exactly the %d names of the reference client", names, len(want))
+		t.Fatalf("headers = %v, want exactly the %d names of the reference client", names, len(want)+2)
 	}
+}
+
+func isTraceparent(v string) bool {
+	parts := strings.Split(v, "-")
+	if len(parts) != 4 || parts[0] != "00" || parts[3] != "01" {
+		return false
+	}
+	return isHex(parts[1], 32) && isHex(parts[2], 16)
+}
+
+func isB3(v string) bool {
+	parts := strings.Split(v, "-")
+	if len(parts) != 4 || parts[2] != "1" {
+		return false
+	}
+	return isHex(parts[0], 32) && isHex(parts[1], 16) && isHex(parts[3], 16)
+}
+
+func isHex(v string, n int) bool {
+	if len(v) != n {
+		return false
+	}
+	for _, c := range v {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }

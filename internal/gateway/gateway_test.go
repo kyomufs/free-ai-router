@@ -13,6 +13,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
+
 	"free-ai-router/internal/provider"
 	"free-ai-router/internal/state"
 )
@@ -390,6 +393,66 @@ func TestCompressedRefusalIsDecoded(t *testing.T) {
 	// The client is told the truth about what it receives: the reply is plain.
 	if got := rec.Header().Get("content-encoding"); got != "" {
 		t.Fatalf("content-encoding = %q, want it dropped once the body is decoded", got)
+	}
+}
+
+// TestEveryOfferedEncodingIsDecoded — the provider now offers exactly what the
+// reference client offers, so each of those encodings must be undone here.
+// gzip alone was the old behaviour and a visible difference on the wire.
+func TestEveryOfferedEncodingIsDecoded(t *testing.T) {
+	const body = `{"error":{"type":"FreeTierError","message":"decoded"}}`
+
+	compress := map[string]func([]byte) []byte{
+		"gzip": func(in []byte) []byte {
+			var b bytes.Buffer
+			zw := gzip.NewWriter(&b)
+			_, _ = zw.Write(in)
+			_ = zw.Close()
+			return b.Bytes()
+		},
+		"br": func(in []byte) []byte {
+			var b bytes.Buffer
+			zw := brotli.NewWriter(&b)
+			_, _ = zw.Write(in)
+			_ = zw.Close()
+			return b.Bytes()
+		},
+		"zstd": func(in []byte) []byte {
+			var b bytes.Buffer
+			zw, err := zstd.NewWriter(&b)
+			if err != nil {
+				t.Fatalf("zstd writer: %v", err)
+			}
+			_, _ = zw.Write(in)
+			_ = zw.Close()
+			return b.Bytes()
+		},
+	}
+
+	for encoding, encode := range compress {
+		t.Run(encoding, func(t *testing.T) {
+			resp := &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     http.Header{"Content-Encoding": {encoding}, "Content-Length": {"1"}},
+				Body:       io.NopCloser(bytes.NewReader(encode([]byte(body)))),
+			}
+
+			decoded, err := decode(resp, nil)
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			got, err := io.ReadAll(decoded.Body)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			_ = decoded.Body.Close()
+			if string(got) != body {
+				t.Fatalf("body = %q, want %q", got, body)
+			}
+			if decoded.Header.Get("Content-Encoding") != "" {
+				t.Fatal("content-encoding was not dropped")
+			}
+		})
 	}
 }
 

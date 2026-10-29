@@ -17,12 +17,15 @@
 // WHAT IS NOT HERE and must not be: retry policy, key rotation, transport. That
 // is common machinery — see internal/capability and internal/transport.
 //
-// The source of the contract is opencode 2.0.30 sources:
+// The source of the contract is opencode 2.1.2, read from source and captured
+// off the wire:
 //
 //	headers         packages/core/src/session/model-request.ts
 //	affinity        packages/core/src/session/affinity.ts
 //	user agent      packages/core/src/app.ts
+//	project id      packages/core/src/project.ts
 //	tools           packages/core/src/tool/plugin/shell.ts, read.ts
+//	body fields     packages/ai/src/protocols/openai-chat.ts
 //	system prompt   packages/core/src/session/runner/prompt/system.txt
 //	                packages/core/src/session/system-prompt.ts
 //	models          packages/core/src/models-dev/snapshot.txt
@@ -30,7 +33,9 @@ package opencode
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -338,7 +343,13 @@ func (p *Provider) buildBody(req provider.Request) (map[string]any, error) {
 	body["stream_options"] = map[string]any{"include_usage": true}
 
 	if req.MaxTokens > 0 {
-		body["max_tokens"] = req.MaxTokens
+		// The v2 client sends the newer field name for this provider
+		// (packages/ai/src/protocols/openai-chat.ts: detectMaxTokensField picks
+		// max_completion_tokens for a base URL that is not one of the providers
+		// that still requires max_tokens). The lane accepted both on 2026-10-19,
+		// but the whole request now speaks v2, and a v1 field name is a marker
+		// like any other.
+		body["max_completion_tokens"] = req.MaxTokens
 	}
 	if req.Temperature != nil {
 		body["temperature"] = *req.Temperature
@@ -553,6 +564,10 @@ func toolEntry(t provider.Tool) map[string]any {
 			"name":        t.Name,
 			"description": t.Description,
 			"parameters":  schema,
+			// v2 lowers every tool with strict mode off unless the provider is
+			// known to reject the field (packages/ai/src/protocols/openai-chat.ts,
+			// lowerTool). The client sends it, so the entry keeps it.
+			"strict": false,
 		},
 	}
 }
@@ -613,6 +628,7 @@ func (p *Provider) gateTools() []gateTool {
 						},
 						"required": []any{"command"},
 					},
+					"strict": false,
 				},
 			},
 		},
@@ -644,6 +660,7 @@ func (p *Provider) gateTools() []gateTool {
 						},
 						"required": []any{"path"},
 					},
+					"strict": false,
 				},
 			},
 		},
@@ -652,21 +669,31 @@ func (p *Provider) gateTools() []gateTool {
 
 // buildHeaders assembles the request headers.
 //
-// THE SET AND THE SPELLING are those of the reference client, captured from its
-// live request rather than guessed: `Content-Type`, `User-Agent`,
-// `x-opencode-client`, `x-opencode-project`, `x-opencode-request`,
-// `x-opencode-session`, `x-opencode-session-id`, `Connection: keep-alive`,
-// `Accept: */*`. The value of `x-opencode-session` is the affinity (the group
-// root for cache routing) and the value of `x-opencode-session-id` is the
-// session itself, so for a flat session the two coincide and for a nested one
-// they diverge.
+// THE SET, THE SPELLING AND THE CASE are those of the reference client,
+// captured from its live v2.1.2 request on 2026-10-29 rather than guessed:
 //
-// v1.19.x sent no separate affinity header. v2.1.2 (captured from its sources,
-// packages/core/src/session/model-request.ts) repeats the affinity under
-// `x-session-affinity` and `X-Session-Id`, and no longer sends
-// `x-opencode-request`. The request is the union: the lane admitted both shapes
-// when measured on 2026-10-27, and an extra header the client used to send is
-// not a difference the lane punishes.
+//	B3: <trace>-<span>-1-<parent>
+//	X-Opencode-Client: cli
+//	X-Session-Id: <session>
+//	Accept: */*
+//	Accept-Encoding: gzip, deflate, br, zstd
+//	Authorization: Bearer public
+//	Content-Type: application/json
+//	User-Agent: opencode/latest/2.1.2/cli
+//	X-Opencode-Project: <40 hex>
+//	X-Opencode-Session-Id: <session>
+//	X-Session-Affinity: <affinity>
+//	Traceparent: 00-<trace>-<span>-01
+//	Connection: keep-alive
+//	X-Opencode-Session: <affinity>
+//
+// The value of `x-opencode-session` is the affinity (the group root for cache
+// routing) and the value of `x-opencode-session-id` is the session itself, so
+// for a flat session the two coincide and for a nested one they diverge.
+//
+// v1.19.x sent `x-opencode-request` and no tracing headers. v2 sends the trace
+// pair and no request header, so the v1-only header is gone: an emulation that
+// keeps what the client dropped is a version marker the lane can read.
 //
 // The names are written into the map in the client's spelling, because
 // http.Header.Set canonicalises them and a canonicalised name is an observable
@@ -685,11 +712,7 @@ func (p *Provider) buildHeaders(ids provider.SessionIDs) http.Header {
 	}
 
 	set("Content-Type", "application/json")
-	// gzip only, deliberately. The reference client also offers br and zstd, but
-	// a Go transport decodes only the encodings it negotiated itself, so asking
-	// for one it cannot undo would turn every answer into unparsed bytes.
-	set("Accept-Encoding", "gzip")
-	set("User-Agent", p.userAgent)
+	set("Accept-Encoding", "gzip, deflate, br, zstd")
 	set("Accept", "*/*")
 	set("Connection", "keep-alive")
 
@@ -698,16 +721,12 @@ func (p *Provider) buildHeaders(ids provider.SessionIDs) http.Header {
 	// the service on one of the two paths.
 	p.applyHeaders(h)
 
-	set("x-opencode-project", ids.Project)
-	set("x-opencode-request", ids.Message)
+	set("X-Opencode-Project", ids.Project)
 	affinity := nonEmpty(ids.Affinity, ids.Session)
-	set("x-opencode-session", affinity)
-	set("x-opencode-session-id", ids.Session)
-	set("x-opencode-parent-session-id", ids.Parent)
-	// v2 of the client repeats the affinity under two more spellings; the lane
-	// does not require them, but the client sends them, and an emulation that
-	// omits what the client sends is a difference the service can see.
-	set("x-session-affinity", affinity)
+	set("X-Opencode-Session", affinity)
+	set("X-Opencode-Session-Id", ids.Session)
+	set("X-Opencode-Parent-Session-Id", ids.Parent)
+	set("X-Session-Affinity", affinity)
 	set("X-Session-Id", affinity)
 
 	return h
@@ -722,7 +741,28 @@ func (p *Provider) buildHeaders(ids provider.SessionIDs) http.Header {
 // representations of one client.
 func (p *Provider) applyHeaders(h http.Header) {
 	h["User-Agent"] = []string{p.userAgent}
-	h["x-opencode-client"] = []string{p.clientName}
+	h["X-Opencode-Client"] = []string{p.clientName}
+
+	// The trace pair is minted per request, as the client's HTTP instrumentation
+	// does. B3 joins trace, span and parent with dashes and marks sampling with
+	// "1"; W3C Traceparent uses the same trace and span with version "00" and
+	// flags "01".
+	trace, span, parent := newTraceIDs()
+	h["Traceparent"] = []string{"00-" + trace + "-" + span + "-01"}
+	h["B3"] = []string{trace + "-" + span + "-1-" + parent}
+}
+
+// newTraceIDs returns a 128-bit trace id, a 64-bit span id and a 64-bit parent
+// span id, all lowercase hex without dashes.
+func newTraceIDs() (trace, span, parent string) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// A trace id is not a secret and carries no correctness: if the system
+		// entropy source fails, a fixed-but-valid value is still better than a
+		// panic in the middle of a request.
+		copy(b[:], "0123456789abcdef0123456789abcdef")
+	}
+	return hex.EncodeToString(b[:16]), hex.EncodeToString(b[16:24]), hex.EncodeToString(b[24:32])
 }
 
 // nonEmpty returns the first non-empty argument.

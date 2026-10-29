@@ -14,51 +14,60 @@ import (
 
 // defaultSystemPrompt is the chat system prompt of the reference client.
 //
-// SOURCE: opencode v1.19.3, packages/opencode/src/session/prompt/default.txt.
+// SOURCE: opencode 2.x, packages/core/src/session/runner/prompt/system.txt.
 //
-// MEASURED on 2026-10-25 against the free lane, with the mandatory tools, a
-// canonical session id and "stream": true held constant:
+// The text used to be v1.19.3's default.txt. Measured on 2026-10-29 by running
+// the installed v2.1.2 client through a TLS-terminating proxy: every request it
+// sends is assembled from this text, a model block, the client's tool guidance
+// and the environment block. The v1 text was still admitted on that date, but
+// it is a v1 marker, and the lane routes what it reads as v1 traffic into the
+// exhausted legacy bucket — the exact refusal this emulation exists to avoid.
 //
-//	this text + the environment block below -> 200
-//	this text alone                          -> 429 FreeUsageLimitError
-//	the prompt this package used to render   -> 429 FreeUsageLimitError
-//	this text + the block + client rules     -> 200
-//
-// The lane therefore recognises the client by the canonical prompt AND by the
-// environment block that follows it. The block's VALUES are not checked: a
-// different working directory and date kept the 200. The block's shape is.
+// The lane recognises the client by the canonical prompt AND by the
+// environment block (measured on 2026-10-25: canonical text alone -> 429
+// FreeUsageLimitError, canonical text plus the block -> 200). The values in the
+// block are not checked; its shape is.
 //
 //go:embed prompt/default.txt
 var defaultSystemPrompt string
 
 // systemPrompt assembles the system message for a request.
 //
-// The client's own system part is kept, but AFTER the canonical text and the
-// environment block. Dropping it would lose the harness's rules; putting it
-// before the block was admitted too, but the block is part of the client's own
-// text, so the canonical form stays intact and the client's rules follow it.
+// The ORDER is the v2 client's (captured, not guessed): canonical text, the
+// model block, the client's own rules (the analogue of the client's tool
+// guidance), then the date and the environment block last. Dropping the
+// client's part would lose the harness's rules; keeping it before the
+// environment block preserves the block as the tail of the message, which is
+// where the reference client puts it.
 func (p *Provider) systemPrompt(model provider.Model, client string) string {
 	var b strings.Builder
 	b.WriteString(defaultSystemPrompt)
 
-	fmt.Fprintf(&b, "\nYou are powered by the model named %s. The exact model ID is %s/%s\n", model.ID, p.id, model.ID)
-	b.WriteString("Here is some useful information about the environment you are running in:\n<env>\n")
+	name := model.Name
+	if name == "" {
+		name = model.ID
+	}
+	b.WriteString("\n# Your Model\n")
+	fmt.Fprintf(&b, "- Name: %s\n", name)
+	fmt.Fprintf(&b, "- Provider ID: %s\n", p.id)
+	fmt.Fprintf(&b, "- Model ID: %s\n", model.ID)
+
+	if client != "" {
+		b.WriteString("\n")
+		b.WriteString(client)
+	}
 
 	dir, err := os.Getwd()
 	if err != nil || dir == "" {
 		dir = "/"
 	}
+	fmt.Fprintf(&b, "\n\nToday's date: %s\n", time.Now().Format("Mon Jan 02 2006"))
+	b.WriteString("\nHere is some useful information about the environment you are running in:\n<env>\n")
 	fmt.Fprintf(&b, "  Working directory: %s\n", dir)
 	fmt.Fprintf(&b, "  Workspace root folder: %s\n", dir)
 	fmt.Fprintf(&b, "  Is directory a git repo: %s\n", yesNo(isGitRepo(dir)))
 	fmt.Fprintf(&b, "  Platform: %s\n", runtime.GOOS)
-	fmt.Fprintf(&b, "  Today's date: %s\n", time.Now().Format("Mon Jan 02 2006"))
 	b.WriteString("</env>")
-
-	if client != "" {
-		b.WriteString("\n\n")
-		b.WriteString(client)
-	}
 	return b.String()
 }
 

@@ -51,15 +51,15 @@ func TestSessionIsStableAcrossTheTurnsOfOneConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, want := header(second.Headers, "x-opencode-session"), header(first.Headers, "x-opencode-session")
+	got, want := header(second.Headers, "X-Opencode-Session"), header(first.Headers, "X-Opencode-Session")
 	if got != want {
-		t.Fatalf("x-opencode-session = %q on the second turn, want the first turn's %q", got, want)
+		t.Fatalf("X-Opencode-Session = %q on the second turn, want the first turn's %q", got, want)
 	}
 	if !isSessionID(got) {
-		t.Fatalf("x-opencode-session = %q, want an id of the service's shape", got)
+		t.Fatalf("X-Opencode-Session = %q, want an id of the service's shape", got)
 	}
-	if got := header(second.Headers, "x-opencode-session-id"); got != want {
-		t.Fatalf("x-opencode-session-id = %q, want the same session %q", got, want)
+	if got := header(second.Headers, "X-Opencode-Session-Id"); got != want {
+		t.Fatalf("X-Opencode-Session-Id = %q, want the same session %q", got, want)
 	}
 }
 
@@ -78,7 +78,7 @@ func TestDifferentConversationsGetDifferentSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gotA, gotB := header(a.Headers, "x-opencode-session"), header(b.Headers, "x-opencode-session")
+	gotA, gotB := header(a.Headers, "X-Opencode-Session"), header(b.Headers, "X-Opencode-Session")
 	if gotA == gotB {
 		t.Fatalf("both conversations got the session %q, want distinct identifiers", gotA)
 	}
@@ -106,8 +106,8 @@ func TestClientSuppliedSessionIsNeverRewritten(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := header(prep.Headers, "x-opencode-session"); got != "ses_1a2b3c4d5e6fABCDEFGHIJKLMN" {
-		t.Fatalf("x-opencode-session = %q, want the caller value preserved", got)
+	if got := header(prep.Headers, "X-Opencode-Session"); got != "ses_1a2b3c4d5e6fABCDEFGHIJKLMN" {
+		t.Fatalf("X-Opencode-Session = %q, want the caller value preserved", got)
 	}
 }
 
@@ -149,7 +149,7 @@ func TestConversationWithoutUserMessageKeepsTheMintedId(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := header(prep.Headers, "x-opencode-session"); got != ids.Session {
-		t.Fatalf("x-opencode-session = %q, want the minted %q", got, ids.Session)
+	if got := header(prep.Headers, "X-Opencode-Session"); got != ids.Session {
+		t.Fatalf("X-Opencode-Session = %q, want the minted %q", got, ids.Session)
 	}
 }
