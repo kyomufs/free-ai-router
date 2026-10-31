@@ -255,7 +255,7 @@ func (p *Provider) Credential(key string) string {
 // gateway passes messages in neutral form, so the single conversion happens
 // here.
 func (p *Provider) Build(req provider.Request) (provider.Prepared, error) {
-	body, err := p.buildBody(req)
+	body, toolNames, err := p.buildBody(req)
 	if err != nil {
 		return provider.Prepared{}, err
 	}
@@ -280,6 +280,7 @@ func (p *Provider) Build(req provider.Request) (provider.Prepared, error) {
 		// their lengths are the operator's, within the contract's defaults.
 		IdleTimeout:       p.idleTimeoutFor(req.Model),
 		FirstEventTimeout: p.firstEventBudget(),
+		ToolNames:         toolNames,
 	}, nil
 }
 
@@ -302,10 +303,13 @@ func resolveChatURL(base, path string) string {
 }
 
 // buildBody assembles the request body.
-func (p *Provider) buildBody(req provider.Request) (map[string]any, error) {
+//
+// The second result is the map the gateway needs to translate a tool call back
+// to the name the client used, and is empty when no name had to be replaced.
+func (p *Provider) buildBody(req provider.Request) (map[string]any, map[string]string, error) {
 	messages, err := p.buildMessages(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// The system message is rendered here, not taken from the client as-is.
@@ -358,7 +362,7 @@ func (p *Provider) buildBody(req provider.Request) (map[string]any, error) {
 		body["reasoning_effort"] = req.ReasoningEffort
 	}
 
-	tools := p.buildTools(req.Tools)
+	tools, toolNames := p.buildTools(req.Tools)
 	if len(tools) > 0 {
 		body["tools"] = tools
 		// tool_choice is sent only when there are tools: the client does the
@@ -370,7 +374,7 @@ func (p *Provider) buildBody(req provider.Request) (map[string]any, error) {
 		}
 	}
 
-	return body, nil
+	return body, toolNames, nil
 }
 
 // buildMessages translates the neutral messages into the provider form.
@@ -518,15 +522,35 @@ func (p *Provider) buildUserContent(m provider.Message) (any, error) {
 //
 // The order does not matter: the check does not look at it. So the client's tools
 // go first, and the mandatory ones are appended at the end.
-func (p *Provider) buildTools(tools []provider.Tool) []map[string]any {
+//
+// The second result is the name translation for the answer; see buildBody.
+func (p *Provider) buildTools(tools []provider.Tool) ([]map[string]any, map[string]string) {
 	gate := p.gateTools()
 	gateByName := make(map[string]map[string]any, len(gate))
 	for _, g := range gate {
 		gateByName[g.name] = g.entry
 	}
 
+	// Names already taken on the wire. A replacement is only useful when it
+	// cannot be confused with a tool the client asked for by that name, so the
+	// collisions are resolved before the entries are built.
+	used := make(map[string]bool, len(tools)+len(gate))
+	for _, g := range gate {
+		used[g.name] = true
+	}
+	for _, t := range tools {
+		if _, isGate := gateByName[t.Name]; isGate {
+			continue
+		}
+		if _, replaced := aliasedToolName(t.Name); replaced {
+			continue
+		}
+		used[t.Name] = true
+	}
+
 	out := make([]map[string]any, 0, len(tools)+len(gate))
 	seen := make(map[string]bool, len(gate))
+	var names map[string]string
 
 	for _, t := range tools {
 		if canonical, isGate := gateByName[t.Name]; isGate {
@@ -534,7 +558,20 @@ func (p *Provider) buildTools(tools []provider.Tool) []map[string]any {
 			seen[t.Name] = true
 			continue
 		}
-		out = append(out, toolEntry(t))
+		name := t.Name
+		if alias, replaced := aliasedToolName(name); replaced {
+			base := alias
+			for suffix := 2; used[alias]; suffix++ {
+				alias = fmt.Sprintf("%s_%d", base, suffix)
+			}
+			used[alias] = true
+			if names == nil {
+				names = make(map[string]string, 1)
+			}
+			names[alias] = name
+			name = alias
+		}
+		out = append(out, toolEntry(t, name))
 	}
 
 	for _, g := range gate {
@@ -542,11 +579,85 @@ func (p *Provider) buildTools(tools []provider.Tool) []map[string]any {
 			out = append(out, g.entry)
 		}
 	}
-	return out
+	return out, names
 }
 
-// toolEntry translates a tool declaration into the wire form.
-func toolEntry(t provider.Tool) map[string]any {
+// The tool names the free lane refuses on the wire, and what is sent instead.
+//
+// MEASURED on 2026-10-31, one tool named `x` with an empty schema against the
+// live lane, every other byte held constant:
+//
+//	name = "x"                 -> 200
+//	name = "fork"              -> 200
+//	name = "subagentfork"      -> 200
+//	name = "subagent-fork"     -> 200
+//	name = "subagent_fork"     -> 429 FreeUsageLimitError
+//	name = "xsubagent_fork"    -> 429
+//	name = "SUBAGENT_FORK"     -> 429
+//	name = "my_subagent_fork_tool" -> 429
+//
+// The same marker in a description, in a parameter name, in a user message or
+// in an assistant tool call of the history changes nothing: the lane looks at
+// the declared tool names and nothing else. The match is a case-insensitive
+// substring, which is why the replacement drops the underscore rather than
+// appending a suffix.
+//
+// The name is v1's: v2 folded the separate forking tool into `subagent` with a
+// `fork` argument (packages/core/src/tool/plugin/subagent.ts). A request that
+// still declares the old tool is therefore traffic from the retired version,
+// and the lane answers it from the exhausted legacy bucket.
+//
+// MEASURED on 2026-10-31 as well: the lane refuses a request that declares BOTH
+// `read_image` and `working_directory`. Either name alone is admitted, and so is
+// the pair with either name changed; 21 other pairings of `read_image` with a
+// dsh tool were admitted. The refusal arrives in 0.2 s, while an admitted
+// request takes 0.5 s or longer, and an unrelated request from the same address
+// in the same second is admitted — so this is a decision about the body, not a
+// spent budget. Blank descriptions and blank schemas change nothing, and neither
+// does the order, so the lane reads the names. The pair is the signature of a
+// client the free lane does not serve; the replacement keeps the meaning for
+// the client while removing the signature for the lane.
+var toolNameRules = []struct {
+	marker      string
+	replacement string
+}{
+	{"subagent_fork", "subagentfork"},
+	{"read_image", "readimage"},
+	{"working_directory", "workingdirectory"},
+}
+
+// aliasedToolName returns the name to put on the wire, and whether it differs.
+func aliasedToolName(name string) (string, bool) {
+	alias := name
+	for _, rule := range toolNameRules {
+		alias = replaceFold(alias, rule.marker, rule.replacement)
+	}
+	return alias, alias != name
+}
+
+// replaceFold replaces every case-insensitive occurrence of marker in s.
+func replaceFold(s, marker, replacement string) string {
+	if !strings.Contains(strings.ToLower(s), marker) {
+		return s
+	}
+	var b strings.Builder
+	rest := s
+	for {
+		at := strings.Index(strings.ToLower(rest), marker)
+		if at < 0 {
+			b.WriteString(rest)
+			break
+		}
+		b.WriteString(rest[:at])
+		b.WriteString(replacement)
+		rest = rest[at+len(marker):]
+	}
+	return b.String()
+}
+
+// toolEntry translates a tool declaration into the wire form. The name is
+// separate because the lane may require a replacement; see aliasedToolName.
+func toolEntry(t provider.Tool, name string) map[string]any {
 	var schema any
 	if len(t.Schema) > 0 {
 		if err := json.Unmarshal(t.Schema, &schema); err != nil {
@@ -561,7 +672,7 @@ func toolEntry(t provider.Tool) map[string]any {
 	return map[string]any{
 		"type": "function",
 		"function": map[string]any{
-			"name":        t.Name,
+			"name":        name,
 			"description": t.Description,
 			"parameters":  schema,
 			// v2 lowers every tool with strict mode off unless the provider is

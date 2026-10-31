@@ -21,7 +21,7 @@ import (
 // passThroughStream: the silence that matters is the gap between two pieces of
 // the answer, and a stream that stops arriving without closing would otherwise
 // read as a healthy one.
-func (h *Handler) answerOnce(w http.ResponseWriter, resp *http.Response, wd *watchdog, idle time.Duration) {
+func (h *Handler) answerOnce(w http.ResponseWriter, resp *http.Response, toolNames map[string]string, wd *watchdog, idle time.Duration) {
 	contentType := resp.Header.Get("content-type")
 
 	// Not an event stream: the answer is already one body, and rewriting it
@@ -55,6 +55,8 @@ func (h *Handler) answerOnce(w http.ResponseWriter, resp *http.Response, wd *wat
 		writeError(w, http.StatusBadGateway, "transport", "the answer broke off: "+err.Error())
 		return
 	}
+
+	rewriteToolNamesIn(answer, toolNames)
 
 	raw, err := json.Marshal(answer)
 	if err != nil {

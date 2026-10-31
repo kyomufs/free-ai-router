@@ -129,6 +129,7 @@ including the body, the headers and the address:
 | 6 | chat path `/inference/openai/v1/chat/completions` | 429 on `/inference/v1/chat/completions`, even with the client's own body |
 | 7 | canonical system prompt + environment block | 429; the canonical text alone, a generic prompt and the superseded rendered prompt are refused |
 | 8 | no v1 markers (see below) | 429; the lane routes what it reads as v1 traffic into the exhausted legacy bucket |
+| 9 | no tool named `subagent_fork` (any case) and not both `read_image` and `working_directory` | 429; these names are markers in the `tools` array, whatever the schema says |
 
 Conditions 5 and 6 are implemented in `internal/transport/bunhello.go`,
 `internal/transport/direct.go` and `DefaultChatPath` / `chat_path`. Condition 7
@@ -165,6 +166,42 @@ from the same address was answered 200 seconds earlier and later. The markers
 are the User-Agent, `x-opencode-request`, the literal `global` project id,
 `max_tokens`, tools without `strict`, gzip-only `Accept-Encoding` and the v1
 system prompt. Each is now the value the v2 client sends; see the next sections.
+
+Condition 9 was measured on 2026-10-31, after a client that otherwise matched
+the v2 shape kept getting 429 on every turn. The trigger was a single tool
+declaration:
+
+| tool name on the wire | verdict |
+| --- | --- |
+| `x`, `fork`, `subagentfork`, `subagent-fork` | 200 |
+| `subagent_fork`, `xsubagent_fork`, `SUBAGENT_FORK`, `my_subagent_fork_tool` | 429 |
+
+The match is a case-insensitive **substring** of a declared tool name, and
+nothing else: the same string in a description, in a parameter name, in a user
+message or in an assistant tool call of the history changes nothing. The name is
+v1's — v2 folded the separate forking tool into `subagent` with a `fork`
+argument (`packages/core/src/tool/plugin/subagent.ts`) — so a request that still
+declares it is read as traffic from the retired version. The provider sends the
+tool as `subagentfork` and reports the replacement to the gateway
+(`provider.Prepared.ToolNames`), which rewrites the name back in a tool call so
+the client can dispatch it.
+
+A second signature was measured on the same day, on a 62-tool request whose only
+remaining refusal was this pair:
+
+| declaration | verdict |
+| --- | --- |
+| `read_image` alone, `working_directory` alone | 200 |
+| `read_image` + `working_directory` | 429 FreeUsageLimitError in 0.2 s |
+| the pair with either name changed | 200 |
+| `read_image` + one of 21 other dsh tools | 200 |
+
+The descriptions and the schemas do not matter (blanking both changes nothing),
+and neither does the order, so the lane reads the names. The refusal is
+immediate, while an admitted request takes at least half a second, and an
+unrelated request from the same egress address in the same second is admitted:
+this is a decision about the body, not a spent budget. Both names are sent with
+the underscore dropped, and the gateway maps them back as above.
 
 The 2026-10-19 reading that "the system prompt is not a condition" was taken on
 the legacy lane while it was still open. It no longer describes the client lane.

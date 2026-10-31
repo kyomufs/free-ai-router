@@ -545,6 +545,113 @@ func TestOutputBudgetUsesTheV2FieldName(t *testing.T) {
 	}
 }
 
+// TestV1ForkToolNameIsReplaced — MEASURED 2026-10-31: the lane answers 429 for
+// a tool declaration whose name contains `subagent_fork` in any case, and 200
+// for the same entry with the underscore dropped. The replacement has to be
+// reported to the gateway, or the client would receive a tool call it cannot
+// dispatch.
+func TestV1ForkToolNameIsReplaced(t *testing.T) {
+	p := newTestProvider(t)
+	prep, err := p.Build(provider.Request{
+		Model: provider.Model{ID: "m"},
+		Tools: []provider.Tool{
+			{Name: "subagent_fork", Description: "fork"},
+			{Name: "my_SUBAGENT_FORK_tool", Description: "fork again"},
+			{Name: "grep", Description: "search"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(prep.Body, &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	seen := make(map[string]bool)
+	for _, entry := range toolEntriesFromBody(t, prep.Body) {
+		fn, _ := entry["function"].(map[string]any)
+		name, _ := fn["name"].(string)
+		if _, replaced := aliasedToolName(name); replaced {
+			t.Fatalf("a marker name went on the wire in %q", name)
+		}
+		seen[name] = true
+	}
+	if !seen["grep"] {
+		t.Fatalf("an unrelated tool was renamed: %v", seen)
+	}
+	if got := prep.ToolNames["subagentfork"]; got != "subagent_fork" {
+		t.Fatalf("ToolNames[subagentfork] = %q, want subagent_fork", got)
+	}
+	if got := prep.ToolNames["my_subagentfork_tool"]; got != "my_SUBAGENT_FORK_tool" {
+		t.Fatalf("ToolNames[my_subagentfork_tool] = %q, want my_SUBAGENT_FORK_tool", got)
+	}
+}
+
+// TestImageDirectoryPairIsReplaced — MEASURED 2026-10-31: `read_image` and
+// `working_directory` declared together are answered 429 in 0.2 s, while either
+// name alone is admitted, and 21 other pairings of `read_image` with a dsh tool
+// are admitted. The replacement is therefore about the set, not about either
+// name; both are sent with the underscore dropped.
+func TestImageDirectoryPairIsReplaced(t *testing.T) {
+	p := newTestProvider(t)
+	prep, err := p.Build(provider.Request{
+		Model: provider.Model{ID: "m"},
+		Tools: []provider.Tool{
+			{Name: "read_image", Description: "look"},
+			{Name: "working_directory", Description: "cd"},
+			{Name: "grep", Description: "search"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	seen := make(map[string]bool)
+	for _, entry := range toolEntriesFromBody(t, prep.Body) {
+		fn, _ := entry["function"].(map[string]any)
+		name, _ := fn["name"].(string)
+		seen[name] = true
+	}
+	for _, want := range []string{"readimage", "workingdirectory", "grep"} {
+		if !seen[want] {
+			t.Fatalf("tool %q is missing from the wire: %v", want, seen)
+		}
+	}
+	for _, unwanted := range []string{"read_image", "working_directory"} {
+		if seen[unwanted] {
+			t.Fatalf("the refused name %q went on the wire", unwanted)
+		}
+	}
+	if got := prep.ToolNames["readimage"]; got != "read_image" {
+		t.Fatalf("ToolNames[readimage] = %q, want read_image", got)
+	}
+	if got := prep.ToolNames["workingdirectory"]; got != "working_directory" {
+		t.Fatalf("ToolNames[workingdirectory] = %q, want working_directory", got)
+	}
+}
+
+// TestForkToolNameInHistoryIsForwarded — only the declaration is a marker: the
+// lane was measured to admit the same name inside an assistant tool call, and
+// rewriting history would change what the model is asked to continue.
+func TestForkToolNameInHistoryIsForwarded(t *testing.T) {
+	p := newTestProvider(t)
+	prep, err := p.Build(provider.Request{
+		Model: provider.Model{ID: "m"},
+		Messages: []provider.Message{
+			{Role: "user", Text: "go"},
+			{Role: "assistant", ToolCalls: []provider.ToolCall{{ID: "call_1", Name: "subagent_fork", Arguments: "{}"}}},
+			{Role: "tool", ToolCallID: "call_1", Text: "ok"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !strings.Contains(string(prep.Body), `"name":"subagent_fork"`) {
+		t.Fatal("the historical tool call was rewritten; only declarations are markers")
+	}
+}
+
 // TestEveryToolCarriesStrictFalse — the v2 client lowers every tool with
 // `"strict": false` for this provider, mandatory ones included.
 func TestEveryToolCarriesStrictFalse(t *testing.T) {

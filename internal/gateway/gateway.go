@@ -25,6 +25,7 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
@@ -722,9 +723,9 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, p provider.Pro
 
 		if resp.StatusCode < 400 {
 			if req.Stream {
-				h.passThroughStream(w, resp, wd, idle)
+				h.passThroughStream(w, resp, prepared.ToolNames, wd, idle)
 			} else {
-				h.answerOnce(w, resp, wd, idle)
+				h.answerOnce(w, resp, prepared.ToolNames, wd, idle)
 			}
 			wd.stop()
 			resp.Body.Close()
@@ -1102,7 +1103,7 @@ func (b *decodedBody) Close() error {
 // is the one between two pieces of the answer. Without it a stream that stops
 // arriving without closing reads as a healthy one: there is no error to return
 // and the client waits for an end that will not come.
-func (h *Handler) passThroughStream(w http.ResponseWriter, resp *http.Response, wd *watchdog, idle time.Duration) {
+func (h *Handler) passThroughStream(w http.ResponseWriter, resp *http.Response, toolNames map[string]string, wd *watchdog, idle time.Duration) {
 	if ct := resp.Header.Get("content-type"); ct != "" {
 		w.Header().Set("content-type", ct)
 	} else {
@@ -1112,6 +1113,29 @@ func (h *Handler) passThroughStream(w http.ResponseWriter, resp *http.Response, 
 	w.WriteHeader(resp.StatusCode)
 
 	flusher, canFlush := w.(http.Flusher)
+
+	// A rewritten stream is read by line rather than by buffer: an event has to
+	// be whole before its tool name can be recognized, and a tool name split
+	// across two reads would be passed through half-replaced.
+	if len(toolNames) > 0 {
+		reader := bufio.NewReader(resp.Body)
+		for {
+			wd.arm(idle, errSilence)
+			line, err := reader.ReadBytes('\n')
+			if len(line) > 0 {
+				if _, werr := w.Write(rewriteEventLine(line, toolNames)); werr != nil {
+					return
+				}
+				if canFlush {
+					flusher.Flush()
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
+
 	buf := make([]byte, 32<<10)
 	for {
 		wd.arm(idle, errSilence)

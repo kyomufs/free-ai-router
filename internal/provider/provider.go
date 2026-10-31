@@ -222,6 +222,15 @@ type Prepared struct {
 	// FirstEventTimeout is the budget until the first headers. Zero means the
 	// gateway-wide one.
 	FirstEventTimeout time.Duration
+	// ToolNames maps a tool name the provider put on the wire back to the name
+	// the client used.
+	//
+	// A provider whose service classifies traffic by tool name has to replace a
+	// name it cannot send, but the client will not recognize the replacement in
+	// a tool call. The gateway therefore rewrites the name in the answer, and
+	// this map is the only place that knows which name became which. Empty when
+	// nothing was replaced.
+	ToolNames map[string]string
 }
 
 // Failure is a classified provider refusal.
