@@ -95,6 +95,39 @@ func TestUpstreamUnavailableIsNotAboutTheKey(t *testing.T) {
 	}
 }
 
+// TestInvalidParameterIsNotAnUpstreamOutage — the edge prefixes ITS OWN
+// failures and the model host's refusals with the same wrapper, so the wrapper
+// must not be read as "the model host is unreachable".
+//
+// RECORDED 2026-11-01, the whole body as it arrived:
+//
+//	{"error":{"type":"server_error","message":"Upstream request failed:
+//	[InvalidParameter] Invalid request: invalid or unsupported parameter value
+//	trace_id: b6ea6e706635770e7aed57a6b2e4cab6"}}
+//
+// This is the request being wrong, not the host being down. Marking it
+// UpstreamUnavailable sends the gateway to another model, which refuses it the
+// same way, and the operator sees a 400 that looks like an outage.
+func TestInvalidParameterIsNotAnUpstreamOutage(t *testing.T) {
+	body := readFixture(t, "refusal-invalid-parameter.json")
+	resp := &http.Response{StatusCode: http.StatusBadRequest, Header: make(http.Header)}
+
+	failure := newTestProvider(t).Classify(resp, body)
+
+	if failure.UpstreamUnavailable {
+		t.Fatal("a rejected parameter must not be reported as an upstream outage")
+	}
+	if failure.KeyRejected {
+		t.Fatal("a rejected parameter must not be blamed on the key")
+	}
+	if failure.Retryable {
+		t.Fatal("a rejected parameter is not fixed by repeating the request")
+	}
+	if string(failure.Body) != string(body) {
+		t.Fatal("the refusal body was altered")
+	}
+}
+
 // TestRecordedRefusalKeepsClientSignals checks that the signals by which the
 // client makes its decision survive all the way to it.
 //

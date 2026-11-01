@@ -1,0 +1,6 @@
+{
+  "error": {
+    "type": "server_error",
+    "message": "Upstream request failed: [InvalidParameter] Invalid request: invalid or unsupported parameter value trace_id: b6ea6e706635770e7aed57a6b2e4cab6"
+  }
+}

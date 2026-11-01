@@ -836,9 +836,29 @@ func (p *Provider) buildHeaders(ids provider.SessionIDs) http.Header {
 	affinity := nonEmpty(ids.Affinity, ids.Session)
 	set("X-Opencode-Session", affinity)
 	set("X-Opencode-Session-Id", ids.Session)
-	set("X-Opencode-Parent-Session-Id", ids.Parent)
 	set("X-Session-Affinity", affinity)
 	set("X-Session-Id", affinity)
+
+	// The parent pair goes out only when there IS a parent, and in BOTH
+	// spellings the client uses.
+	//
+	// MEASURED against the v2.2.5 client bundle (its request assembly:
+	// {"x-opencode-session-id": id, ...parentID ? {"x-opencode-parent-session-id":
+	// parentID} : {}, "x-session-affinity": affinity, "X-Session-Id": affinity,
+	// ...parentID ? {"x-parent-session-id": parentID} : {}, "User-Agent": …,
+	// "x-opencode-project": projectID, "x-opencode-session": affinity,
+	// "x-opencode-client": name}): a nested session carries the parent under the
+	// plain name as well, and a flat session carries neither. Sending the
+	// prefixed name alone was a version marker — the lane reads the set of
+	// headers as the client's signature.
+	//
+	// Unlike the affinity pair, the two spellings do NOT carry different values:
+	// both name the same parent session, so the plain one repeats the prefixed
+	// one rather than being derived separately.
+	if ids.Parent != "" {
+		set("X-Opencode-Parent-Session-Id", ids.Parent)
+		set("X-Parent-Session-Id", ids.Parent)
+	}
 
 	return h
 }

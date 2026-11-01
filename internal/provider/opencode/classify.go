@@ -82,7 +82,22 @@ var freeLaneRefusal = regexp.MustCompile(`(?i)can only be used from within openc
 // it. Measured on 2026-10-20 within one hour: 503 when the edge itself
 // answered, 403 on one free model and 429 on another. One condition, three
 // statuses, so the status would split it into three different verdicts.
-var upstreamUnavailable = regexp.MustCompile(`(?i)upstream request failed|endpoint is unavailable`)
+//
+// THE WRAPPER IS NOT THE SIGNAL. The edge prefixes its own failures with
+// "Upstream request failed:" and then quotes the model host's answer, so the
+// prefix alone matches EVERYTHING the model host rejects — including a request
+// the host refused as malformed:
+//
+//	Upstream request failed: [InvalidParameter] Invalid request: invalid or
+//	unsupported parameter value trace_id: <hex>
+//
+// Switching models over that is a waste: the request is wrong, and the next
+// model refuses it the same way, with a different line number. So the
+// prefix only counts together with the transport wording that follows it
+// ("endpoint is unavailable", "connection", "timed out", "no healthy").
+// Anything else behind the prefix keeps its own verdict — a malformed request
+// is reported to the client, not bounced across the catalog.
+var upstreamUnavailable = regexp.MustCompile(`(?i)upstream request failed[^"]*?(?:endpoint is unavailable|unavailable|connection (?:refused|reset|error)|econn\w*|timed out|timeout|no healthy|bad gateway|service unavailable)|endpoint is unavailable`)
 
 // Classify implements provider.Provider.
 //
