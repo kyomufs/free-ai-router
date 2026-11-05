@@ -10,12 +10,16 @@ import (
 )
 
 // writePass lays down the two artifacts a finished pass leaves behind.
-func writePass(t *testing.T, dir string, merged, http string) {
+//
+// The second artifact is the TCP stage, not the http one: pull mode ranks by the
+// pass's dial measurement and never consults the http stage, because that stage
+// spends one provider request per node.
+func writePass(t *testing.T, dir string, merged, tcp string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, "merged.jsonl"), []byte(merged), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "http.jsonl"), []byte(http), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "tcp.jsonl"), []byte(tcp), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -25,22 +29,26 @@ const passMerged = `{"id":"n1","raw":{"clash":{"name":"nl-1","type":"vless","ser
 {"id":"n3","raw":{"xray":{}}}
 `
 
-const passHTTP = `{"id":"n1","ok":true,"delay_ms":300}
-{"id":"n2","ok":true,"delay_ms":120}
-{"id":"n3","ok":true,"delay_ms":50}
+const passTCP = `{"id":"n1","ok":true,"dial_ms":300,"resolved_ip":"203.0.113.10"}
+{"id":"n2","ok":true,"dial_ms":120,"resolved_ip":"198.51.100.20"}
+{"id":"n3","ok":true,"dial_ms":50}
 `
 
-// TestLoadPassTakesOnlyTheHTTPOKNodes: the pass's http stage is the gate, and the
-// order the probe spends its budget in is the pass's own measured delay.
-func TestLoadPassTakesOnlyTheHTTPOKNodes(t *testing.T) {
+// TestLoadPassTakesOnlyTheTCPOKNodes: the pass's TCP stage is the gate, and the
+// order the probe spends its budget in is the pass's own measured dial time.
+//
+// The http stage is deliberately NOT consulted: pull mode ranks by TCP and lets the
+// provider speak through the first real request, because the http stage costs one
+// provider request per node.
+func TestLoadPassTakesOnlyTheTCPOKNodes(t *testing.T) {
 	dir := t.TempDir()
-	writePass(t, dir, passMerged, passHTTP)
+	writePass(t, dir, passMerged, passTCP)
 
 	pass, err := LoadPass(dir, time.Hour, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pass.Counts.Parsed != 3 || pass.Counts.HTTPOK != 3 || pass.Counts.Unsupported != 1 {
+	if pass.Counts.Parsed != 3 || pass.Counts.TCPOK != 3 || pass.Counts.Unsupported != 1 {
 		t.Fatalf("counts %+v", pass.Counts)
 	}
 	if len(pass.Nodes) != 2 {
@@ -71,9 +79,9 @@ func TestLoadPassTakesOnlyTheHTTPOKNodes(t *testing.T) {
 // that were measured before the last rotation.
 func TestLoadPassRefusesAStalePass(t *testing.T) {
 	dir := t.TempDir()
-	writePass(t, dir, passMerged, passHTTP)
+	writePass(t, dir, passMerged, passTCP)
 	old := time.Now().Add(-3 * time.Hour)
-	for _, name := range []string{"merged.jsonl", "http.jsonl"} {
+	for _, name := range []string{"merged.jsonl", "tcp.jsonl"} {
 		if err := os.Chtimes(filepath.Join(dir, name), old, old); err != nil {
 			t.Fatal(err)
 		}
@@ -97,7 +105,7 @@ func TestLoadPassWithoutArtifacts(t *testing.T) {
 // the long tail (xhttp, packet-encoding) survives only when it is not re-derived.
 func TestThePassProfileIsRenderedAsItIs(t *testing.T) {
 	dir := t.TempDir()
-	writePass(t, dir, passMerged, passHTTP)
+	writePass(t, dir, passMerged, passTCP)
 	pass, err := LoadPass(dir, time.Hour, time.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -140,15 +148,15 @@ func TestNodeFromClashRefusesWhatTheCoreCannotRender(t *testing.T) {
 // if the later attempt succeeded.
 func TestLoadPassTakesTheLastVerdict(t *testing.T) {
 	dir := t.TempDir()
-	writePass(t, dir, passMerged, `{"id":"n2","ok":true,"delay_ms":90}
+	writePass(t, dir, passMerged, `{"id":"n2","ok":true,"dial_ms":90}
 {"id":"n2","ok":false,"error":"EOF"}
-{"id":"n1","ok":true,"delay_ms":10}
+{"id":"n1","ok":true,"dial_ms":10}
 `)
 	pass, err := LoadPass(dir, time.Hour, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pass.Counts.HTTPOK != 1 || len(pass.Nodes) != 1 || pass.Nodes[0].ID != "n1" {
+	if pass.Counts.TCPOK != 1 || len(pass.Nodes) != 1 || pass.Nodes[0].ID != "n1" {
 		t.Fatalf("counts %+v nodes %+v", pass.Counts, pass.Nodes)
 	}
 }

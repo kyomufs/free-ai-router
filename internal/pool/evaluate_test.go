@@ -21,7 +21,7 @@ func TestEvaluatorInstallsOnlyAcceptedNodes(t *testing.T) {
 		reg, NewRunner(exe, t.TempDir()), fakeCoreImpl{}, standIn{}, nil, nil)
 	e.cfg.LoadPass = func() (Pass, error) {
 		return Pass{
-			Counts: PassCounts{Parsed: 3, HTTPOK: 3},
+			Counts: PassCounts{Parsed: 3, TCPOK: 3},
 			Nodes: []Node{
 				{ID: "a", Label: "a", Proto: "vless", Host: "h", Port: 443, Raw: `{"type":"vless"}`},
 				{ID: "b", Label: "b", Proto: "vless", Host: "h", Port: 443, Raw: `{"type":"vless"}`},
@@ -90,7 +90,7 @@ func TestEvaluatorReadsThePassInsteadOfTheSubscriptions(t *testing.T) {
 	e.cfg.RunPass = func(context.Context) error { passes++; return nil }
 	e.cfg.LoadPass = func() (Pass, error) {
 		return Pass{
-			Counts: PassCounts{Parsed: 7, HTTPOK: 3, Unsupported: 2},
+			Counts: PassCounts{Parsed: 7, TCPOK: 3, Unsupported: 2},
 			Nodes: []Node{
 				{ID: "a", Label: "a", Proto: "vless", Host: "h", Port: 443, Raw: `{"type":"vless"}`},
 				{ID: "b", Label: "b", Proto: "vless", Host: "h", Port: 443, Raw: `{"type":"vless"}`},
@@ -111,7 +111,7 @@ func TestEvaluatorReadsThePassInsteadOfTheSubscriptions(t *testing.T) {
 	if rep.Source != SourceProxprobe || !rep.PassRan || passes != 1 {
 		t.Fatalf("report %+v, passes %d", rep, passes)
 	}
-	if rep.Parsed != 7 || rep.HTTPOK != 3 || rep.Unsupported != 2 || rep.Probed != 2 || rep.Accepted != 1 {
+	if rep.Parsed != 7 || rep.TCPOK != 3 || rep.Unsupported != 2 || rep.Probed != 2 || rep.Accepted != 1 {
 		t.Fatalf("counts %+v", rep)
 	}
 	if snap := reg.Snapshot(); snap.Relevant != 1 || snap.Nodes[0].ID != "a" {
@@ -155,7 +155,7 @@ func TestEvaluatorKeepsOneServerPerExitPool(t *testing.T) {
 		reg, NewRunner(exe, t.TempDir()), fakeCoreImpl{}, standIn{}, nil, nil)
 	e.cfg.LoadPass = func() (Pass, error) {
 		return Pass{
-			Counts: PassCounts{Parsed: 4, HTTPOK: 4},
+			Counts: PassCounts{Parsed: 4, TCPOK: 4},
 			Nodes: []Node{
 				{ID: "slow", Label: "slow", Proto: "vless", Host: "h", Port: 443, Raw: `{"type":"vless"}`},
 				{ID: "fast", Label: "fast", Proto: "vless", Host: "h", Port: 443, Raw: `{"type":"vless"}`},
@@ -206,7 +206,7 @@ func TestARefusalBurnsItsWholeExitPool(t *testing.T) {
 		reg, NewRunner(exe, t.TempDir()), fakeCoreImpl{}, standIn{}, nil, nil)
 	e.cfg.LoadPass = func() (Pass, error) {
 		return Pass{
-			Counts: PassCounts{Parsed: 4, HTTPOK: 4},
+			Counts: PassCounts{Parsed: 4, TCPOK: 4},
 			Nodes: []Node{
 				{ID: "first", Label: "first", Proto: "vless", Host: "h", Port: 443, Raw: `{"type":"vless"}`},
 				{ID: "burn", Label: "burn", Proto: "vless", Host: "h", Port: 443, Raw: `{"type":"vless"}`},

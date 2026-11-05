@@ -336,7 +336,7 @@ func (s *tuiSource) poolReading() *tui.PoolState {
 	if state.Last != nil {
 		out.Pass = tui.PassCounts{
 			Parsed:      state.Last.Parsed,
-			HTTPOK:      state.Last.HTTPOK,
+			TCPOK:      state.Last.TCPOK,
 			Unsupported: state.Last.Unsupported,
 			Accepted:    state.Last.Accepted,
 		}

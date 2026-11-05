@@ -37,7 +37,7 @@ type PoolState struct {
 // PassCounts is what the last pass measured before the pool's own admission.
 type PassCounts struct {
 	Parsed      int
-	HTTPOK      int
+	TCPOK      int
 	Unsupported int
 	Accepted    int
 }
@@ -88,9 +88,9 @@ func (m Model) poolTile() tileSpec {
 			if p.Source != "" {
 				out = append(out, m.kvLine("source", 10, m.pal.Value.Render(p.Source)))
 			}
-			if p.Pass.Parsed > 0 || p.Pass.HTTPOK > 0 {
+			if p.Pass.Parsed > 0 || p.Pass.TCPOK > 0 {
 				out = append(out, m.kvLine("pass", 10, m.pal.Value.Render(fmt.Sprintf(
-					"%d parsed · %d http · %d accepted", p.Pass.Parsed, p.Pass.HTTPOK, p.Pass.Accepted))))
+					"%d parsed · %d tcp · %d accepted", p.Pass.Parsed, p.Pass.TCPOK, p.Pass.Accepted))))
 			}
 
 			next := "unknown"

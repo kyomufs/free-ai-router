@@ -154,6 +154,74 @@ func (r *Registry) Suspect(id, reason string) {
 	delete(r.failures, id)
 }
 
+// SpendPool quarantines EVERY node that shares an exit network with the given one.
+//
+// WHY THE WHOLE POOL AND NOT THE NODE. The provider counts free requests per exit
+// network, not per address: five servers behind one /24 draw on one allowance, so
+// when the first of them is answered "free usage limit reached" the other four are
+// already worthless. Quarantining only the node that happened to be tried would make
+// the next request spend a fresh attempt on its neighbour and get the same answer —
+// four wasted requests to learn what the first one already said.
+//
+// The pool of the refused address is taken from the node itself when it has one, and
+// otherwise looked up among the nodes that name the same prefix. A node with no
+// address at all cannot be placed in a pool: it is quarantined alone.
+func (r *Registry) SpendPool(id, exitIP, reason string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	prefix := exitPrefix(exitIP)
+	spent := 0
+	for _, n := range r.nodes {
+		if _, bad := r.quarantine[n.ID]; bad {
+			continue
+		}
+		// The node that was refused is always quarantined, even when its address was
+		// not observed: the refusal is what happened, and the placement is a guess.
+		same := n.ID == id
+		if !same && prefix != "" {
+			same = sameExitPool(n.ExitIP, exitIP)
+		}
+		if !same {
+			continue
+		}
+		entry := Entry{
+			Node:     n,
+			Standing: StandingQuarantined,
+			Reason:   reason,
+			Since:    time.Now(),
+		}
+		entry.Node.ID = n.ID
+		r.quarantine[n.ID] = entry
+		delete(r.failures, n.ID)
+		spent++
+	}
+	if spent == 0 && id != "" {
+		entry := Entry{Node: r.nodeLocked(id), Standing: StandingQuarantined, Reason: reason, Since: time.Now()}
+		entry.Node.ID = id
+		r.quarantine[id] = entry
+		spent = 1
+	}
+	return spent
+}
+
+// Reset clears the quarantine, keeping the list.
+//
+// It is what a refresh does: the addresses were spent when they were measured, and a
+// pass that brought a new list is evidence that the situation may have changed.
+// Nodes whose address is unchanged are still candidates — the free allowance returns
+// by itself, and refusing to retry them would make an empty pool permanent.
+func (r *Registry) Reset() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cleared := len(r.quarantine)
+	r.quarantine = make(map[string]Entry)
+	r.failures = make(map[string]int)
+	r.cursor = 0
+	r.active = ""
+	return cleared
+}
+
 // Succeed clears the failure count of a node that answered.
 func (r *Registry) Succeed(id string) {
 	r.mu.Lock()

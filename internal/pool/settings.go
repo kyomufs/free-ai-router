@@ -34,6 +34,9 @@ type Settings struct {
 	DeadThreshold    int
 	ReevalMinGap     time.Duration
 	Grace            time.Duration
+	// RebuildLadder is the schedule of rebuild attempts on a list with no usable
+	// node: the pool walks it forward and stops at its end.
+	RebuildLadder []time.Duration
 }
 
 // DefaultSettings returns the measured defaults.
@@ -52,6 +55,10 @@ func DefaultSettings() Settings {
 		DeadThreshold:  2,
 		ReevalMinGap:   10 * time.Minute,
 		Grace:          30 * time.Second,
+		// Ten, twenty, thirty minutes: the allowance returns by itself, and these are
+		// the working numbers for how long that takes. After the last stage the pool
+		// stops rebuilding and says so.
+		RebuildLadder: []time.Duration{10 * time.Minute, 20 * time.Minute, 30 * time.Minute},
 	}
 }
 
@@ -87,6 +94,9 @@ func DecodeSettings(cfg map[string]any) (Settings, error) {
 	s.HealthInterval = durationValue(cfg, "health_interval", s.HealthInterval)
 	s.ReevalMinGap = durationValue(cfg, "reeval_min_gap", s.ReevalMinGap)
 	s.Grace = durationValue(cfg, "grace", s.Grace)
+	if ladder := stringsValue(cfg, "rebuild_ladder"); len(ladder) > 0 {
+		s.RebuildLadder = parseLadder(ladder)
+	}
 	s.ProbeWorkers = intValue(cfg, "probe_workers", s.ProbeWorkers)
 	s.MaxProbe = intValue(cfg, "max_probe", s.MaxProbe)
 	s.MaxNodes = intValue(cfg, "max_nodes", s.MaxNodes)
@@ -114,6 +124,28 @@ func DecodeSettings(cfg map[string]any) (Settings, error) {
 		return s, fmt.Errorf("pool: proxprobe_workdir is required")
 	}
 	return s, nil
+}
+
+// parseLadder reads the rebuild schedule. Values that do not parse are dropped
+// rather than failing the pool: a schedule is a preference, and a typo in one entry
+// must not take the transport away.
+func parseLadder(values []string) []time.Duration {
+	out := make([]time.Duration, 0, len(values))
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			out = append(out, d)
+			continue
+		}
+		// A bare number is read as seconds, which is how a schedule is usually pasted.
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			out = append(out, time.Duration(secs)*time.Second)
+		}
+	}
+	return out
 }
 
 // FirstEvaluation is the anchor of the schedule: the first slot on the given day.

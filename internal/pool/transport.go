@@ -53,6 +53,13 @@ type Transport struct {
 	stateLast  *LastRun
 	evaluating bool
 
+	// exhaustedSince, rebuildStage and rebuildAt drive the ladder of rebuilds on a
+	// list that has no usable node. exhaustionSince is zero while at least one node
+	// can serve, which is what keeps the ladder out of a healthy pool's way.
+	exhaustedSince time.Time
+	rebuildStage   int
+	rebuildAt      time.Time
+
 	reevalMu sync.Mutex
 }
 
@@ -91,7 +98,15 @@ func New(cfg map[string]any, deps Deps) (transport.Transport, error) {
 		Core:     core,
 		Grace:    settings.Grace,
 		Log:      deps.Log,
-		Explain:  t.explain,
+		// The provider classifies its own refusals, and that reading is what tells a
+		// spent exit network from a broken tunnel: a status alone cannot, because one
+		// status carries several meanings here.
+		Classify: deps.Provider.Classify,
+		// An exhausted list renews itself off the request path: the client is refused
+		// at once and the pool rebuilds in the background.
+		Refresh: func() { t.requestRebuild() },
+		Empty:   func() string { return t.exhaustedMessage() },
+		Explain: t.explain,
 	})
 
 	evalConfig := Config{
@@ -173,7 +188,7 @@ func (t *Transport) Start(ctx context.Context) error {
 	t.started = true
 	t.mu.Unlock()
 
-	t.wg.Add(2)
+	t.wg.Add(3)
 	go func() {
 		defer t.wg.Done()
 		t.schedule(runCtx)
@@ -181,6 +196,13 @@ func (t *Transport) Start(ctx context.Context) error {
 	go func() {
 		defer t.wg.Done()
 		t.health(runCtx)
+	}()
+	// The exhaustion ladder is its own loop: it only acts while nothing can serve,
+	// and it is the one path that answers "every server is spent" with a rebuild
+	// instead of waiting for the next scheduled slot.
+	go func() {
+		defer t.wg.Done()
+		t.exhaustionLoop(runCtx)
 	}()
 
 	// Bring a tunnel up at once when the list survived the restart, and check the
@@ -250,7 +272,7 @@ type LastRun struct {
 	Source      string    `json:"source,omitempty"`
 	PassRan     bool      `json:"pass_ran,omitempty"`
 	Parsed      int       `json:"parsed"`
-	HTTPOK      int       `json:"http_ok,omitempty"`
+	TCPOK      int       `json:"tcp_ok,omitempty"`
 	Unsupported int       `json:"unsupported,omitempty"`
 	Probed      int       `json:"probed"`
 	Accepted    int       `json:"accepted"`
@@ -265,7 +287,7 @@ func (r Report) summary() *LastRun {
 		Source:      r.Source,
 		PassRan:     r.PassRan,
 		Parsed:      r.Parsed,
-		HTTPOK:      r.HTTPOK,
+		TCPOK:      r.TCPOK,
 		Unsupported: r.Unsupported,
 		Probed:      r.Probed,
 		Accepted:    r.Accepted,
@@ -409,6 +431,11 @@ func (t *Transport) evaluate(ctx context.Context) {
 
 	report := t.eval.Run(ctx)
 
+	// A run on an exhausted list is one stage of the ladder, whether it found
+	// anything or not: walking it forward on completion is what turns a burst of
+	// retries into the operator's 10/20/30 minutes.
+	t.noteRebuildFinished()
+
 	t.mu.Lock()
 	t.lastReport = report
 	if report.Err != nil {
@@ -420,9 +447,10 @@ func (t *Transport) evaluate(ctx context.Context) {
 	t.mu.Unlock()
 
 	if t.deps.Log != nil {
-		// The middle count is what the pass itself proved: its own http stage, not this
-		// pipeline's.
-		proven := fmt.Sprintf("%d passed the pass", report.HTTPOK)
+		// The middle count is what the pass itself proved: its own TCP stage, not this
+		// pipeline's. Pull mode ranks by dial time and lets the provider speak
+		// through the first real request.
+		proven := fmt.Sprintf("%d passed the pass", report.TCPOK)
 		if report.Err != nil {
 			t.deps.Log.Warn("pool: evaluation failed: %v (%d parsed, %s, %d probed)", report.Err, report.Parsed, proven, report.Probed)
 		} else {
@@ -530,6 +558,156 @@ func (t *Transport) explain() string {
 	}
 	return base
 }
+
+// requestRebuild asks for an evaluation because the list is exhausted.
+//
+// It goes through the same one-pass-at-a-time guard the schedule uses (Recheck),
+// and it is deliberately NOT awaited: the caller is a request that has already been
+// refused, and holding it for a pass that takes minutes would serve nobody.
+func (t *Transport) requestRebuild() {
+	t.mu.Lock()
+	if t.exhaustedSince.IsZero() {
+		t.exhaustedSince = t.now()
+	}
+	t.rebuildAt = t.now()
+	ctx := t.runCtx
+	t.mu.Unlock()
+
+	if ctx == nil {
+		// The pool is not started: nothing can be rebuilt, and the empty list is all
+		// there is.
+		return
+	}
+	t.Recheck(ctx)
+}
+
+// exhaustedMessage is what the client reads once every server has been refused.
+//
+// It says that the pool is out of servers WITH free quota — the distinction the
+// client cannot make itself, since it only ever saw a refusal — and what happens
+// next, because that is the difference between "broken" and "wait".
+func (t *Transport) exhaustedMessage() string {
+	t.mu.Lock()
+	since := t.exhaustedSince
+	stage := t.rebuildStage
+	next := t.rebuildAt
+	t.mu.Unlock()
+
+	base := "every server in the list was refused: the free quota of their addresses is spent"
+	if since.IsZero() {
+		return base
+	}
+	// After the last stage the pool stops rebuilding and says so, rather than
+	// promising a retry that will not come.
+	if stage >= len(t.rebuildLadder()) {
+		return fmt.Sprintf("%s; the pool gave up rebuilding after %s", base, t.now().Sub(since).Round(time.Minute))
+	}
+	if !next.IsZero() {
+		if wait := next.Sub(t.now()); wait > 0 {
+			return fmt.Sprintf("%s; the next rebuild is in %s", base, wait.Round(time.Second))
+		}
+	}
+	return base + "; rebuilding now"
+}
+
+// rebuildLadder is the schedule of attempts on an exhausted list.
+//
+// The ladder is a setting because the right numbers depend on how fast the
+// provider's allowance returns, which differs per service; ten, twenty and thirty
+// minutes are the working set.
+func (t *Transport) rebuildLadder() []time.Duration {
+	if len(t.settings.RebuildLadder) > 0 {
+		return t.settings.RebuildLadder
+	}
+	return []time.Duration{10 * time.Minute, 20 * time.Minute, 30 * time.Minute}
+}
+
+// exhaustionLoop rebuilds an exhausted list on the ladder, and stops at its end.
+//
+// WHY A SEPARATE LOOP. The schedule runs at fixed instants of the day, which is the
+// right pace for a healthy pool and the wrong one for a pool that cannot serve a
+// single request: waiting hours in that state answers every client with a refusal in
+// the meantime. This loop only acts while the list has no usable node, so it costs
+// nothing when the pool is healthy.
+func (t *Transport) exhaustionLoop(ctx context.Context) {
+	for {
+		wait, exhausted := t.nextRebuildWait()
+		if !exhausted {
+			if !sleepCtx(ctx, exhaustionPoll) {
+				return
+			}
+			continue
+		}
+		if wait <= 0 {
+			// A rebuild is due. Run it; the next iteration sizes the next wait.
+			t.evaluate(ctx)
+			if !sleepCtx(ctx, exhaustionPoll) {
+				return
+			}
+			continue
+		}
+		if !sleepCtx(ctx, wait) {
+			return
+		}
+	}
+}
+
+// nextRebuildWait reports how long until the next rebuild and whether the pool is in
+// the exhausted state at all.
+//
+// The ladder is walked forward on every completed attempt and the pool gives up at
+// its end: the number is a bound on how long a client may be told "wait", not a
+// promise that the allowance always returns.
+func (t *Transport) nextRebuildWait() (time.Duration, bool) {
+	if !t.reg.Empty() {
+		t.mu.Lock()
+		t.exhaustedSince = time.Time{}
+		t.rebuildStage = 0
+		t.rebuildAt = time.Time{}
+		t.mu.Unlock()
+		return 0, false
+	}
+	if t.evaluating {
+		// A pass is in flight: it IS the rebuild, and its result sizes the next wait.
+		return exhaustionPoll, true
+	}
+
+	now := t.now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.exhaustedSince.IsZero() {
+		t.exhaustedSince = now
+		t.rebuildAt = now
+	}
+	ladder := t.rebuildLadder()
+	if t.rebuildStage >= len(ladder) {
+		// Out of stages: no further rebuild is scheduled here. The health loop still
+		// checks a serving core, and a new list still arrives on the schedule.
+		return 0, true
+	}
+	if t.rebuildAt.IsZero() {
+		t.rebuildAt = now
+	}
+	return t.rebuildAt.Sub(now), true
+}
+
+// noteRebuildFinished walks the ladder forward after an attempt on an empty list.
+func (t *Transport) noteRebuildFinished() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.exhaustedSince.IsZero() {
+		return
+	}
+	ladder := t.rebuildLadder()
+	if t.rebuildStage < len(ladder) {
+		t.rebuildAt = t.now().Add(ladder[t.rebuildStage])
+	}
+	t.rebuildStage++
+}
+// exhaustionPoll is how often the exhaustion state is re-read while a pass is in
+// flight or the pool is healthy. It is not a retry interval: the ladder decides when
+// a rebuild happens, and this only notices that the state changed.
+const exhaustionPoll = 15 * time.Second
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	if d <= 0 {

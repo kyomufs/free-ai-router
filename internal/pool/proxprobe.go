@@ -20,7 +20,7 @@ const SourceProxprobe = "proxprobe"
 // PassCounts is one proxprobe pass in the terms the interfaces speak.
 type PassCounts struct {
 	Parsed      int
-	HTTPOK      int
+	TCPOK       int
 	Unsupported int
 }
 
@@ -41,21 +41,31 @@ type passRecord struct {
 	} `json:"raw"`
 }
 
-// httpRecord is the part of an http.jsonl line the pool reads.
-type httpRecord struct {
+// tcpRecord is the part of a tcp.jsonl line the pool reads.
+//
+// The pass's TCP stage is the only measurement pull mode admits, so this record —
+// not the http one — is what ranks the list. DialMs is time to a completed
+// handshake, which is what "ping over TCP" means here.
+type tcpRecord struct {
 	ID      string  `json:"id"`
 	OK      bool    `json:"ok"`
-	DelayMS float64 `json:"delay_ms"`
+	DialMs  float64 `json:"dial_ms"`
+	Pool    string  `json:"pool,omitempty"`
+	Address string  `json:"resolved_ip,omitempty"`
 }
 
 // LoadPass reads a finished proxprobe pass.
 //
-// Only the servers that passed the pass's own http stage are taken: an unverified
-// server must not reach the probe, because the probe spends a request of the
-// provider's allowance on whatever it is given.
+// WHO MEASURED WHAT. Pull mode does not spend a provider request to rank its
+// servers: the pass's TCP stage is the measurement, and the order is its dial time,
+// cheapest first. The HTTP stage, when present, is deliberately NOT consulted — a
+// GET through every server of a public subscription costs the very allowance the
+// pool exists to preserve, and its verdict is stale by the time a request needs it.
+// What the provider thinks of a server is settled by the first real request through
+// it, and that verdict is the switcher's to act on (a refusal marks the server).
 //
-// maxAge is checked against the older of the two artifacts: a merged list from an
-// hour ago beside a probe from yesterday describes two different sets of servers.
+// maxAge is checked against the pass's own artifact: a list from an hour ago
+// describes servers the subscription has since moved on from.
 func LoadPass(dir string, maxAge time.Duration, now time.Time) (Pass, error) {
 	pass := Pass{Dir: dir}
 	if strings.TrimSpace(dir) == "" {
@@ -68,15 +78,15 @@ func LoadPass(dir string, maxAge time.Duration, now time.Time) (Pass, error) {
 	}
 	pass.Counts.Parsed = len(records)
 
-	ok, httpAt, err := readHTTP(filepath.Join(dir, "http.jsonl"))
+	alive, tcpAt, err := readTCP(filepath.Join(dir, "tcp.jsonl"))
 	if err != nil {
 		return pass, err
 	}
-	pass.Counts.HTTPOK = len(ok)
+	pass.Counts.TCPOK = len(alive)
 
 	pass.RefreshedAt = mergedAt
-	if httpAt.Before(mergedAt) {
-		pass.RefreshedAt = httpAt
+	if tcpAt.Before(mergedAt) {
+		pass.RefreshedAt = tcpAt
 	}
 	if maxAge > 0 && now.Sub(pass.RefreshedAt) > maxAge {
 		return pass, fmt.Errorf("pool: proxprobe pass is stale: %s old, max %s",
@@ -84,7 +94,7 @@ func LoadPass(dir string, maxAge time.Duration, now time.Time) (Pass, error) {
 	}
 
 	for _, rec := range records {
-		delay, found := ok[rec.ID]
+		measure, found := alive[rec.ID]
 		if !found {
 			continue
 		}
@@ -93,11 +103,15 @@ func LoadPass(dir string, maxAge time.Duration, now time.Time) (Pass, error) {
 			pass.Counts.Unsupported++
 			continue
 		}
-		node.ProbeRTT = time.Duration(delay * float64(time.Millisecond))
+		node.ProbeRTT = time.Duration(measure.dialMS * float64(time.Millisecond))
+		// The pass already resolved the name (and refused a fake-IP answer), so its
+		// record is the authority on where this node exits. Carrying it here is what
+		// lets the exit pool be deduplicated without a second lookup.
+		node.ExitIP = measure.address
 		pass.Nodes = append(pass.Nodes, node)
 	}
 	// The pass ranks nothing itself beyond reachability; the order the probe spends
-	// its budget in is the pass's own measured delay, cheapest first.
+	// its budget in is the pass's own measured dial time, cheapest first.
 	sort.SliceStable(pass.Nodes, func(i, j int) bool {
 		return pass.Nodes[i].ProbeRTT < pass.Nodes[j].ProbeRTT
 	})
@@ -142,23 +156,32 @@ func readMerged(path string) ([]passRecord, time.Time, error) {
 	return records, info.ModTime(), nil
 }
 
-// readHTTP reads the verdicts of the pass's http stage, keyed by node identifier.
-func readHTTP(path string) (map[string]float64, time.Time, error) {
+// tcpMeasure is what the pass measured about one node.
+type tcpMeasure struct {
+	dialMS  float64
+	address string
+}
+
+// readTCP reads the verdicts of the pass's TCP stage, keyed by node identifier.
+//
+// The last verdict for a node is the pass's answer: a node re-probed after a failure
+// is only in the list if that later attempt succeeded.
+func readTCP(path string) (map[string]tcpMeasure, time.Time, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, time.Time{}, fmt.Errorf("pool: proxprobe has no http.jsonl in %s: run proxprobe all first", filepath.Dir(path))
+			return nil, time.Time{}, fmt.Errorf("pool: proxprobe has no tcp.jsonl in %s: run proxprobe ping first, or proxprobe all", filepath.Dir(path))
 		}
-		return nil, time.Time{}, fmt.Errorf("pool: proxprobe http.jsonl: %w", err)
+		return nil, time.Time{}, fmt.Errorf("pool: proxprobe tcp.jsonl: %w", err)
 	}
 	defer file.Close()
 
 	info, err := file.Stat()
 	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("pool: proxprobe http.jsonl: %w", err)
+		return nil, time.Time{}, fmt.Errorf("pool: proxprobe tcp.jsonl: %w", err)
 	}
 
-	ok := make(map[string]float64)
+	alive := make(map[string]tcpMeasure)
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 16*1024), 1024*1024)
 	for scanner.Scan() {
@@ -166,25 +189,23 @@ func readHTTP(path string) (map[string]float64, time.Time, error) {
 		if line == "" {
 			continue
 		}
-		var rec httpRecord
+		var rec tcpRecord
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
 			continue
 		}
 		if rec.ID == "" {
 			continue
 		}
-		// The last verdict for a node is the pass's answer: a node re-probed after a
-		// failure is only in the list if that later attempt succeeded.
 		if rec.OK {
-			ok[rec.ID] = rec.DelayMS
+			alive[rec.ID] = tcpMeasure{dialMS: rec.DialMs, address: rec.Address}
 		} else {
-			delete(ok, rec.ID)
+			delete(alive, rec.ID)
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, time.Time{}, fmt.Errorf("pool: proxprobe http.jsonl: %w", err)
+		return nil, time.Time{}, fmt.Errorf("pool: proxprobe tcp.jsonl: %w", err)
 	}
-	return ok, info.ModTime(), nil
+	return alive, info.ModTime(), nil
 }
 
 // nodeFromClash turns the pass's proxy object into a node.

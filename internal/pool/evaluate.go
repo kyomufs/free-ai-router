@@ -23,7 +23,7 @@ type Report struct {
 	PassRan     bool
 	Parsed      int
 	Unsupported int
-	HTTPOK      int
+	TCPOK      int
 	Probed      int
 	Accepted    int
 	Err         error
@@ -136,11 +136,11 @@ func (e *Evaluator) runProxprobe(ctx context.Context, rep Report) Report {
 		return rep
 	}
 	rep.Parsed = pass.Counts.Parsed
-	rep.HTTPOK = pass.Counts.HTTPOK
+	rep.TCPOK = pass.Counts.TCPOK
 	rep.Unsupported = pass.Counts.Unsupported
 	if len(pass.Nodes) == 0 {
-		rep.Err = fmt.Errorf("proxprobe left no usable server: %d parsed, %d passed its http check, %d unrenderable",
-			pass.Counts.Parsed, pass.Counts.HTTPOK, pass.Counts.Unsupported)
+		rep.Err = fmt.Errorf("proxprobe left no usable server: %d parsed, %d passed its tcp check, %d unrenderable",
+			pass.Counts.Parsed, pass.Counts.TCPOK, pass.Counts.Unsupported)
 		return rep
 	}
 
