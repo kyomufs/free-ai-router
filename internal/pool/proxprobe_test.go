@@ -162,20 +162,46 @@ func TestLoadPassWithoutArtifacts(t *testing.T) {
 // like a dead server rather than a rendering fault. `port` is the counter-case: it IS
 // a number, and it must stay one.
 func TestTheScalarTypeFollowsTheFieldNotTheText(t *testing.T) {
-	if got := clashScalar("short-id", "1"); got != "1" {
+	if got := clashScalar("short-id", "1", false); got != "1" {
 		t.Fatalf("a digit-only short-id must stay a string, got %#v", got)
 	}
-	if got := clashScalar("short-id", "3c"); got != "3c" {
+	if got := clashScalar("short-id", "3c", false); got != "3c" {
 		t.Fatalf("short-id: %#v", got)
 	}
-	if got := clashScalar("port", "443"); got != 443 {
+	if got := clashScalar("port", "443", false); got != 443 {
 		t.Fatalf("a port must be a number, got %#v", got)
 	}
-	if got := clashScalar("tls", "true"); got != true {
+	if got := clashScalar("tls", "true", false); got != true {
 		t.Fatalf("tls must be a boolean, got %#v", got)
 	}
-	if got := clashScalar("name", "123"); got != "123" {
+	if got := clashScalar("name", "123", false); got != "123" {
 		t.Fatalf("a name of digits must stay a string, got %#v", got)
+	}
+}
+
+// TestAQuotedEmptyStringIsNotAnAbsentValue — the quotes are the whole difference.
+//
+// MEASURED 2026-11-05: the exporter writes `grpc-service-name: ""` and `path: ""` for
+// the fields it has nothing to put in. Read literally both are empty, and a reader
+// that maps every empty scalar to nil sends a null where the core expects a string —
+// a gRPC node with a null service name is refused, and every probe through it ends in
+// `EOF`, which reads like a dead server.
+func TestAQuotedEmptyStringIsNotAnAbsentValue(t *testing.T) {
+	key, value, quoted := splitClashPair(`grpc-service-name: ""`)
+	if key != "grpc-service-name" || value != "" || !quoted {
+		t.Fatalf("quoted empty misread: key=%q value=%q quoted=%v", key, value, quoted)
+	}
+	if got := clashScalar(key, value, quoted); got != "" {
+		t.Fatalf("a quoted empty string must stay a string, got %#v", got)
+	}
+
+	// An unquoted empty IS an absent value: that is how a nested head is written.
+	key, value, quoted = splitClashPair(`ws-opts:`)
+	if key != "ws-opts" || value != "" || quoted {
+		t.Fatalf("unquoted head misread: key=%q value=%q quoted=%v", key, value, quoted)
+	}
+	if got := clashScalar(key, value, quoted); got != nil {
+		t.Fatalf("an unquoted empty must be nil, got %#v", got)
 	}
 }
 

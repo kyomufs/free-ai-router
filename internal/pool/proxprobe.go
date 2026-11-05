@@ -295,12 +295,15 @@ func parseClashProxies(r io.Reader) ([]passRecord, error) {
 			nested, nestedOn = nil, ""
 			current = map[string]any{}
 			rest := trimmed[2:]
-			if key, value := splitClashPair(rest); key != "" && value == "" {
+			if key, value, quoted := splitClashPair(rest); key != "" && value == "" && !quoted {
 				// A head with no value: either a nested object (`ws-opts:`) or the head
 				// of a sequence (`alpn:`, whose items are the `- ...` lines that
 				// follow). Both are recorded as an empty mapping here; a sequence turns
-				// into a list when its first item arrives (appendNestedItem), and a
-				// nested object is filled in place.
+				// into a list when its first item arrives, and a nested object is filled
+				// in place.
+				//
+				// A QUOTED empty (`x: ""`) is NOT a head: it is a string field with an
+				// empty value, and treating it as a head would turn it into an object.
 				nested = map[string]any{}
 				nestedOn = key
 				current[key] = nested
@@ -313,11 +316,11 @@ func parseClashProxies(r io.Reader) ([]passRecord, error) {
 			// level (`name:`) is a field of the proxy again — not another item of that
 			// sequence, and not a field of the nested object.
 			nested, nestedOn = nil, ""
-			key, value := splitClashPair(trimmed)
+			key, value, quoted := splitClashPair(trimmed)
 			if key == "" {
 				continue
 			}
-			if value == "" {
+			if value == "" && !quoted {
 				if !clashNestedKeys[key] && key != "alpn" && key != "skip-cert-verify" && !isClashSequenceKey(key) {
 					// An unknown head is refused rather than guessed at: a nested object
 					// this reader was not written for must not reach the core's config.
@@ -372,11 +375,11 @@ func parseClashProxies(r io.Reader) ([]passRecord, error) {
 
 // applyClashScalar writes one `key: value` pair into a proxy.
 func applyClashScalar(target map[string]any, pair string) {
-	key, value := splitClashPair(pair)
+	key, value, quoted := splitClashPair(pair)
 	if key == "" {
 		return
 	}
-	target[key] = clashScalar(key, value)
+	target[key] = clashScalar(key, value, quoted)
 }
 
 // appendClashItem appends one item to a sequence value, turning the empty mapping
@@ -389,13 +392,13 @@ func appendClashItem(current any, item string) any {
 	switch v := current.(type) {
 	case map[string]any:
 		if len(v) == 0 {
-			return []any{clashScalar("alpn", item)}
+			return []any{clashScalar("alpn", item, true)}
 		}
 		return current
 	case []any:
-		return append(v, clashScalar("alpn", item))
+		return append(v, clashScalar("alpn", item, true))
 	default:
-		return []any{clashScalar("alpn", item)}
+		return []any{clashScalar("alpn", item, true)}
 	}
 }
 
@@ -429,7 +432,7 @@ func applyNestedScalar(target map[string]any, pair string, indent int) {
 		}
 		return
 	}
-	key, value := splitClashPair(pair)
+	key, value, quoted := splitClashPair(pair)
 	if key == "" {
 		return
 	}
@@ -438,26 +441,39 @@ func applyNestedScalar(target map[string]any, pair string, indent int) {
 	if indent >= 8 {
 		for _, nestedValue := range target {
 			if headers, ok := nestedValue.(map[string]any); ok {
-				headers[key] = clashScalar(key, value)
+				headers[key] = clashScalar(key, value, quoted)
 				return
 			}
 		}
 	}
-	target[key] = clashScalar(key, value)
+	target[key] = clashScalar(key, value, quoted)
 }
 
 // splitClashPair splits a `key: value` line, trimming the quotes the exporter puts
 // around values that need them (names with emoji, paths).
-func splitClashPair(line string) (key, value string) {
+//
+// A QUOTED EMPTY STRING IS NOT AN ABSENT VALUE. The exporter writes `path: ""` and
+// `grpc-service-name: ""` for fields it has nothing to put in, and the quotes are the
+// whole difference: without them the field is a null, and the core reads a null gRPC
+// service name as a broken node rather than an empty one. The distinction is carried
+// out of here as a bool.
+func splitClashPair(line string) (key, value string, quoted bool) {
 	at := strings.Index(line, ":")
 	if at < 0 {
-		return "", ""
+		return "", "", false
 	}
 	key = strings.TrimSpace(line[:at])
 	value = strings.TrimSpace(line[at+1:])
 	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
-		value = value[1 : len(value)-1]
+		return key, value[1 : len(value)-1], true
 	}
+	return key, value, false
+}
+
+// splitClashPairLoose is splitClashPair for the callers that do not care whether the
+// value was quoted.
+func splitClashPairLoose(line string) (string, string) {
+	key, value, _ := splitClashPair(line)
 	return key, value
 }
 
@@ -489,7 +505,15 @@ var clashBooleanKeys = map[string]bool{
 // clashNumericKeys. Three literal forms are recognised regardless of the key, because
 // they cannot be anything else: the empty flow mappings `{}` and `[]` that the
 // exporter emits for a collection it has nothing to put in.
-func clashScalar(key, value string) any {
+//
+// A QUOTED EMPTY STRING STAYS A STRING (quoted=true), which is the one case the text
+// alone cannot answer: `""` and an absent value both read as empty, and only the
+// quotes say the difference. The exporter quotes exactly the fields it means as
+// strings, so its `grpc-service-name: ""` reaches the core as "" rather than null.
+func clashScalar(key, value string, quoted bool) any {
+	if quoted {
+		return value
+	}
 	switch value {
 	case "null", "~", "":
 		return nil
@@ -506,7 +530,7 @@ func clashScalar(key, value string) any {
 			return n
 		}
 	}
-	// Everything else is a string. That includes a port that arrived quoted, a
+	// Everything else is a string. That includes a port that arrived unquoted, a
 	// short-id of digits, and a name that is nothing but digits.
 	return value
 }
