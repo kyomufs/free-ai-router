@@ -435,13 +435,21 @@ func TestTheWaitAfterAFailureShrinksTowardsTheTtl(t *testing.T) {
 		t.Fatalf("the wait after a good read = %v, want %v", got, listTTL)
 	}
 
-	// The ladder is capped by the TTL, and a failure AT the TTL comes back to the
-	// short retry: a service that recovers after a long outage must be noticed in
-	// seconds, not at the end of another interval.
-	if got := nextWait(false, 4*listTTL/5); got != listTTL {
-		t.Fatalf("the ladder sailed past the TTL: %v, want %v", got, listTTL)
+	// The ladder is capped by maxRetryDelay, NOT by the TTL.
+	//
+	// Measured on 2026-11-05: an outage that ended while the backoff stood in
+	// the minutes left the poller silent, /v1/models answered {"data":[]} and
+	// the provider vanished from the client's selector. The cap is what keeps a
+	// recovered uplink from waiting out an interval sized for an unreachable
+	// one.
+	if got := nextWait(false, maxRetryDelay/2); got != maxRetryDelay {
+		t.Fatalf("the ladder sailed past the retry cap: %v, want %v", got, maxRetryDelay)
 	}
-	if got := nextWait(false, listTTL); got != firstRetryDelay {
-		t.Fatalf("the wait after a failure at the TTL = %v, want %v", got, firstRetryDelay)
+	if got := nextWait(false, maxRetryDelay); got != maxRetryDelay {
+		t.Fatalf("the wait at the retry cap = %v, want %v", got, maxRetryDelay)
+	}
+	if maxRetryDelay >= listTTL {
+		t.Fatalf("the retry cap %v is not shorter than the TTL %v — a recovered "+
+			"uplink would wait out a full interval", maxRetryDelay, listTTL)
 	}
 }

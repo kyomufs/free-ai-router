@@ -59,9 +59,26 @@ const (
 	// of silence. A network that went away for twenty seconds comes back in
 	// twenty seconds, and a gateway that waits five minutes to notice is a
 	// gateway that reports an empty catalog long after the models are served
-	// again. The retry backs off from here towards listTTL, so an unreachable
-	// service is still asked rarely.
+	// again. The retry backs off from here towards maxRetryDelay, so an
+	// unreachable service is still asked rarely.
 	firstRetryDelay = 5 * time.Second
+
+	// maxRetryDelay caps the backoff between failed polls.
+	//
+	// WHY IT IS NOT listTTL. Measured on 2026-11-05: the host lost its network
+	// at 13:14 while the catalog was being warmed up, and the poller's backoff
+	// climbed 5→10→20→40→80→160→320s. The network came back — curl to the
+	// service answered 200 by 13:31 — but the next poll was still minutes away,
+	// so /v1/models kept answering {"data":[]} and every client saw the
+	// provider as missing with no model to select. Backing off towards listTTL
+	// made a fifteen-minute silence out of a twenty-second outage.
+	//
+	// A minute is the compromise: an unreachable service is still asked rarely
+	// (1.4k polls a day is nothing next to the requests that matter), while an
+	// outage that has ended is noticed within a minute rather than within a
+	// quarter of an hour. The successful path is untouched — a good read still
+	// returns listTTL.
+	maxRetryDelay = time.Minute
 
 	// metaTTL is the shelf life of model properties. They change even more
 	// rarely than the list.
@@ -277,18 +294,18 @@ func firstWait(warm bool) time.Duration {
 // nextWait sizes the wait that follows an attempt.
 //
 // Separate from the loop so the ladder is readable — and testable — on its own:
-// the interval is the TTL after a good read, doubles towards it while it keeps
-// failing, and returns to firstRetryDelay once the TTL itself has failed, so that
-// a service that comes back after a long outage is noticed in seconds rather
-// than at the end of another interval.
+// the interval is the TTL after a good read, doubles while it keeps failing,
+// and is capped at maxRetryDelay so that a service which comes back after a
+// long outage is noticed within a minute rather than at the end of another
+// interval.
 func nextWait(ok bool, wait time.Duration) time.Duration {
 	switch {
 	case ok:
 		return listTTL
-	case wait < listTTL:
-		return min(2*wait, listTTL)
+	case wait < maxRetryDelay:
+		return min(2*wait, maxRetryDelay)
 	default:
-		return firstRetryDelay
+		return maxRetryDelay
 	}
 }
 
