@@ -72,13 +72,13 @@ func LoadPass(dir string, maxAge time.Duration, now time.Time) (Pass, error) {
 		return pass, errors.New("pool: proxprobe work directory is empty")
 	}
 
-	records, mergedAt, err := readMerged(filepath.Join(dir, "merged.jsonl"))
+	records, mergedAt, err := readMerged(passArtifact(dir, "merged.jsonl"))
 	if err != nil {
 		return pass, err
 	}
 	pass.Counts.Parsed = len(records)
 
-	alive, tcpAt, err := readTCP(filepath.Join(dir, "tcp.jsonl"))
+	alive, tcpAt, err := readTCP(passArtifact(dir, "tcp.jsonl"))
 	if err != nil {
 		return pass, err
 	}
@@ -116,6 +116,27 @@ func LoadPass(dir string, maxAge time.Duration, now time.Time) (Pass, error) {
 		return pass.Nodes[i].ProbeRTT < pass.Nodes[j].ProbeRTT
 	})
 	return pass, nil
+}
+
+// passArtifact locates one of the pass's files inside its work directory.
+//
+// THE LAYOUT MOVED. proxprobe keeps its artifacts under a per-step subdirectory
+// (probe/ for merged.jsonl and tcp.jsonl, clash/ for the profiles) — the layout
+// package says so and the pass writes them there. This loader used to look in the
+// work directory's root, where nothing had been written since the move: a run left
+// fresh files in probe/ while the pool read a five-day-old merged.jsonl from the
+// root and reported "the pass is stale" on every evaluation.
+//
+// Both spellings are accepted rather than only the new one: an operator who has
+// artifacts from an older proxprobe, or who points the work directory at a copy
+// laid out flat, gets the same reading. The subdirectory wins when both exist,
+// because that is where the current pass writes.
+func passArtifact(dir, name string) string {
+	nested := filepath.Join(dir, "probe", name)
+	if _, err := os.Stat(nested); err == nil {
+		return nested
+	}
+	return filepath.Join(dir, name)
 }
 
 // readMerged reads every node the pass produced, in file order.
