@@ -152,6 +152,33 @@ func TestLoadPassWithoutArtifacts(t *testing.T) {
 	}
 }
 
+// TestTheScalarTypeFollowsTheFieldNotTheText — a value that reads as digits is not
+// automatically a number.
+//
+// MEASURED 2026-11-05: `short-id: 1` was read as the number 1 while `short-id: 3c` was
+// read as a string — the same field with two types, decided by nothing but the text.
+// The core takes the reality short-id as a string, and the node whose value happened
+// to be all digits was rejected; every probe through it ended in `EOF`, which reads
+// like a dead server rather than a rendering fault. `port` is the counter-case: it IS
+// a number, and it must stay one.
+func TestTheScalarTypeFollowsTheFieldNotTheText(t *testing.T) {
+	if got := clashScalar("short-id", "1"); got != "1" {
+		t.Fatalf("a digit-only short-id must stay a string, got %#v", got)
+	}
+	if got := clashScalar("short-id", "3c"); got != "3c" {
+		t.Fatalf("short-id: %#v", got)
+	}
+	if got := clashScalar("port", "443"); got != 443 {
+		t.Fatalf("a port must be a number, got %#v", got)
+	}
+	if got := clashScalar("tls", "true"); got != true {
+		t.Fatalf("tls must be a boolean, got %#v", got)
+	}
+	if got := clashScalar("name", "123"); got != "123" {
+		t.Fatalf("a name of digits must stay a string, got %#v", got)
+	}
+}
+
 // TestThePassProfileIsRenderedAsItIs: the pass already speaks the core's dialect, and
 // the long tail (xhttp, packet-encoding) survives only when it is not re-derived.
 func TestThePassProfileIsRenderedAsItIs(t *testing.T) {

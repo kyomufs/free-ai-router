@@ -376,7 +376,7 @@ func applyClashScalar(target map[string]any, pair string) {
 	if key == "" {
 		return
 	}
-	target[key] = clashScalar(value)
+	target[key] = clashScalar(key, value)
 }
 
 // appendClashItem appends one item to a sequence value, turning the empty mapping
@@ -389,13 +389,13 @@ func appendClashItem(current any, item string) any {
 	switch v := current.(type) {
 	case map[string]any:
 		if len(v) == 0 {
-			return []any{clashScalar(item)}
+			return []any{clashScalar("alpn", item)}
 		}
 		return current
 	case []any:
-		return append(v, clashScalar(item))
+		return append(v, clashScalar("alpn", item))
 	default:
-		return []any{clashScalar(item)}
+		return []any{clashScalar("alpn", item)}
 	}
 }
 
@@ -438,12 +438,12 @@ func applyNestedScalar(target map[string]any, pair string, indent int) {
 	if indent >= 8 {
 		for _, nestedValue := range target {
 			if headers, ok := nestedValue.(map[string]any); ok {
-				headers[key] = clashScalar(value)
+				headers[key] = clashScalar(key, value)
 				return
 			}
 		}
 	}
-	target[key] = clashScalar(value)
+	target[key] = clashScalar(key, value)
 }
 
 // splitClashPair splits a `key: value` line, trimming the quotes the exporter puts
@@ -461,16 +461,36 @@ func splitClashPair(line string) (key, value string) {
 	return key, value
 }
 
-// clashScalar turns a written YAML scalar into the Go value the core's config
-// needs: a number stays a number, a boolean stays a boolean, everything else is a
-// string. The exporter writes exactly these three kinds, plus the empty flow
-// mappings `{}` and `[]` it emits for a list it has nothing to put in.
-func clashScalar(value string) any {
+// clashNumericKeys are the fields the core reads as a NUMBER.
+//
+// WHY A LIST AND NOT A GUESS. A YAML scalar that happens to look like digits is not
+// a number: `short-id: 1` and `short-id: 283918a3` are both strings in the reality
+// options, and a reader that infers the type from the text turns the first into a
+// number and the second into a string — the same field, two types, and the core
+// rejects the connection for the one it read as a number. The kind follows the FIELD,
+// which is what this list states.
+var clashNumericKeys = map[string]bool{
+	"port":    true,
+	"alterId": true,
+	"mtu":     true,
+}
+
+// clashBooleanKeys are the fields the core reads as a BOOLEAN.
+var clashBooleanKeys = map[string]bool{
+	"tls":             true,
+	"udp":             true,
+	"skip-cert-verify": true,
+	"tfo":             true,
+}
+
+// clashScalar turns a written YAML scalar into the Go value the core's config needs.
+//
+// The type is taken from the KEY, never from how the value happens to read — see
+// clashNumericKeys. Three literal forms are recognised regardless of the key, because
+// they cannot be anything else: the empty flow mappings `{}` and `[]` that the
+// exporter emits for a collection it has nothing to put in.
+func clashScalar(key, value string) any {
 	switch value {
-	case "true":
-		return true
-	case "false":
-		return false
 	case "null", "~", "":
 		return nil
 	case "{}":
@@ -478,9 +498,16 @@ func clashScalar(value string) any {
 	case "[]":
 		return []any{}
 	}
-	if n, err := strconv.Atoi(value); err == nil {
-		return n
+	if clashBooleanKeys[key] {
+		return value == "true"
 	}
+	if clashNumericKeys[key] {
+		if n, err := strconv.Atoi(value); err == nil {
+			return n
+		}
+	}
+	// Everything else is a string. That includes a port that arrived quoted, a
+	// short-id of digits, and a name that is nothing but digits.
 	return value
 }
 
