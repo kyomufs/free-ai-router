@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,6 +23,7 @@ const SourceProxprobe = "proxprobe"
 type PassCounts struct {
 	Parsed      int
 	TCPOK       int
+	NoTCP       int
 	Unsupported int
 }
 
@@ -48,6 +51,8 @@ type passRecord struct {
 // handshake, which is what "ping over TCP" means here.
 type tcpRecord struct {
 	ID      string  `json:"id"`
+	Server  string  `json:"server"`
+	Port    int     `json:"port"`
 	OK      bool    `json:"ok"`
 	DialMs  float64 `json:"dial_ms"`
 	Pool    string  `json:"pool,omitempty"`
@@ -72,7 +77,7 @@ func LoadPass(dir string, maxAge time.Duration, now time.Time) (Pass, error) {
 		return pass, errors.New("pool: proxprobe work directory is empty")
 	}
 
-	records, mergedAt, err := readMerged(passArtifact(dir, "merged.jsonl"))
+	records, mergedAt, err := readClashProxies(clashProfilePath(dir))
 	if err != nil {
 		return pass, err
 	}
@@ -94,13 +99,26 @@ func LoadPass(dir string, maxAge time.Duration, now time.Time) (Pass, error) {
 	}
 
 	for _, rec := range records {
-		measure, found := alive[rec.ID]
-		if !found {
-			continue
-		}
+		// THE JOIN KEY IS server:port, not the pass's node id.
+		//
+		// proxprobe's id (proto|server|port|12-hex-of-credential-network-trust) cannot
+		// be rebuilt from the exported profile: the credential and the reality trust
+		// are inside the share link, and the profile spells them differently. The
+		// address pair is what BOTH artifacts name, and it is also the pool key the
+		// exit-pool deduplication already works on.
 		node, err := nodeFromClash(rec.ID, rec.Raw.Clash)
 		if err != nil {
 			pass.Counts.Unsupported++
+			continue
+		}
+		measure, found := alive[poolKeyOf(node)]
+		if !found {
+			// The pass's TCP stage did not admit this address, so it is not a
+			// candidate. It is NOT "unrenderable": the profile rendered it perfectly
+			// well. The two counts answer different questions — one is about this
+			// loader, the other about the pass — and conflating them made a healthy run
+			// report a hundred unrenderable nodes.
+			pass.Counts.NoTCP++
 			continue
 		}
 		node.ProbeRTT = time.Duration(measure.dialMS * float64(time.Millisecond))
@@ -137,6 +155,357 @@ func passArtifact(dir, name string) string {
 		return nested
 	}
 	return filepath.Join(dir, name)
+}
+
+// clashProfilePath is the profile the pass exports, with its proxies.
+//
+// WHY THIS FILE AND NOT merged.jsonl. A pass run WITHOUT the probe step — which is
+// how this pool runs it, because the probe spends one provider request per node —
+// leaves merged.jsonl carrying only `raw.link`, the share link as it was
+// subscribed. The Clash profile of a node is not in there at all: it is built by
+// the export step (proxprobe's emit), which renders the core's own dialect into
+// clash/merged.yaml. Reading merged.jsonl was therefore reading a file that could
+// not answer, and every node came out "unrenderable".
+func clashProfilePath(dir string) string {
+	nested := filepath.Join(dir, "clash", "merged.yaml")
+	if _, err := os.Stat(nested); err == nil {
+		return nested
+	}
+	return filepath.Join(dir, "clash.yaml")
+}
+
+// clashSequenceKeys are the fields the exporter writes as a YAML sequence inside a
+// proxy. Only `alpn` exists today; the list is closed for the same reason the nested
+// one is — a key this reader was not written for must not be guessed at.
+var clashSequenceKeys = map[string]bool{"alpn": true}
+
+// isClashSequenceKey reports whether a head with no value opens a sequence.
+func isClashSequenceKey(key string) bool { return clashSequenceKeys[key] }
+
+// clashNestedKeys are the mappings the exporter nests inside a proxy.
+//
+// The list is closed on purpose. proxprobe's emit builds a proxy from a fixed field
+// set, and these three are the only objects in it — a fourth would mean the profile
+// has a shape this reader was not written for, and interpreting it would put a
+// proxy into the core's config that the exporter never wrote.
+var clashNestedKeys = map[string]bool{
+	"ws-opts":      true,
+	"grpc-opts":    true,
+	"reality-opts": true,
+}
+
+// readClashProxies reads the proxies of the pass's exported Clash profile.
+//
+// WHY A HAND-WRITTEN READER AND NOT A YAML LIBRARY. The profile is written by
+// proxprobe's own exporter, and the shape it produces is bounded and known: a
+// `proxies:` key whose value is a list of flat mappings (`name`, `type`, `server`,
+// `port`, the credential, the transport, the security flags), with exactly two
+// nested mappings in the whole schema — `ws-opts` and `grpc-opts`. A YAML library
+// would be a new dependency for free-ai-router to parse a file this project's
+// sibling writes, and the two spellings it cannot express are simply refused
+// rather than guessed at.
+//
+// The reader keeps each proxy as a JSON object, which is what nodeFromClash
+// consumes and what the pool renders into the core's config VERBATIM — a proxy
+// re-derived from typed fields would lose the long tail (packet-encoding, the
+// reality options' spelling) that only exists in the profile.
+func readClashProxies(path string) ([]passRecord, time.Time, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, time.Time{}, fmt.Errorf("pool: proxprobe has no Clash profile in %s: run the pass (proxprobe export) first", filepath.Dir(path))
+		}
+		return nil, time.Time{}, fmt.Errorf("pool: proxprobe Clash profile: %w", err)
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("pool: proxprobe Clash profile: %w", err)
+	}
+
+	records, err := parseClashProxies(file)
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("pool: proxprobe Clash profile: %w", err)
+	}
+	return records, info.ModTime(), nil
+}
+
+// parseClashProxies walks the `proxies:` list and returns one record per entry.
+//
+// The parser is a line reader with one level of indentation tracking, because that
+// is all the exporter's output needs. Two things are refused rather than
+// interpreted: a line it cannot place, and a nested mapping inside a proxy other
+// than the two that exist in the schema. Guessing at either would put a proxy into
+// the core's config that the exporter never wrote.
+func parseClashProxies(r io.Reader) ([]passRecord, error) {
+	var (
+		out      []passRecord
+		current  map[string]any
+		nested   map[string]any // the ws-opts / grpc-opts object of the current proxy
+		inList   bool
+		nestedOn string
+	)
+
+	flush := func() {
+		if current == nil {
+			return
+		}
+		key, ok := current["name"].(string)
+		if !ok || key == "" {
+			key = stringOr(current["server"], "")
+		}
+		raw, err := json.Marshal(current)
+		if err == nil {
+			out = append(out, passRecord{ID: proxyID(key, current), Raw: struct {
+				Clash json.RawMessage `json:"clash"`
+			}{Clash: raw}})
+		}
+		current = nil
+	}
+
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+
+		switch {
+		case indent == 0:
+			// A top-level key ends the list.
+			flush()
+			nested, nestedOn = nil, ""
+			inList = strings.HasPrefix(trimmed, "proxies:")
+		case !inList:
+			// Some other top-level document: ignore it.
+		case strings.HasPrefix(trimmed, "- ") && indent <= 2:
+			// A new list item begins a new proxy. The exporter writes the fields in
+			// Go's map order, so the FIRST field is often the nested object itself
+			// (`- grpc-opts:`), and that line opens both the item and the nesting.
+			//
+			// The indent guard is what keeps a YAML SEQUENCE VALUE from being read as a
+			// new proxy: `- alpn:` is followed by its items (`- http/1.1`) indented at 6,
+			// and without the guard every item of every list became a proxy of its own —
+			// which is how a profile of 202 entries produced a hundred empty ones.
+			flush()
+			nested, nestedOn = nil, ""
+			current = map[string]any{}
+			rest := trimmed[2:]
+			if key, value := splitClashPair(rest); key != "" && value == "" {
+				// A head with no value: either a nested object (`ws-opts:`) or the head
+				// of a sequence (`alpn:`, whose items are the `- ...` lines that
+				// follow). Both are recorded as an empty mapping here; a sequence turns
+				// into a list when its first item arrives (appendNestedItem), and a
+				// nested object is filled in place.
+				nested = map[string]any{}
+				nestedOn = key
+				current[key] = nested
+			} else {
+				applyClashScalar(current, rest)
+			}
+		case current != nil && indent == 4:
+			// A field of the proxy itself. It CLOSES any nesting the previous line
+			// opened: `alpn:` followed by `- h2` is a sequence, and the next line at this
+			// level (`name:`) is a field of the proxy again — not another item of that
+			// sequence, and not a field of the nested object.
+			nested, nestedOn = nil, ""
+			key, value := splitClashPair(trimmed)
+			if key == "" {
+				continue
+			}
+			if value == "" {
+				if !clashNestedKeys[key] && key != "alpn" && key != "skip-cert-verify" && !isClashSequenceKey(key) {
+					// An unknown head is refused rather than guessed at: a nested object
+					// this reader was not written for must not reach the core's config.
+					return nil, fmt.Errorf("unsupported nested key %q in a proxy", key)
+				}
+				nested = map[string]any{}
+				nestedOn = key
+				current[key] = nested
+				continue
+			}
+			applyClashScalar(current, trimmed)
+		case current != nil && strings.HasPrefix(trimmed, "- "):
+			// An item of a YAML sequence that belongs to a field of the current proxy
+			// (`alpn:` followed by `- h2`, `- http/1.1`). The fields the core needs are
+			// scalars, and a list is carried for reference only — it is recorded as the
+			// list it is, so nothing is invented for the core's config.
+			//
+			// The target is looked up in the proxy rather than held in a variable: the
+			// head line records an empty mapping when the list is empty, and the first
+			// item REPLACES that value with a list, so a variable captured at the head
+			// would go on filling an object nothing points at any more.
+			if nestedOn != "" {
+				if list, ok := current[nestedOn]; ok {
+					current[nestedOn] = appendClashItem(list, trimmed[2:])
+					nested, _ = current[nestedOn].(map[string]any)
+				}
+			}
+		case current != nil && nestedOn != "" && indent >= 6:
+			// A field of the nested object, one level deeper than the proxy's own
+			// fields: ws-opts.path (6), grpc-opts.grpc-service-name (6),
+			// ws-opts.headers.Host (8). The threshold is 6, not 4 — a proxy's own
+			// fields sit at 4, and treating those as nested folded whole proxies into
+			// the object that preceded them.
+			applyNestedScalar(nested, trimmed, indent)
+		case current != nil && nestedOn == "":
+			// A line deeper than a field, with no object open: nothing in the exporter's
+			// output looks like this, so it is refused rather than ignored.
+			return nil, fmt.Errorf("unsupported indentation in a proxy: %q", trimmed)
+		case current != nil:
+			applyNestedScalar(nested, trimmed, indent)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	flush()
+	if len(out) == 0 {
+		return nil, errors.New("the profile declares no proxies")
+	}
+	return out, nil
+}
+
+// applyClashScalar writes one `key: value` pair into a proxy.
+func applyClashScalar(target map[string]any, pair string) {
+	key, value := splitClashPair(pair)
+	if key == "" {
+		return
+	}
+	target[key] = clashScalar(value)
+}
+
+// appendClashItem appends one item to a sequence value, turning the empty mapping
+// the head line left behind into a list on first use.
+//
+// The head of a sequence is written as `alpn:` with its items below it, and nothing in
+// the line says "list" — so the reader records an empty mapping at the head and
+// converts it here, when the first item makes the kind known.
+func appendClashItem(current any, item string) any {
+	switch v := current.(type) {
+	case map[string]any:
+		if len(v) == 0 {
+			return []any{clashScalar(item)}
+		}
+		return current
+	case []any:
+		return append(v, clashScalar(item))
+	default:
+		return []any{clashScalar(item)}
+	}
+}
+
+// findClashObject returns the first nested object of a proxy, for the readers that
+// need to descend one level without naming the key.
+func findClashObject(proxy map[string]any) map[string]any {
+	for _, value := range proxy {
+		if obj, ok := value.(map[string]any); ok {
+			return obj
+		}
+	}
+	return nil
+}
+
+// applyNestedScalar writes one pair into a nested object.
+//
+// The exporter nests two levels at most: `<x>-opts` → a scalar field, and
+// `ws-opts.headers` → `Host`. A line indented deeper than the object's own fields is
+// therefore a field of `headers` and goes there rather than overwriting it; at the
+// object's own level it is a plain field.
+func applyNestedScalar(target map[string]any, pair string, indent int) {
+	if target == nil {
+		return
+	}
+	if strings.HasSuffix(strings.TrimSpace(pair), ":") {
+		// The head of a deeper mapping (`headers:`), which the exporter writes at one
+		// level below the object's fields.
+		key := strings.TrimSuffix(strings.TrimSpace(pair), ":")
+		if _, ok := target[key]; !ok {
+			target[key] = map[string]any{}
+		}
+		return
+	}
+	key, value := splitClashPair(pair)
+	if key == "" {
+		return
+	}
+	// A line deeper than the object's own fields belongs to the mapping that was
+	// opened last (the `headers` object).
+	if indent >= 8 {
+		for _, nestedValue := range target {
+			if headers, ok := nestedValue.(map[string]any); ok {
+				headers[key] = clashScalar(value)
+				return
+			}
+		}
+	}
+	target[key] = clashScalar(value)
+}
+
+// splitClashPair splits a `key: value` line, trimming the quotes the exporter puts
+// around values that need them (names with emoji, paths).
+func splitClashPair(line string) (key, value string) {
+	at := strings.Index(line, ":")
+	if at < 0 {
+		return "", ""
+	}
+	key = strings.TrimSpace(line[:at])
+	value = strings.TrimSpace(line[at+1:])
+	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+		value = value[1 : len(value)-1]
+	}
+	return key, value
+}
+
+// clashScalar turns a written YAML scalar into the Go value the core's config
+// needs: a number stays a number, a boolean stays a boolean, everything else is a
+// string. The exporter writes exactly these three kinds, plus the empty flow
+// mappings `{}` and `[]` it emits for a list it has nothing to put in.
+func clashScalar(value string) any {
+	switch value {
+	case "true":
+		return true
+	case "false":
+		return false
+	case "null", "~", "":
+		return nil
+	case "{}":
+		return map[string]any{}
+	case "[]":
+		return []any{}
+	}
+	if n, err := strconv.Atoi(value); err == nil {
+		return n
+	}
+	return value
+}
+
+// proxyID mints the identifier the TCP artifact is joined by.
+//
+// The exporter does not carry proxprobe's node id into the profile, so the join
+// key is rebuilt from what the profile does name: the server and the port, plus
+// the protocol. It matches the way this package's nodes are identified on the wire
+// (`proto|server|port`), which is what PoolKey uses downstream.
+func proxyID(name string, proxy map[string]any) string {
+	proto := stringOr(proxy["type"], "")
+	server := stringOr(proxy["server"], "")
+	port := fmt.Sprint(proxy["port"])
+	if server == "" {
+		return name
+	}
+	return strings.Join([]string{proto, server, port}, "|")
+}
+
+// stringOr returns the string value of v, or def.
+func stringOr(v any, def string) string {
+	if s, ok := v.(string); ok && s != "" {
+		return s
+	}
+	return def
 }
 
 // readMerged reads every node the pass produced, in file order.
@@ -217,16 +586,37 @@ func readTCP(path string) (map[string]tcpMeasure, time.Time, error) {
 		if rec.ID == "" {
 			continue
 		}
+		// The key is the address pair, not the pass's id: the exported profile does
+		// not carry the id, and server:port is what both artifacts name (see the join
+		// in LoadPass).
+		key := poolKeyOfRaw(rec.Server, rec.Port)
+		if key == "" {
+			continue
+		}
 		if rec.OK {
-			alive[rec.ID] = tcpMeasure{dialMS: rec.DialMs, address: rec.Address}
+			alive[key] = tcpMeasure{dialMS: rec.DialMs, address: rec.Address}
 		} else {
-			delete(alive, rec.ID)
+			delete(alive, key)
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, time.Time{}, fmt.Errorf("pool: proxprobe tcp.jsonl: %w", err)
 	}
 	return alive, info.ModTime(), nil
+}
+
+// poolKeyOf is the address pair of a node, as the pass writes it into tcp.jsonl.
+func poolKeyOf(n Node) string { return poolKeyOfRaw(n.Host, n.Port) }
+
+// poolKeyOfRaw builds the join key from a host and a port.
+//
+// Lowercased, because DNS names are case-insensitive and a subscription that spells
+// one server two ways would otherwise miss its own measurement.
+func poolKeyOfRaw(host string, port int) string {
+	if host == "" || port == 0 {
+		return ""
+	}
+	return strings.ToLower(host) + ":" + strconv.Itoa(port)
 }
 
 // nodeFromClash turns the pass's proxy object into a node.
