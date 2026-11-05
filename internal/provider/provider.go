@@ -289,8 +289,8 @@ type Failure struct {
 	// A judgement of its own, and the only one that a different exit can answer:
 	// another key does not help, waiting does not help, another model does not
 	// help, and repeating the same request from the same address is exactly what
-	// the refusal asks one not to do. Consumed by the pool transport, which
-	// promotes servers by this verdict; inert for every other caller.
+	// the refusal asks one not to do. No caller acts on it today: the only
+	// transport is direct, and it cannot change the exit address.
 	AddressRejected bool
 }
 

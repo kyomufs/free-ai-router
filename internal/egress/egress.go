@@ -518,8 +518,8 @@ func (r *Resolver) resolve(ctx context.Context, family string) (string, error) {
 
 // Observe asks the echo service for the address the request came from.
 //
-// Exported because the pool transport measures the same thing through a tunnel:
-// the address the provider will see as the source is exactly this answer.
+// Exported because a transport that egresses through a tunnel measures the same
+// thing there: the address the provider will see as the source is this answer.
 func Observe(ctx context.Context, rt http.RoundTripper, target string) (string, error) {
 	if rt == nil {
 		return "", fmt.Errorf("no transport")
